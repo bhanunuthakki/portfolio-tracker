@@ -17,6 +17,7 @@ interface ChartRow {
   portfolio: number | null;
   spy: number | null;
   qqq: number | null;
+  policy: number | null;
 }
 
 export function PerformanceChart({ series }: { series: PerformanceSeries }): JSX.Element {
@@ -33,7 +34,10 @@ export function PerformanceChart({ series }: { series: PerformanceSeries }): JSX
     portfolio: parseFloat(p.portfolio_return_pct),
     spy: p.spy_return_pct !== null ? parseFloat(p.spy_return_pct) : null,
     qqq: p.qqq_return_pct !== null ? parseFloat(p.qqq_return_pct) : null,
+    policy: p.policy_return_pct !== null ? parseFloat(p.policy_return_pct) : null,
   }));
+
+  const hasPolicy = data.some((d) => d.policy !== null);
 
   return (
     <div>
@@ -49,7 +53,9 @@ export function PerformanceChart({ series }: { series: PerformanceSeries }): JSX
             />
             <Tooltip
               formatter={(value: number) =>
-                typeof value === "number" ? `${value >= 0 ? "+" : ""}${value.toFixed(1)}%` : value
+                typeof value === "number"
+                  ? `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`
+                  : value
               }
             />
             <ReferenceLine y={0} stroke="#94a3b8" strokeDasharray="2 2" />
@@ -63,6 +69,17 @@ export function PerformanceChart({ series }: { series: PerformanceSeries }): JSX
               dot={false}
               isAnimationActive={false}
             />
+            {hasPolicy && (
+              <Line
+                type="monotone"
+                dataKey="policy"
+                name="Policy (matched flows)"
+                stroke="#0d9488"
+                strokeWidth={1.75}
+                dot={false}
+                isAnimationActive={false}
+              />
+            )}
             <Line
               type="monotone"
               dataKey="spy"
@@ -85,11 +102,11 @@ export function PerformanceChart({ series }: { series: PerformanceSeries }): JSX
         </ResponsiveContainer>
       </div>
       <p className="mt-2 text-xs text-slate-500">
-        % return uses Modified Dietz with money-flow matching. The SPY and QQQ
+        % return uses Modified Dietz with money-flow matching. The benchmark
         lines are <em>synthetic portfolios</em> with the same starting value
         and the same contribution dates / amounts as yours, but invested in
-        the index. The gap between your line and theirs is true relative
-        performance — V<sub>start</sub> bias cancels in the comparison.
+        the index or your policy mix. The gap between your line and theirs
+        is true relative performance.
       </p>
     </div>
   );

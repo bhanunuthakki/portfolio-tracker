@@ -1,27 +1,28 @@
-"""Portfolio beta, alpha, and R^2 vs a benchmark.
+"""Risk metrics relative to a benchmark or in absolute terms.
 
-Beta is the slope of the linear regression of portfolio daily returns
-against benchmark daily returns:
+Beta + alpha + R² (regression-based, single-factor) describe the
+portfolio's relationship to the benchmark. Sharpe / Sortino / Information
+Ratio describe the portfolio in absolute / vs-benchmark terms.
 
-    R_p(d) = α + β · R_m(d) + ε
+  * **Beta**             slope of portfolio daily returns regressed on
+                         benchmark daily returns
+  * **Alpha (annualized)** intercept × 252 (the regression's "this much
+                         excess return per year unrelated to beta")
+  * **R²**               share of portfolio variance explained by the
+                         benchmark (low R² ⇒ beta is a weak summary)
+  * **Sharpe ratio**     (R̄_p − R̄_f) / σ_p, annualized — risk-adjusted
+                         return vs cash; benchmark-independent
+  * **Sortino ratio**    same but uses downside deviation instead of σ_p;
+                         doesn't penalize upside volatility
+  * **Information ratio** (R̄_p − R̄_b) / σ(R_p − R_b), annualized — how
+                         consistently the portfolio outperforms the
+                         benchmark per unit of tracking error
 
-  * β > 1   → portfolio swings more than the benchmark
-  * β = 1   → moves in lockstep
-  * β < 1   → less volatile than the benchmark
-  * β < 0   → moves opposite to the benchmark
-
-Alpha is the intercept — the average daily excess return not explained by
-beta (annualized for display). R² indicates how much of the portfolio's
-day-to-day variation is explained by the benchmark; low R² (say <0.3) means
-beta is a bad summary of the relationship.
-
-Daily returns are computed:
-  * Portfolio: r_p(d) = (V(d) − V(d−1) − cf(d)) / V(d−1)
-  * Benchmark: r_m(d) = (close(d) − close(d−1)) / close(d−1)
-
-Days are paired by date — anything missing from either side is dropped.
-Days with reconstructed values that swung > 30% are also dropped as
-likely backfill artifacts.
+The benchmark may be:
+  * A symbol in the `benchmarks` table (`SPY`, `QQQ`, anything you've
+    pulled prices for)
+  * The literal string `POLICY`, in which case the benchmark daily return
+    is the weight-weighted sum of the user's policy components.
 """
 
 from __future__ import annotations
@@ -30,18 +31,25 @@ from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from portfolio_tracker.models import PolicyWeight
 from portfolio_tracker.services.performance import (
     _benchmark_series,
     _daily_external_cashflows,
     _daily_portfolio_value,
 )
 
-# Daily moves in absolute value above this are dropped — they're almost
-# certainly reconstruction noise rather than real market events.
+# Daily moves above this are dropped — almost certainly reconstruction noise.
 _MAX_PLAUSIBLE_DAILY_RETURN = Decimal("0.30")
 _TRADING_DAYS_PER_YEAR = 252
+_POLICY_PSEUDO_SYMBOL = "POLICY"
+
+# Default annual risk-free rate when no override is supplied. ~4% is a
+# reasonable proxy for short-term Treasury yields in the current rate
+# environment; the API exposes this as a query param so it can be tuned.
+_DEFAULT_RISK_FREE_ANNUAL = 0.04
 
 
 class BetaResult(BaseModel):
@@ -49,12 +57,24 @@ class BetaResult(BaseModel):
     start_date: date
     end_date: date
     sample_size: int
+    risk_free_annual: float
+
+    # Regression vs benchmark
     beta: float | None
     alpha_annualized_pct: float | None
     r_squared: float | None
     correlation: float | None
+
+    # Absolute risk-adjusted performance
+    sharpe: float | None
+    sortino: float | None
+    information_ratio: float | None
+
+    # Volatility scale
     portfolio_volatility_annualized: float | None
     benchmark_volatility_annualized: float | None
+    tracking_error_annualized: float | None
+
     notes: list[str]
 
 
@@ -63,43 +83,38 @@ def compute_beta(
     start_date: date,
     end_date: date,
     benchmark_symbol: str = "SPY",
+    risk_free_annual: float = _DEFAULT_RISK_FREE_ANNUAL,
 ) -> BetaResult:
     daily_value = _daily_portfolio_value(session, start_date, end_date)
     daily_cashflow = _daily_external_cashflows(session, start_date, end_date)
-    benchmark_series = _benchmark_series(session, start_date, end_date)
-    benchmark_closes = benchmark_series.get(benchmark_symbol, {})
 
     portfolio_returns = _daily_returns(daily_value, daily_cashflow)
-    benchmark_returns = _benchmark_daily_returns(benchmark_closes)
+    benchmark_returns = _benchmark_daily_returns_for(
+        session, benchmark_symbol, start_date, end_date
+    )
 
     paired_p, paired_m, dropped = _pair_returns(portfolio_returns, benchmark_returns)
-
     notes: list[str] = []
     if dropped > 0:
         notes.append(
             f"Dropped {dropped} day(s) with implausible (>30%) reconstructed "
             f"portfolio moves — likely backfill artifacts."
         )
+
     if not paired_p:
         notes.append(
-            "No overlapping return days. Beta requires at least 2 paired "
-            "(portfolio, benchmark) observations."
+            "No overlapping return days. Need at least 2 paired (portfolio, "
+            "benchmark) observations."
         )
-        return BetaResult(
-            benchmark=benchmark_symbol,
-            start_date=start_date,
-            end_date=end_date,
-            sample_size=0,
-            beta=None,
-            alpha_annualized_pct=None,
-            r_squared=None,
-            correlation=None,
-            portfolio_volatility_annualized=None,
-            benchmark_volatility_annualized=None,
-            notes=notes,
-        )
+        return _empty_result(benchmark_symbol, start_date, end_date, risk_free_annual, notes)
+
+    # Daily risk-free rate (simple, not compounded — fine for daily return scale).
+    rf_daily = risk_free_annual / _TRADING_DAYS_PER_YEAR
 
     beta, alpha, r_squared, correlation = _ols(paired_p, paired_m)
+    sharpe = _sharpe(paired_p, rf_daily)
+    sortino = _sortino(paired_p, rf_daily)
+    info_ratio, tracking_error = _information_ratio(paired_p, paired_m)
     p_vol = _annualized_volatility(paired_p)
     m_vol = _annualized_volatility(paired_m)
     alpha_annual = (
@@ -108,15 +123,15 @@ def compute_beta(
 
     if len(paired_p) < 30:
         notes.append(
-            f"Sample size is small ({len(paired_p)} days). Beta confidence "
-            f"increases with more daily observations — accumulate forward "
-            f"snapshots for a more reliable estimate."
+            f"Sample size is small ({len(paired_p)} days). Confidence in "
+            f"these metrics increases with more daily observations — "
+            f"accumulate forward snapshots for a more reliable estimate."
         )
     if r_squared is not None and r_squared < 0.3:
         notes.append(
             f"R² is low ({r_squared:.2f}) — beta poorly summarizes this "
-            f"portfolio's relationship to {benchmark_symbol}. Consider "
-            f"a multi-factor model or a different benchmark."
+            f"portfolio's relationship to {benchmark_symbol}. Consider a "
+            f"different benchmark or a multi-factor model."
         )
 
     return BetaResult(
@@ -124,21 +139,101 @@ def compute_beta(
         start_date=start_date,
         end_date=end_date,
         sample_size=len(paired_p),
+        risk_free_annual=risk_free_annual,
         beta=beta,
         alpha_annualized_pct=alpha_annual,
         r_squared=r_squared,
         correlation=correlation,
+        sharpe=sharpe,
+        sortino=sortino,
+        information_ratio=info_ratio,
         portfolio_volatility_annualized=p_vol,
         benchmark_volatility_annualized=m_vol,
+        tracking_error_annualized=tracking_error,
         notes=notes,
     )
+
+
+def _empty_result(
+    benchmark: str,
+    start_date: date,
+    end_date: date,
+    risk_free_annual: float,
+    notes: list[str],
+) -> BetaResult:
+    return BetaResult(
+        benchmark=benchmark,
+        start_date=start_date,
+        end_date=end_date,
+        sample_size=0,
+        risk_free_annual=risk_free_annual,
+        beta=None,
+        alpha_annualized_pct=None,
+        r_squared=None,
+        correlation=None,
+        sharpe=None,
+        sortino=None,
+        information_ratio=None,
+        portfolio_volatility_annualized=None,
+        benchmark_volatility_annualized=None,
+        tracking_error_annualized=None,
+        notes=notes,
+    )
+
+
+def _benchmark_daily_returns_for(
+    session: Session, symbol: str, start_date: date, end_date: date
+) -> dict[date, Decimal]:
+    """Daily return series for either a single ticker or the policy mix."""
+    benchmark_series = _benchmark_series(session, start_date, end_date)
+    if symbol.upper() == _POLICY_PSEUDO_SYMBOL:
+        return _policy_daily_returns(session, benchmark_series)
+    return _benchmark_daily_returns(benchmark_series.get(symbol, {}))
+
+
+def _policy_daily_returns(
+    session: Session, benchmark_series: dict[str, dict[date, Decimal]]
+) -> dict[date, Decimal]:
+    """Weight-weighted sum of component daily returns.
+
+    For each date d:  r_policy(d) = Σ_i w_i × r_i(d)
+
+    Components missing data on a date are skipped — the policy return for
+    that date sums only the weights that had data, which slightly biases
+    high if a holiday-ish ticker drops out, but is the right behavior for
+    sparse benchmark coverage.
+    """
+    weights = {
+        r.ticker: Decimal(r.weight_bps) / Decimal(10000)
+        for r in session.execute(select(PolicyWeight)).scalars().all()
+        if r.weight_bps > 0
+    }
+    if not weights:
+        return {}
+    component_returns: dict[str, dict[date, Decimal]] = {}
+    for ticker in weights:
+        component_returns[ticker] = _benchmark_daily_returns(
+            benchmark_series.get(ticker, {})
+        )
+    all_dates: set[date] = set()
+    for series in component_returns.values():
+        all_dates.update(series)
+    out: dict[date, Decimal] = {}
+    for d in all_dates:
+        total = Decimal(0)
+        for ticker, weight in weights.items():
+            r = component_returns[ticker].get(d)
+            if r is None:
+                continue
+            total += weight * r
+        out[d] = total
+    return out
 
 
 def _daily_returns(
     daily_value: dict[date, Decimal],
     daily_cashflow: dict[date, Decimal],
 ) -> dict[date, Decimal]:
-    """Per-day return excluding external cashflow effects."""
     sorted_dates = sorted(daily_value.keys())
     out: dict[date, Decimal] = {}
     for i in range(1, len(sorted_dates)):
@@ -148,14 +243,11 @@ def _daily_returns(
         cf = daily_cashflow.get(d_curr, Decimal(0))
         if v_prev <= 0:
             continue
-        r = (v_curr - v_prev - cf) / v_prev
-        out[d_curr] = r
+        out[d_curr] = (v_curr - v_prev - cf) / v_prev
     return out
 
 
-def _benchmark_daily_returns(
-    closes: dict[date, Decimal],
-) -> dict[date, Decimal]:
+def _benchmark_daily_returns(closes: dict[date, Decimal]) -> dict[date, Decimal]:
     sorted_dates = sorted(closes.keys())
     out: dict[date, Decimal] = {}
     for i in range(1, len(sorted_dates)):
@@ -171,8 +263,6 @@ def _pair_returns(
     portfolio_returns: dict[date, Decimal],
     benchmark_returns: dict[date, Decimal],
 ) -> tuple[list[float], list[float], int]:
-    """Align by date, dropping anything missing from either side or
-    portfolio returns deemed implausible. Returns (p, m, dropped_count)."""
     p: list[float] = []
     m: list[float] = []
     dropped = 0
@@ -187,14 +277,12 @@ def _pair_returns(
     return p, m, dropped
 
 
+# ---- regression + ratio math --------------------------------------------
+
+
 def _ols(
     p: list[float], m: list[float]
 ) -> tuple[float | None, float | None, float | None, float | None]:
-    """Ordinary-least-squares slope, intercept, R², and correlation.
-
-    Returns (beta, alpha, r_squared, correlation). All None when the sample
-    has zero variance in the benchmark (degenerate).
-    """
     n = len(p)
     if n < 2:
         return (None, None, None, None)
@@ -208,12 +296,56 @@ def _ols(
     beta = cov / var_m
     alpha = mean_p - beta * mean_m
     if var_p == 0:
-        correlation = 0.0
-        r_squared = 0.0
-    else:
-        correlation = cov / ((var_p * var_m) ** 0.5)
-        r_squared = correlation * correlation
+        return (beta, alpha, 0.0, 0.0)
+    correlation = cov / ((var_p * var_m) ** 0.5)
+    r_squared = correlation * correlation
     return (beta, alpha, r_squared, correlation)
+
+
+def _sharpe(returns: list[float], rf_daily: float) -> float | None:
+    n = len(returns)
+    if n < 2:
+        return None
+    excess = [r - rf_daily for r in returns]
+    mean = sum(excess) / n
+    var = sum((r - mean) ** 2 for r in excess) / (n - 1)
+    if var == 0:
+        return None
+    return (mean / var ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+
+
+def _sortino(returns: list[float], rf_daily: float) -> float | None:
+    """Like Sharpe but uses downside deviation (only counts r < rf)."""
+    n = len(returns)
+    if n < 2:
+        return None
+    excess = [r - rf_daily for r in returns]
+    mean = sum(excess) / n
+    downside = [min(0.0, r) for r in excess]
+    downside_var = sum(d * d for d in downside) / n
+    if downside_var == 0:
+        return None
+    return (mean / downside_var ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+
+
+def _information_ratio(
+    p: list[float], m: list[float]
+) -> tuple[float | None, float | None]:
+    """IR = mean(R_p - R_b) / σ(R_p - R_b), annualized.
+
+    Returns (ir, tracking_error_annualized). Tracking error is reported
+    separately because it's interesting on its own.
+    """
+    if len(p) < 2:
+        return (None, None)
+    diff = [pi - mi for pi, mi in zip(p, m)]
+    mean = sum(diff) / len(diff)
+    var = sum((d - mean) ** 2 for d in diff) / (len(diff) - 1)
+    if var == 0:
+        return (None, 0.0)
+    te = var ** 0.5 * (_TRADING_DAYS_PER_YEAR ** 0.5)
+    ir = (mean / var ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+    return (ir, te)
 
 
 def _annualized_volatility(returns: list[float]) -> float | None:

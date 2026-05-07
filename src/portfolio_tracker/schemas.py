@@ -119,18 +119,19 @@ class InvestmentTransactionOut(BaseModel):
 class PerformancePoint(BaseModel):
     date: date
     portfolio_value: Decimal
-    # All three are MODIFIED DIETZ return % over the window so far.
-    # Starts at 0 on the start_date, rises/falls thereafter.
-    # Same denominator structure for all three so the gap between lines
+    # All return %s use Modified Dietz over the window so far.
+    # Start at 0 on `start_date`, rise/fall thereafter.
+    # Same denominator structure for all four so the gap between lines
     # = pure relative performance, V_start-independent in spirit.
     portfolio_return_pct: Decimal
     spy_return_pct: Decimal | None
     qqq_return_pct: Decimal | None
-    # The synthetic value of a money-flow-matched portfolio (same start +
-    # same contributions on same dates, but invested in the index). Useful
-    # for the user to see "what would I have if I'd just bought SPY/QQQ?"
+    policy_return_pct: Decimal | None
+    # Synthetic values: what the user would have if every cashflow had
+    # gone into the named index / policy mix instead of their actual book.
     spy_equivalent_value: Decimal | None
     qqq_equivalent_value: Decimal | None
+    policy_equivalent_value: Decimal | None
 
 
 class PerformanceSeries(BaseModel):
@@ -231,6 +232,31 @@ class TickerOverrideOut(BaseModel):
     ticker: str
     notes: str | None
     updated_at: datetime
+
+
+class PolicyWeightIn(BaseModel):
+    """One row in the user's policy-portfolio target allocation.
+
+    `weight_pct` is in PERCENT (e.g., 60.0 for 60%) — the API converts to
+    basis points internally. Frontend handles % directly for usability.
+    """
+
+    ticker: str
+    weight_pct: Decimal
+    notes: str | None = None
+
+
+class PolicyWeightOut(BaseModel):
+    ticker: str
+    weight_pct: Decimal
+    notes: str | None
+    updated_at: datetime
+
+
+class PolicyOut(BaseModel):
+    weights: list[PolicyWeightOut]
+    total_pct: Decimal
+    is_balanced: bool
 
 
 class JobRunOut(BaseModel):

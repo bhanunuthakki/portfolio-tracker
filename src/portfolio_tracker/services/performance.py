@@ -37,6 +37,7 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
+    PolicyWeight,
     Price,
     Security,
 )
@@ -131,6 +132,14 @@ def compute_performance_series(
     qqq_equivalent = _money_flow_matched_value(
         sorted_dates, base_value, daily_cashflow, benchmark_series.get("QQQ", {})
     )
+    policy_weights = _load_policy_weights(session)
+    policy_equivalent = (
+        _policy_matched_value(
+            sorted_dates, base_value, daily_cashflow, benchmark_series, policy_weights
+        )
+        if policy_weights
+        else {}
+    )
 
     portfolio_returns = _modified_dietz_series(
         sorted_dates, daily_value, daily_cashflow, base_value
@@ -141,6 +150,9 @@ def compute_performance_series(
     qqq_returns = _modified_dietz_series(
         sorted_dates, qqq_equivalent, daily_cashflow, base_value
     ) if qqq_equivalent else {}
+    policy_returns = _modified_dietz_series(
+        sorted_dates, policy_equivalent, daily_cashflow, base_value
+    ) if policy_equivalent else {}
 
     points: list[PerformancePoint] = []
     for current_date in sorted_dates:
@@ -151,8 +163,10 @@ def compute_performance_series(
                 portfolio_return_pct=portfolio_returns[current_date],
                 spy_return_pct=spy_returns.get(current_date),
                 qqq_return_pct=qqq_returns.get(current_date),
+                policy_return_pct=policy_returns.get(current_date),
                 spy_equivalent_value=spy_equivalent.get(current_date),
                 qqq_equivalent_value=qqq_equivalent.get(current_date),
+                policy_equivalent_value=policy_equivalent.get(current_date),
             )
         )
 
@@ -165,6 +179,82 @@ def compute_performance_series(
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
         backfill_start_unreliable=_is_start_value_unreliable(base_value, end_value),
     )
+
+
+def _load_policy_weights(session: Session) -> dict[str, Decimal]:
+    """Return ticker → fraction (0..1) for the user's policy mix.
+
+    Empty result means no policy is set; the caller should skip the
+    synthetic policy series. Total fraction may not exactly sum to 1.0
+    if the user's weights aren't fully balanced — we keep the raw
+    fractions and let the synthetic portfolio scale accordingly.
+    """
+    rows = session.execute(select(PolicyWeight)).scalars().all()
+    return {r.ticker: Decimal(r.weight_bps) / Decimal(10000) for r in rows if r.weight_bps > 0}
+
+
+def _policy_matched_value(
+    sorted_dates: list[date],
+    base_value: Decimal,
+    daily_cashflow: dict[date, Decimal],
+    benchmark_series: dict[str, dict[date, Decimal]],
+    weights: dict[str, Decimal],
+) -> dict[date, Decimal]:
+    """Synthetic value of a multi-ticker policy portfolio over time.
+
+    Same logic as `_money_flow_matched_value` but for a basket: every
+    purchase (initial + each cashflow) is split across the policy tickers
+    in their target weights. Each lot is valued at today's prices for
+    every component.
+
+    If any ticker is missing benchmark data on the start date, that ticker
+    is skipped from the lot — the remaining weights still get invested.
+    Total exposure scales down accordingly so the synthetic value is
+    conservative rather than failing entirely.
+    """
+    if not sorted_dates or not weights:
+        return {}
+    start_date = sorted_dates[0]
+
+    # lots: list of {ticker: qty} — each lot is one purchase event
+    initial_lot: dict[str, Decimal] = {}
+    for ticker, weight in weights.items():
+        closes = benchmark_series.get(ticker, {})
+        price = _last_known_price(closes, start_date)
+        if price is None or price == 0:
+            continue
+        initial_lot[ticker] = (base_value * weight) / price
+    if not initial_lot:
+        return {}
+    lots: list[dict[str, Decimal]] = [initial_lot]
+
+    out: dict[date, Decimal] = {}
+    for current_date in sorted_dates:
+        cf = daily_cashflow.get(current_date, Decimal(0))
+        if cf != 0:
+            cf_lot: dict[str, Decimal] = {}
+            for ticker, weight in weights.items():
+                closes = benchmark_series.get(ticker, {})
+                price = _last_known_price(closes, current_date)
+                if price is None or price == 0:
+                    continue
+                cf_lot[ticker] = (cf * weight) / price
+            if cf_lot:
+                lots.append(cf_lot)
+
+        # Value all lots at today's prices for every component.
+        total = Decimal(0)
+        for lot in lots:
+            for ticker, qty in lot.items():
+                price_today = _last_known_price(
+                    benchmark_series.get(ticker, {}), current_date
+                )
+                if price_today is None:
+                    continue
+                total += qty * price_today
+        if total > 0:
+            out[current_date] = total
+    return out
 
 
 def _money_flow_matched_value(

@@ -376,19 +376,29 @@ def beta_endpoint(
     session: Annotated[Session, Depends(get_session)],
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
-    benchmark: str = Query(default="SPY"),
+    benchmark: str = Query(
+        default="SPY",
+        description="Benchmark symbol (SPY/QQQ/etc.) or 'POLICY' for the user's policy mix.",
+    ),
+    risk_free_annual: float = Query(
+        default=0.04,
+        description="Annualized risk-free rate used by Sharpe and Sortino (0.04 = 4%/year).",
+    ),
 ) -> BetaResult:
-    """Beta, alpha, R², and annualized volatility vs the named benchmark.
+    """Risk + risk-adjusted-return metrics vs a benchmark.
 
-    Defaults to a 1-year lookback (or as far back as we have data, whichever
-    is shorter). Computed from daily returns paired by date — days with
-    implausible (>30%) reconstructed swings are dropped as backfill noise.
+    Returns beta + alpha + R² (regression-based), Sharpe / Sortino
+    (absolute), and Information Ratio + tracking error (vs benchmark).
+    All annualized. Defaults to a 1-year lookback. Daily returns are
+    paired by date; days with reconstructed swings >30% are dropped.
     """
     if end_date is None:
         end_date = date.today()
     if start_date is None:
         start_date = end_date - timedelta(days=365)
-    return beta_service.compute_beta(session, start_date, end_date, benchmark)
+    return beta_service.compute_beta(
+        session, start_date, end_date, benchmark, risk_free_annual
+    )
 
 
 @router.get("/data-quality", response_model=DataQualityReportOut)

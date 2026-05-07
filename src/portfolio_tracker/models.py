@@ -300,6 +300,32 @@ class CostBasisOverride(Base):
     )
 
 
+class PolicyWeight(Base):
+    """User's policy-portfolio target weight for a ticker.
+
+    The "policy benchmark" is a synthetic portfolio that matches the user's
+    intended asset allocation rather than a single-index proxy. It's the
+    right comparison for someone who is intentionally diversifying (e.g.,
+    international + treasuries to dilute concentrated employer stock) —
+    "did I beat my own policy?" is more meaningful than "did I beat SPY?"
+
+    Weights are stored in basis points (1 bp = 0.01%), so 6000 = 60.00%.
+    Integer math avoids float-comparison issues; UI displays as percent.
+    """
+
+    __tablename__ = "policy_weights"
+
+    ticker: Mapped[str] = mapped_column(String(16), primary_key=True)
+    weight_bps: Mapped[int] = mapped_column(nullable=False)
+    notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class TickerOverride(Base):
     """User-supplied ticker symbol for a security Plaid returned without one.
 

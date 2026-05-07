@@ -9,6 +9,8 @@ import type {
   ItemOut,
   LinkTokenOut,
   PerformanceSeries,
+  PolicyOut,
+  PolicyWeightIn,
 } from "@/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -64,14 +66,23 @@ export const api = {
     startDate?: string;
     endDate?: string;
     benchmark?: string;
+    riskFreeAnnual?: number;
   }): Promise<BetaResult> => {
     const search = new URLSearchParams();
     if (params?.startDate) search.set("start_date", params.startDate);
     if (params?.endDate) search.set("end_date", params.endDate);
     if (params?.benchmark) search.set("benchmark", params.benchmark);
+    if (params?.riskFreeAnnual !== undefined) {
+      search.set("risk_free_annual", String(params.riskFreeAnnual));
+    }
     const qs = search.toString();
     return request(`/api/portfolio/beta${qs ? `?${qs}` : ""}`);
   },
+
+  getPolicy: (): Promise<PolicyOut> => request("/api/policy"),
+
+  putPolicy: (weights: PolicyWeightIn[]): Promise<PolicyOut> =>
+    request("/api/policy", { method: "PUT", body: JSON.stringify(weights) }),
 
   setCostBasisOverride: (input: {
     account_id: number;

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 
 import { api } from "@/api/client";
+import { PolicyEditor } from "@/components/PolicyEditor";
 import { SnapTradeButtons } from "@/components/SnapTradeButtons";
 import {
   Card,
@@ -148,6 +149,8 @@ export function Accounts(): JSX.Element {
           <strong>+ Spouse&apos;s</strong> above to start.
         </EmptyState>
       )}
+
+      <PolicyEditor />
     </div>
   );
 }

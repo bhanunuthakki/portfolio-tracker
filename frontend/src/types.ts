@@ -89,13 +89,37 @@ export interface BetaResult {
   start_date: string;
   end_date: string;
   sample_size: number;
+  risk_free_annual: number;
   beta: number | null;
   alpha_annualized_pct: number | null;
   r_squared: number | null;
   correlation: number | null;
+  sharpe: number | null;
+  sortino: number | null;
+  information_ratio: number | null;
   portfolio_volatility_annualized: number | null;
   benchmark_volatility_annualized: number | null;
+  tracking_error_annualized: number | null;
   notes: string[];
+}
+
+export interface PolicyWeightOut {
+  ticker: string;
+  weight_pct: string;
+  notes: string | null;
+  updated_at: string;
+}
+
+export interface PolicyOut {
+  weights: PolicyWeightOut[];
+  total_pct: string;
+  is_balanced: boolean;
+}
+
+export interface PolicyWeightIn {
+  ticker: string;
+  weight_pct: number;
+  notes?: string | null;
 }
 
 export interface InvestmentTransactionOut {
@@ -121,8 +145,10 @@ export interface PerformancePoint {
   portfolio_return_pct: string;
   spy_return_pct: string | null;
   qqq_return_pct: string | null;
+  policy_return_pct: string | null;
   spy_equivalent_value: string | null;
   qqq_equivalent_value: string | null;
+  policy_equivalent_value: string | null;
 }
 
 export interface PerformanceSeries {
