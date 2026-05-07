@@ -1,0 +1,241 @@
+"""Pydantic schemas for the FastAPI surface.
+
+These are the wire format. ORM models stay inside the backend; everything
+crossing the HTTP boundary is one of these.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from decimal import Decimal
+
+from pydantic import BaseModel, ConfigDict
+
+
+class LinkTokenOut(BaseModel):
+    link_token: str
+
+
+class ExchangePublicTokenIn(BaseModel):
+    public_token: str
+    institution_id: str | None = None
+    institution_name: str | None = None
+
+
+class ExchangePublicTokenOut(BaseModel):
+    item_id: int
+    accounts_linked: int
+
+
+class AccountOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    account_id: int
+    name: str
+    official_name: str | None
+    type: str
+    subtype: str | None
+    mask: str | None
+    currency: str
+
+
+class ItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    item_id: int
+    institution_name: str | None
+    plaid_institution_id: str | None
+    linked_at: datetime
+    last_refreshed_at: datetime | None
+    accounts: list[AccountOut]
+
+
+class HoldingOut(BaseModel):
+    snapshot_date: date
+    account_id: int
+    account_name: str
+    security_id: int
+    ticker: str | None
+    name: str | None
+    quantity: Decimal
+    institution_price: Decimal | None
+    institution_value: Decimal | None
+    cost_basis: Decimal | None
+    currency: str
+
+
+class HoldingByAccountOut(BaseModel):
+    """The drill-down portion of a consolidated holding — one row per account."""
+
+    account_id: int
+    account_name: str
+    quantity: Decimal
+    institution_value: Decimal | None
+    cost_basis: Decimal | None
+
+
+class ConsolidatedHoldingOut(BaseModel):
+    """A position rolled up across all accounts that hold the same security.
+
+    `weighted_avg_cost_per_share` is `total_cost_basis / total_quantity` —
+    the actual blended per-share cost across the user's accounts. None when
+    we don't have cost basis from any account or when total_quantity is 0.
+
+    Returns / TWR continue to be computed at the per-account level inside
+    the `services/performance.py` pipeline; this consolidation is a
+    presentation-layer rollup only.
+    """
+
+    snapshot_date: date
+    security_id: int
+    ticker: str | None
+    name: str | None
+    total_quantity: Decimal
+    total_value: Decimal | None
+    total_cost_basis: Decimal | None
+    weighted_avg_cost_per_share: Decimal | None
+    unrealized_pnl: Decimal | None
+    accounts: list[HoldingByAccountOut]
+    currency: str
+
+
+class InvestmentTransactionOut(BaseModel):
+    plaid_investment_transaction_id: str
+    account_id: int
+    account_name: str
+    security_id: int | None
+    ticker: str | None
+    date: date
+    name: str | None
+    quantity: Decimal
+    amount: Decimal
+    price: Decimal | None
+    fees: Decimal | None
+    type: str
+    subtype: str | None
+    currency: str
+
+
+class PerformancePoint(BaseModel):
+    date: date
+    portfolio_value: Decimal
+    # All three are MODIFIED DIETZ return % over the window so far.
+    # Starts at 0 on the start_date, rises/falls thereafter.
+    # Same denominator structure for all three so the gap between lines
+    # = pure relative performance, V_start-independent in spirit.
+    portfolio_return_pct: Decimal
+    spy_return_pct: Decimal | None
+    qqq_return_pct: Decimal | None
+    # The synthetic value of a money-flow-matched portfolio (same start +
+    # same contributions on same dates, but invested in the index). Useful
+    # for the user to see "what would I have if I'd just bought SPY/QQQ?"
+    spy_equivalent_value: Decimal | None
+    qqq_equivalent_value: Decimal | None
+
+
+class PerformanceSeries(BaseModel):
+    start_date: date
+    end_date: date
+    base_value: Decimal
+    points: list[PerformancePoint]
+    # The earliest date in the window that's an OBSERVED forward snapshot
+    # (not a transaction-walk reconstruction). Anything before this is
+    # modeled. None when the entire window is reconstructed.
+    earliest_observed_date: date | None = None
+    # Net external cashflow into the portfolio over the window (positive = in).
+    # Surfaced so the UI can show contributions alongside total return.
+    net_external_cashflow_in: Decimal = Decimal(0)
+    # Whether the start value is suspiciously low vs the end value (suggests
+    # the backfill is missing pre-existing positions). Frontend renders a
+    # warning when true.
+    backfill_start_unreliable: bool = False
+
+
+class CashflowGroupOut(BaseModel):
+    """A summary row for a (type, subtype) group of investment transactions."""
+
+    type: str
+    subtype: str | None
+    count: int
+    sum_amount: Decimal
+    classified_as_external_cashflow: bool
+
+
+class CashflowAuditOut(BaseModel):
+    start_date: date
+    end_date: date
+    groups: list[CashflowGroupOut]
+    net_external_cashflow_in: Decimal
+    notes: list[str]
+
+
+class DataQualityFindingOut(BaseModel):
+    """A single data-quality issue surfaced for the user.
+
+    `severity` ranks user attention:
+      * `info`    — known limitation, no action required (e.g., SoFi
+                    doesn't expose cost basis through Plaid).
+      * `warning` — affects accuracy of derived metrics (TWR, P&L)
+                    but the rest of the data is fine.
+      * `error`   — broken contract; something needs fixing.
+
+    `recommended_action` is rendered on the UI as the next-step text.
+    """
+
+    category: str
+    severity: str
+    title: str
+    detail: str
+    recommended_action: str | None = None
+    context: dict[str, str] = {}
+
+
+class DataQualityReportOut(BaseModel):
+    generated_at: datetime
+    findings: list[DataQualityFindingOut]
+    summary_counts: dict[str, int]
+
+
+class CostBasisOverrideIn(BaseModel):
+    account_id: int
+    security_id: int
+    total_cost_basis: Decimal
+    notes: str | None = None
+
+
+class CostBasisOverrideOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    account_id: int
+    security_id: int
+    account_name: str
+    ticker: str | None
+    security_name: str | None
+    total_cost_basis: Decimal
+    notes: str | None
+    updated_at: datetime
+
+
+class TickerOverrideIn(BaseModel):
+    security_id: int
+    ticker: str
+    notes: str | None = None
+
+
+class TickerOverrideOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    security_id: int
+    plaid_security_id: str
+    security_name: str | None
+    ticker: str
+    notes: str | None
+    updated_at: datetime
+
+
+class JobRunOut(BaseModel):
+    job: str
+    status: str
+    items_processed: int
+    started_at: datetime
+    finished_at: datetime
