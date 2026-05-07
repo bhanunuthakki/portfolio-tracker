@@ -38,6 +38,7 @@ from portfolio_tracker.models import (
     InvestmentTransaction,
     InvestmentTransactionType,
     Price,
+    Security,
 )
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
 
@@ -464,21 +465,33 @@ def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]
 
 
 def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
-    """Return the quantity delta needed to undo `tx` from current positions.
+    """Return the share-count delta needed to undo `tx` from current positions.
 
-    Buy added shares — undoing means subtracting them. Sell removed shares —
-    undoing means adding them back. Cash / fee transactions don't move share
-    counts. Transfers are ambiguous (could be in or out): we use the sign of
-    the recorded `quantity` to decide.
+    Sign conventions vary across data sources:
+      * Plaid signs the quantity by direction (sell = negative, buy = positive).
+      * SnapTrade reports `units` as an unsigned magnitude regardless of type.
+
+    We use the TRANSACTION TYPE — not the sign of `quantity` — to determine
+    direction, treating `quantity` as an unsigned magnitude:
+      * BUY      → user gained shares; reverse subtracts |quantity|
+      * SELL     → user lost shares; reverse adds |quantity|
+      * TRANSFER → direction varies per broker; trust the signed value
+                   and negate (transfer-in qty + → reverse subtracts)
+
+    Returns None for cash / fee / dividend transactions (qty=0 or no
+    position effect).
     """
     tx_type = tx.type
     quantity = Decimal(tx.quantity)
+    magnitude = abs(quantity)
+    if magnitude == 0:
+        return None
     if tx_type == InvestmentTransactionType.BUY.value:
-        return -quantity
+        return -magnitude
     if tx_type == InvestmentTransactionType.SELL.value:
-        return quantity
+        return magnitude
     if tx_type == InvestmentTransactionType.TRANSFER.value:
-        return -quantity if quantity != 0 else None
+        return -quantity
     return None
 
 
@@ -488,12 +501,42 @@ def _value_quantities_with_prices(
     start_date: date,
     end_date: date,
 ) -> dict[date, Decimal]:
+    """Multiply reconstructed quantities by historical prices to get $ values.
+
+    Three valuation paths per security:
+      1. **Cash equivalents** (USD positions, money market funds) → qty × $1.00.
+         These don't have yfinance-pulled price histories but their NAV is
+         essentially fixed at $1, so face value is the right answer.
+      2. **Securities with yfinance/stooq price history** → forward-fill the
+         most recent close on or before `current_date`.
+      3. **No price, not cash** → fall back to the most recent
+         `holdings_snapshots.institution_price` for that security as a
+         last-resort proxy. Better than dropping the position entirely.
+    """
     relevant_dates = [d for d in daily_quantities if start_date <= d <= end_date]
     if not relevant_dates:
         return {}
     security_ids = {sid for snap in daily_quantities.values() for sid in snap}
     if not security_ids:
         return {}
+
+    securities = session.execute(
+        select(Security).where(Security.security_id.in_(security_ids))
+    ).scalars().all()
+    sec_meta: dict[int, Security] = {s.security_id: s for s in securities}
+
+    # Snapshot-derived fallback price per security: most recent
+    # institution_price we ever observed.
+    fallback_rows = session.execute(
+        select(HoldingSnapshot.security_id, HoldingSnapshot.institution_price)
+        .where(HoldingSnapshot.security_id.in_(security_ids))
+        .where(HoldingSnapshot.institution_price.is_not(None))
+        .order_by(HoldingSnapshot.snapshot_date.desc())
+    ).all()
+    snapshot_price: dict[int, Decimal] = {}
+    for sid, price in fallback_rows:
+        if sid not in snapshot_price and price is not None:
+            snapshot_price[sid] = Decimal(price)
 
     price_rows = session.execute(
         select(Price.security_id, Price.date, Price.close)
@@ -510,7 +553,14 @@ def _value_quantities_with_prices(
         snap = daily_quantities[current_date]
         total = Decimal(0)
         for security_id, quantity in snap.items():
+            sec = sec_meta.get(security_id)
+            if sec is not None and sec.is_cash_equivalent:
+                # Cash equivalents (USD, money market funds): face value.
+                total += quantity * Decimal(1)
+                continue
             close = _last_known_price(price_lookup.get(security_id, {}), current_date)
+            if close is None:
+                close = snapshot_price.get(security_id)
             if close is None:
                 continue
             total += quantity * close

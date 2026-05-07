@@ -8,6 +8,28 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.models import INVESTMENT_ACCOUNT_TYPES, Account, Security
 from portfolio_tracker.plaid_client import PlaidAccount, PlaidSecurity
 
+# Money-market funds whose NAV is essentially fixed at $1/share. We mark
+# them as cash equivalents so the historical valuation in the backfill
+# uses face value × quantity instead of asking yfinance for prices that
+# don't meaningfully exist.
+_KNOWN_MONEY_MARKET_TICKERS: frozenset[str] = frozenset(
+    {
+        "FDRXX",  # Fidelity Government Cash Reserves
+        "SPAXX",  # Fidelity Government Money Market
+        "FZFXX",  # Fidelity Treasury Money Market
+        "VMFXX",  # Vanguard Federal Money Market
+        "SWVXX",  # Schwab Value Advantage Money
+        "CASH",
+    }
+)
+
+
+def _is_cash_equivalent(plaid_security: PlaidSecurity) -> bool:
+    if plaid_security.is_cash_equivalent:
+        return True
+    ticker = (plaid_security.ticker or "").upper()
+    return ticker in _KNOWN_MONEY_MARKET_TICKERS
+
 
 def is_investment_account(plaid_account: PlaidAccount) -> bool:
     """Whether to persist this account. Non-investment accounts are dropped."""
@@ -52,7 +74,7 @@ def upsert_security(session: Session, plaid_security: PlaidSecurity) -> Security
         existing.name = plaid_security.name
         existing.type = plaid_security.type
         existing.currency = plaid_security.currency
-        existing.is_cash_equivalent = plaid_security.is_cash_equivalent
+        existing.is_cash_equivalent = _is_cash_equivalent(plaid_security)
         return existing
     security = Security(
         plaid_security_id=plaid_security.plaid_security_id,
@@ -62,7 +84,7 @@ def upsert_security(session: Session, plaid_security: PlaidSecurity) -> Security
         name=plaid_security.name,
         type=plaid_security.type,
         currency=plaid_security.currency,
-        is_cash_equivalent=plaid_security.is_cash_equivalent,
+        is_cash_equivalent=_is_cash_equivalent(plaid_security),
     )
     session.add(security)
     session.flush()
