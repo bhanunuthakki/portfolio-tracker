@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
 import { PerformanceChart } from "@/components/PerformanceChart";
+import { RiskMetricsCard } from "@/components/RiskMetricsCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
 
 type RangePreset = "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "MAX" | "CUSTOM";
@@ -83,15 +84,6 @@ export function Dashboard(): JSX.Element {
     queryKey: ["holdings"],
     queryFn: () => api.latestHoldings(),
   });
-  const beta = useQuery({
-    queryKey: ["beta", params],
-    queryFn: () =>
-      api.beta({
-        startDate: params.startDate,
-        endDate: params.endDate,
-        benchmark: "SPY",
-      }),
-  });
 
   const totalValue = holdings.data
     ? holdings.data.reduce(
@@ -147,12 +139,13 @@ export function Dashboard(): JSX.Element {
           mono
         />
         <Stat
-          label={`Beta vs SPY${beta.data?.r_squared !== null && beta.data?.r_squared !== undefined ? ` (R²=${beta.data.r_squared.toFixed(2)})` : ""}`}
+          label="Range"
           value={
-            beta.data?.beta !== null && beta.data?.beta !== undefined
-              ? beta.data.beta.toFixed(2)
+            performance.data
+              ? `${performance.data.start_date} → ${performance.data.end_date}`
               : "—"
           }
+          mono
         />
       </div>
 
@@ -222,6 +215,12 @@ export function Dashboard(): JSX.Element {
           ) : null}
         </div>
       </Card>
+
+      <RiskMetricsCard
+        startDate={params.startDate}
+        endDate={params.endDate}
+        includeBackfill={params.includeBackfill}
+      />
     </div>
   );
 }
