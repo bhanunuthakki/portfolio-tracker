@@ -83,6 +83,15 @@ export function Dashboard(): JSX.Element {
     queryKey: ["holdings"],
     queryFn: () => api.latestHoldings(),
   });
+  const beta = useQuery({
+    queryKey: ["beta", params],
+    queryFn: () =>
+      api.beta({
+        startDate: params.startDate,
+        endDate: params.endDate,
+        benchmark: "SPY",
+      }),
+  });
 
   const totalValue = holdings.data
     ? holdings.data.reduce(
@@ -138,13 +147,12 @@ export function Dashboard(): JSX.Element {
           mono
         />
         <Stat
-          label="Range"
+          label={`Beta vs SPY${beta.data?.r_squared !== null && beta.data?.r_squared !== undefined ? ` (R²=${beta.data.r_squared.toFixed(2)})` : ""}`}
           value={
-            performance.data
-              ? `${performance.data.start_date} → ${performance.data.end_date}`
+            beta.data?.beta !== null && beta.data?.beta !== undefined
+              ? beta.data.beta.toFixed(2)
               : "—"
           }
-          mono
         />
       </div>
 

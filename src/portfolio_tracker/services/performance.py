@@ -538,10 +538,13 @@ def _value_quantities_with_prices(
         if sid not in snapshot_price and price is not None:
             snapshot_price[sid] = Decimal(price)
 
+    # Extend the price query backward by ~14 days so non-trading start
+    # dates (e.g., YTD = Jan 1, holiday) fall back to the most recent
+    # actual close instead of the wrong snapshot_price fallback.
     price_rows = session.execute(
         select(Price.security_id, Price.date, Price.close)
         .where(Price.security_id.in_(security_ids))
-        .where(Price.date >= start_date)
+        .where(Price.date >= start_date - timedelta(days=14))
         .where(Price.date <= end_date)
     ).all()
     price_lookup: dict[int, dict[date, Decimal]] = defaultdict(dict)
@@ -582,9 +585,17 @@ def _last_known_price(
 def _benchmark_series(
     session: Session, start_date: date, end_date: date
 ) -> dict[str, dict[date, Decimal]]:
+    """Pull benchmark closes covering `[start_date, end_date]`.
+
+    Extends the query backward by 14 days so we can anchor a synthetic
+    benchmark portfolio whose `start_date` falls on a non-trading day
+    (e.g., YTD = Jan 1, a holiday). Without this lookback, `_last_known_price`
+    has no candidates ≤ start_date in the filtered dict and returns None,
+    which collapses the SPY/QQQ lines to empty.
+    """
     rows = session.execute(
         select(Benchmark.symbol, Benchmark.date, Benchmark.close)
-        .where(Benchmark.date >= start_date)
+        .where(Benchmark.date >= start_date - timedelta(days=14))
         .where(Benchmark.date <= end_date)
     ).all()
     out: dict[str, dict[date, Decimal]] = defaultdict(dict)

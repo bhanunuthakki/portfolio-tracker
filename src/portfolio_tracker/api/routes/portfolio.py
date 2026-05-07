@@ -29,7 +29,9 @@ from portfolio_tracker.schemas import (
     InvestmentTransactionOut,
     PerformanceSeries,
 )
+from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
+from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.performance import (
     _is_external_cashflow,
     _signed_cashflow,
@@ -367,6 +369,26 @@ def cashflow_audit(
         net_external_cashflow_in=net_in,
         notes=notes,
     )
+
+
+@router.get("/beta", response_model=BetaResult)
+def beta_endpoint(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    benchmark: str = Query(default="SPY"),
+) -> BetaResult:
+    """Beta, alpha, R², and annualized volatility vs the named benchmark.
+
+    Defaults to a 1-year lookback (or as far back as we have data, whichever
+    is shorter). Computed from daily returns paired by date — days with
+    implausible (>30%) reconstructed swings are dropped as backfill noise.
+    """
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    return beta_service.compute_beta(session, start_date, end_date, benchmark)
 
 
 @router.get("/data-quality", response_model=DataQualityReportOut)

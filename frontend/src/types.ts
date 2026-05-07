@@ -84,6 +84,20 @@ export interface DataQualityReportOut {
   summary_counts: Record<string, number>;
 }
 
+export interface BetaResult {
+  benchmark: string;
+  start_date: string;
+  end_date: string;
+  sample_size: number;
+  beta: number | null;
+  alpha_annualized_pct: number | null;
+  r_squared: number | null;
+  correlation: number | null;
+  portfolio_volatility_annualized: number | null;
+  benchmark_volatility_annualized: number | null;
+  notes: string[];
+}
+
 export interface InvestmentTransactionOut {
   plaid_investment_transaction_id: string;
   account_id: number;

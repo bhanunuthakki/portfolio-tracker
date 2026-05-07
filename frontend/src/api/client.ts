@@ -1,4 +1,5 @@
 import type {
+  BetaResult,
   CashflowAuditOut,
   ConsolidatedHoldingOut,
   DataQualityReportOut,
@@ -58,6 +59,19 @@ export const api = {
 
   dataQuality: (): Promise<DataQualityReportOut> =>
     request("/api/portfolio/data-quality"),
+
+  beta: (params?: {
+    startDate?: string;
+    endDate?: string;
+    benchmark?: string;
+  }): Promise<BetaResult> => {
+    const search = new URLSearchParams();
+    if (params?.startDate) search.set("start_date", params.startDate);
+    if (params?.endDate) search.set("end_date", params.endDate);
+    if (params?.benchmark) search.set("benchmark", params.benchmark);
+    const qs = search.toString();
+    return request(`/api/portfolio/beta${qs ? `?${qs}` : ""}`);
+  },
 
   setCostBasisOverride: (input: {
     account_id: number;
