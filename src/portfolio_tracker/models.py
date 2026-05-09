@@ -16,8 +16,10 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
+    Text,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -351,3 +353,84 @@ class TickerOverride(Base):
     )
 
 
+
+
+class TradeDecision(Base):
+    """Pre-trade thesis log — written BEFORE clicking buy/sell.
+
+    The act of writing the thesis is the feature: it raises activation
+    energy for low-conviction trades and produces a journal you can
+    review against actual outcomes weeks/months later. `outcome_*`
+    fields are filled in retrospectively (after the time horizon
+    elapses or when an invalidation trigger fires).
+    """
+
+    __tablename__ = "trade_decisions"
+
+    decision_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    decision_date: Mapped[date] = mapped_column(Date, nullable=False)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    thesis: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    invalidation_triggers: Mapped[str | None] = mapped_column(Text, nullable=True)
+    position_size_pct: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    time_horizon_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    outcome_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    outcome_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class TradeTag(Base):
+    """Behavioral pattern tag attached to a holding window for a ticker.
+
+    Tags are user-defined (`panic_sold`, `held_too_long`, `bought_too_high`,
+    `thesis_validated`, etc.). Many tags can apply to one (ticker, window).
+    `period_end` NULL means the tag applies to the currently-open holding.
+    """
+
+    __tablename__ = "trade_tags"
+
+    tag_id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(16), nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    tag: Mapped[str] = mapped_column(String(32), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class EarningsCalendar(Base):
+    """Upcoming and past earnings dates per ticker.
+
+    Refreshed daily by `jobs.earnings_calendar`. Composite PK on
+    (ticker, earnings_date) so we can store consensus + actual side-by-
+    side and never duplicate.
+    """
+
+    __tablename__ = "earnings_calendar"
+
+    ticker: Mapped[str] = mapped_column(String(16), primary_key=True)
+    earnings_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    earnings_time: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    eps_estimate: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    eps_actual: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    revenue_estimate: Mapped[Decimal | None] = mapped_column(Numeric(20, 2), nullable=True)
+    revenue_actual: Mapped[Decimal | None] = mapped_column(Numeric(20, 2), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

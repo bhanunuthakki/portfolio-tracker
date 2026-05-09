@@ -9,7 +9,14 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from portfolio_tracker.api.routes import overrides, plaid, policy, portfolio, snaptrade
+from portfolio_tracker.api.routes import (
+    decision_support,
+    overrides,
+    plaid,
+    policy,
+    portfolio,
+    snaptrade,
+)
 from portfolio_tracker.config import get_settings
 
 
@@ -28,6 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(portfolio.router)
     app.include_router(overrides.router)
     app.include_router(policy.router)
+    app.include_router(decision_support.router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

@@ -101,6 +101,19 @@ def run() -> int:
         print("[daily_refresh]   daily_values cache: FAILED")
         traceback.print_exc()
 
+    # 4. Earnings calendar — pull upcoming-earnings dates for held names
+    #    via yfinance. Quiet on per-ticker failures so a flaky symbol
+    #    doesn't block the rest. Imported lazily to keep yfinance off
+    #    the critical-path startup if we ever drop the dependency.
+    try:
+        from portfolio_tracker.jobs import earnings_calendar
+        n = earnings_calendar.run()
+        print(f"[daily_refresh]   earnings_calendar: {n} rows refreshed")
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   earnings_calendar: FAILED")
+        traceback.print_exc()
+
     status = "OK" if failures == 0 else f"{failures} step(s) FAILED"
     print(f"[daily_refresh] {today} done: {status}")
     return failures
