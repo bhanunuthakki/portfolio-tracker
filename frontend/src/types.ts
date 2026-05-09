@@ -169,3 +169,36 @@ export interface ExchangePublicTokenOut {
   item_id: number;
   accounts_linked: number;
 }
+
+export interface TickerTrade {
+  ticker: string;
+  name: string | null;
+  first_buy: string | null;
+  last_action: string | null;
+  bought_total: string;
+  sold_total: string;
+  today_qty: string;
+  today_value: string;
+  pnl_dollars: string;
+  pnl_pct: number | null;
+  trade_count: number;
+  is_open: boolean;
+}
+
+export interface TradingActivity {
+  start_date: string;
+  end_date: string;
+  total_trades: number;
+  total_notional: string;
+  average_position_value: string | null;
+  annualized_turnover_pct: number | null;
+  trade_count_by_month: Record<string, number>;
+}
+
+export interface TradeAnalysisResult {
+  start_date: string;
+  end_date: string;
+  activity: TradingActivity;
+  tickers: TickerTrade[];
+  notes: string[];
+}

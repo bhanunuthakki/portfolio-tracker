@@ -37,8 +37,11 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.models import PolicyWeight
 from portfolio_tracker.services.performance import (
     _benchmark_series,
+    _broad_index_security_ids,
     _daily_external_cashflows,
+    _daily_internal_index_cashflows,
     _daily_portfolio_value,
+    _daily_subset_value,
 )
 
 # Daily moves above this are dropped — almost certainly reconstruction noise.
@@ -84,9 +87,49 @@ def compute_beta(
     end_date: date,
     benchmark_symbol: str = "SPY",
     risk_free_annual: float = _DEFAULT_RISK_FREE_ANNUAL,
+    exclude_index_etfs: bool = False,
+    reserve_amount: Decimal = Decimal(0),
 ) -> BetaResult:
+    """Risk metrics over [start_date, end_date].
+
+    `exclude_index_etfs` carves broad-market US ETFs out of the V series
+    and adds their buy/sell flows to the cashflow series — same logic as
+    `compute_performance_series` — so all risk numbers (σ, Sharpe, beta,
+    R², Sortino) reflect just the *active stock-picking* portion of the
+    portfolio. The σ vs benchmark-σ comparison then directly answers
+    "did my picking provide a diversification / derisking benefit?"
+
+    `reserve_amount` subtracts a fixed dollar amount from V on every date
+    before computing daily returns. Use it to carve out an emergency cash
+    reserve so risk numbers reflect only the investable portion. Note:
+    daily-return signs don't change, but magnitudes amplify slightly
+    because the denominator (V[d-1]) shrinks; this lifts σ, Sharpe,
+    Sortino, and tracking error a bit relative to the full-portfolio view.
+    """
     daily_value = _daily_portfolio_value(session, start_date, end_date)
     daily_cashflow = _daily_external_cashflows(session, start_date, end_date)
+
+    if exclude_index_etfs:
+        index_sids = _broad_index_security_ids(session)
+        if index_sids:
+            daily_index_value = _daily_subset_value(
+                session, start_date, end_date, index_sids
+            )
+            daily_value = {
+                d: daily_value[d] - daily_index_value.get(d, Decimal(0))
+                for d in daily_value
+            }
+            internal_flows = _daily_internal_index_cashflows(
+                session, start_date, end_date, index_sids
+            )
+            for d, c in internal_flows.items():
+                daily_cashflow[d] = daily_cashflow.get(d, Decimal(0)) + c
+
+    if reserve_amount > 0:
+        # Subtract the same flat amount from V on every date so daily-return
+        # denominators shrink. Numerators (V[d] - V[d-1] - C[d]) are
+        # unchanged because the reserve is constant across days.
+        daily_value = {d: v - reserve_amount for d, v in daily_value.items()}
 
     portfolio_returns = _daily_returns(daily_value, daily_cashflow)
     benchmark_returns = _benchmark_daily_returns_for(

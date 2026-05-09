@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { PerformanceChart } from "@/components/PerformanceChart";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
+import { TradeAnalysisCard } from "@/components/TradeAnalysisCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
 
 type RangePreset = "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "MAX" | "CUSTOM";
@@ -17,6 +18,13 @@ const PRESETS: { key: Exclude<RangePreset, "CUSTOM">; label: string }[] = [
   { key: "2Y", label: "2Y" },
   { key: "MAX", label: "Max" },
 ];
+
+// Dollar amount of "untouchable" emergency cash reserve. When the user
+// toggles "Exclude reserve" on the dashboard, this much is carved off the
+// top of V_start, every daily V, AND each synthetic-benchmark base before
+// returns are computed — so the chart compares the *investable* portion
+// against an equivalent-sized index allocation.
+const CASH_RESERVE_AMOUNT = 30000;
 
 function isoDaysAgo(days: number): string {
   const d = new Date();
@@ -59,6 +67,8 @@ export function Dashboard(): JSX.Element {
   const [preset, setPreset] = useState<RangePreset>("1Y");
   const [customStart, setCustomStart] = useState<string>(isoDaysAgo(365));
   const [customEnd, setCustomEnd] = useState<string>(todayISO());
+  const [excludeReserve, setExcludeReserve] = useState<boolean>(false);
+  const [excludeIndexEtfs, setExcludeIndexEtfs] = useState<boolean>(false);
 
   const params = useMemo(() => {
     if (preset === "CUSTOM") {
@@ -71,13 +81,17 @@ export function Dashboard(): JSX.Element {
     return presetToDates(preset);
   }, [preset, customStart, customEnd]);
 
+  const reserveAmount = excludeReserve ? CASH_RESERVE_AMOUNT : 0;
+
   const performance = useQuery({
-    queryKey: ["performance", params],
+    queryKey: ["performance", params, reserveAmount, excludeIndexEtfs],
     queryFn: () =>
       api.performance({
         startDate: params.startDate,
         endDate: params.endDate,
         includeBackfill: params.includeBackfill,
+        reserveAmount,
+        excludeIndexEtfs,
       }),
   });
   const holdings = useQuery({
@@ -158,11 +172,32 @@ export function Dashboard(): JSX.Element {
       )}
 
       <Card>
-        <header className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-sm font-semibold text-slate-900">
+        <header className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <h2 className="text-sm font-semibold text-slate-900 shrink-0">
             Performance vs benchmarks
+            {(excludeReserve || excludeIndexEtfs) && (
+              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800 align-middle">
+                {excludeIndexEtfs ? "active picks only" : "ex-reserve"}
+              </span>
+            )}
           </h2>
-          <div className="flex flex-wrap items-center gap-1">
+          <div className="flex flex-wrap items-center gap-2 lg:flex-1 lg:justify-center lg:px-4">
+            <ToggleChip
+              active={excludeReserve}
+              onClick={() => setExcludeReserve(!excludeReserve)}
+              activeColor="emerald"
+              label="Excl. $30k SGOV reserve"
+              tooltip="Treat $30k of cash as untouchable emergency reserves; carve from V_start, every daily V, and the synthetic-benchmark base before computing returns."
+            />
+            <ToggleChip
+              active={excludeIndexEtfs}
+              onClick={() => setExcludeIndexEtfs(!excludeIndexEtfs)}
+              activeColor="indigo"
+              label="Excl. broad-index ETFs"
+              tooltip="Strip VTI/VOO/SPY/IVV/RSP from V and add their buy/sell flows to the cashflow series. Isolates active stock-picking alpha."
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-1 shrink-0">
             {PRESETS.map((p) => (
               <RangeChip
                 key={p.key}
@@ -220,6 +255,13 @@ export function Dashboard(): JSX.Element {
         startDate={params.startDate}
         endDate={params.endDate}
         includeBackfill={params.includeBackfill}
+        excludeIndexEtfs={excludeIndexEtfs}
+        reserveAmount={reserveAmount}
+      />
+
+      <TradeAnalysisCard
+        startDate={params.startDate}
+        endDate={params.endDate}
       />
     </div>
   );
@@ -292,6 +334,66 @@ function RangeChip({
       ].join(" ")}
     >
       {label}
+    </button>
+  );
+}
+
+/**
+ * Pill-styled toggle that fills the white space between the chart title
+ * and the range-preset chips. Two of these sit side-by-side on the
+ * dashboard — one for the SGOV cash-reserve carve-out, one for the
+ * broad-index ETF carve-out. Active state reads as a colored pill so the
+ * effect on the chart is unambiguous when scanning quickly.
+ *
+ * `tooltip` ends up on the native `title` attribute — short, hover-only,
+ * doesn't compete with the page layout. Click target is large enough to
+ * comfortably hit on touch (≥32px tall via py-1.5 + text + border).
+ */
+function ToggleChip({
+  active,
+  onClick,
+  activeColor,
+  label,
+  tooltip,
+}: {
+  active: boolean;
+  onClick: () => void;
+  activeColor: "emerald" | "indigo";
+  label: string;
+  tooltip?: string;
+}): JSX.Element {
+  const activeClasses =
+    activeColor === "emerald"
+      ? "border-emerald-600 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+      : "border-indigo-600 bg-indigo-50 text-indigo-800 hover:bg-indigo-100";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={active}
+      onClick={onClick}
+      title={tooltip}
+      className={[
+        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+        active
+          ? activeClasses
+          : "border-slate-300 bg-white text-slate-600 hover:border-slate-400 hover:bg-slate-50",
+      ].join(" ")}
+    >
+      <span
+        aria-hidden="true"
+        className={[
+          "inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border",
+          active
+            ? activeColor === "emerald"
+              ? "border-emerald-600 bg-emerald-600 text-white"
+              : "border-indigo-600 bg-indigo-600 text-white"
+            : "border-slate-400 bg-white",
+        ].join(" ")}
+      >
+        {active ? "✓" : ""}
+      </span>
+      <span>{label}</span>
     </button>
   );
 }

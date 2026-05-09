@@ -186,6 +186,15 @@ def sync(
                 transactions_written += 1
 
     session.commit()
+
+    # Refresh today's row in the daily-value cache. SnapTrade is the source
+    # of truth for Fidelity (and any other broker only on the SnapTrade
+    # side), so without this the chart would lag a day until the next
+    # daily-values cron tick.
+    from portfolio_tracker.jobs import daily_values
+    today = date.today()
+    daily_values.run(start_date=today, end_date=today)
+
     return SyncResultOut(
         profile=profile,
         items_synced=items_synced,

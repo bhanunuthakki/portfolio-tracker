@@ -38,6 +38,7 @@ from portfolio_tracker.models import (
     InvestmentTransaction,
     InvestmentTransactionType,
     PolicyWeight,
+    PortfolioValueDaily,
     Price,
     Security,
 )
@@ -93,9 +94,27 @@ _AMBIGUOUS_CASH_SUBTYPES: frozenset[str] = frozenset(
     }
 )
 
+# Broad-market US-equity ETFs the user likely treats as "core / index
+# allocation" rather than active stock-picking. When the user toggles the
+# "Exclude broad-index holdings" view on the dashboard, the value of any
+# positions in these tickers is removed from V on every date so the chart
+# isolates the active stock-picking portion. Internal flows from buying /
+# selling these (which transfer cash between active and index buckets) are
+# also tracked so the synthetic benchmark gets a fair matched-flow series.
+#
+# Excludes QQQ deliberately — it's already used as a benchmark line. Add
+# total-market mutual-fund tickers if the user holds them (VTSAX, FXAIX).
+_BROAD_INDEX_ETF_TICKERS: frozenset[str] = frozenset(
+    {"VTI", "VOO", "SPY", "IVV", "RSP"}
+)
+
 
 def compute_performance_series(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    reserve_amount: Decimal = Decimal(0),
+    exclude_index_etfs: bool = False,
 ) -> PerformanceSeries:
     """Build a money-flow-matched return series for [start_date, end_date].
 
@@ -109,6 +128,27 @@ def compute_performance_series(
     Both portfolio and benchmark series share the SAME denominator on each
     day, so even when V_start is unreliable (transaction-walk reconstruction
     misses cash), the GAP between the lines is the true relative performance.
+
+    `reserve_amount` carves a fixed dollar amount off the top of both the
+    actual portfolio's V and the synthetic-benchmark starting capital. The
+    intent is "treat the first $X as untouchable emergency reserves and
+    only show the investable portion's return." The same number is
+    subtracted from V on every date (it's the same reserve every day) and
+    from each synthetic's starting base. Cashflows are unchanged — labeling
+    cash "reserves" doesn't change the fact that real-money deposits
+    happened. Set to `Decimal(0)` for the standard full-portfolio view.
+
+    `exclude_index_etfs` strips broad-market index ETFs (VTI/VOO/SPY/IVV/
+    RSP — see `_BROAD_INDEX_ETF_TICKERS`) from V on every date so the chart
+    isolates the active stock-picking portion. Buying/selling those ETFs
+    moves cash between the "index bucket" and the "active bucket" inside
+    the user's portfolio — these are *internal* flows from the active
+    portion's perspective. The synthetic benchmark must see those same
+    flows to be apples-to-apples, otherwise active V grows free of them
+    and the comparison is rigged in active's favor. We compute internal
+    flows from index-ETF BUYs (active outflow) and SELLs (active inflow)
+    and add them to the cashflow series used for both Modified Dietz on
+    V_active and for the synthetic benchmarks.
     """
     daily_value = _daily_portfolio_value(session, start_date, end_date)
     if not daily_value:
@@ -123,35 +163,66 @@ def compute_performance_series(
     benchmark_series = _benchmark_series(session, start_date, end_date)
 
     sorted_dates = sorted(daily_value.keys())
-    base_value = daily_value[sorted_dates[0]]
-    end_value = daily_value[sorted_dates[-1]]
+
+    # ---- Index-ETF carve-out -------------------------------------------
+    daily_value_active = daily_value
+    if exclude_index_etfs:
+        index_sids = _broad_index_security_ids(session)
+        if index_sids:
+            daily_index_value = _daily_subset_value(
+                session, start_date, end_date, index_sids
+            )
+            daily_value_active = {
+                d: daily_value[d] - daily_index_value.get(d, Decimal(0))
+                for d in daily_value
+            }
+            internal_flows = _daily_internal_index_cashflows(
+                session, start_date, end_date, index_sids
+            )
+            for d, c in internal_flows.items():
+                daily_cashflow[d] = daily_cashflow.get(d, Decimal(0)) + c
+
+    # Reserve adjustment: shift V_start, V[d], and synthetic bases down by
+    # `reserve_amount`. The cashflow series is left intact. Clamp to zero
+    # so a too-large reserve doesn't produce a negative denominator.
+    base_value = daily_value_active[sorted_dates[0]]
+    end_value = daily_value_active[sorted_dates[-1]]
+    reserve = max(Decimal(0), reserve_amount)
+    if reserve > base_value:
+        reserve = base_value
+    base_value_adj = base_value - reserve
+    daily_value_adj = (
+        {d: v - reserve for d, v in daily_value_active.items()}
+        if reserve > 0
+        else daily_value_active
+    )
 
     spy_equivalent = _money_flow_matched_value(
-        sorted_dates, base_value, daily_cashflow, benchmark_series.get("SPY", {})
+        sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("SPY", {})
     )
     qqq_equivalent = _money_flow_matched_value(
-        sorted_dates, base_value, daily_cashflow, benchmark_series.get("QQQ", {})
+        sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("QQQ", {})
     )
     policy_weights = _load_policy_weights(session)
     policy_equivalent = (
         _policy_matched_value(
-            sorted_dates, base_value, daily_cashflow, benchmark_series, policy_weights
+            sorted_dates, base_value_adj, daily_cashflow, benchmark_series, policy_weights
         )
         if policy_weights
         else {}
     )
 
     portfolio_returns = _modified_dietz_series(
-        sorted_dates, daily_value, daily_cashflow, base_value
+        sorted_dates, daily_value_adj, daily_cashflow, base_value_adj
     )
     spy_returns = _modified_dietz_series(
-        sorted_dates, spy_equivalent, daily_cashflow, base_value
+        sorted_dates, spy_equivalent, daily_cashflow, base_value_adj
     ) if spy_equivalent else {}
     qqq_returns = _modified_dietz_series(
-        sorted_dates, qqq_equivalent, daily_cashflow, base_value
+        sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj
     ) if qqq_equivalent else {}
     policy_returns = _modified_dietz_series(
-        sorted_dates, policy_equivalent, daily_cashflow, base_value
+        sorted_dates, policy_equivalent, daily_cashflow, base_value_adj
     ) if policy_equivalent else {}
 
     points: list[PerformancePoint] = []
@@ -159,7 +230,7 @@ def compute_performance_series(
         points.append(
             PerformancePoint(
                 date=current_date,
-                portfolio_value=daily_value[current_date],
+                portfolio_value=daily_value_adj[current_date],
                 portfolio_return_pct=portfolio_returns[current_date],
                 spy_return_pct=spy_returns.get(current_date),
                 qqq_return_pct=qqq_returns.get(current_date),
@@ -173,7 +244,7 @@ def compute_performance_series(
     return PerformanceSeries(
         start_date=start_date,
         end_date=end_date,
-        base_value=base_value,
+        base_value=base_value_adj,
         points=points,
         earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
@@ -191,6 +262,226 @@ def _load_policy_weights(session: Session) -> dict[str, Decimal]:
     """
     rows = session.execute(select(PolicyWeight)).scalars().all()
     return {r.ticker: Decimal(r.weight_bps) / Decimal(10000) for r in rows if r.weight_bps > 0}
+
+
+def _broad_index_security_ids(session: Session) -> frozenset[int]:
+    """Resolve `_BROAD_INDEX_ETF_TICKERS` to a set of `security_id`s.
+
+    A single ticker can have multiple `security_id`s in our DB when the
+    same fund was ingested via different aggregators (e.g., Plaid vs
+    SnapTrade) and ended up with slight metadata differences. We want the
+    union of all of them.
+    """
+    rows = session.execute(
+        select(Security.security_id).where(
+            Security.ticker.in_(_BROAD_INDEX_ETF_TICKERS)
+        )
+    ).scalars().all()
+    return frozenset(rows)
+
+
+def _daily_subset_value(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    security_ids: frozenset[int],
+) -> dict[date, Decimal]:
+    """Daily total value of just the listed securities (no cash adjustment).
+
+    Forward dates use `holdings_snapshots` filtered to the subset. Earlier
+    dates walk transactions backward, anchored on the first snapshot,
+    tracking only the subset's positions. Used to extract the
+    "broad-index ETF" portion of V for the active-equity carve-out.
+    """
+    if not security_ids:
+        return {}
+
+    forward = _forward_subset_values(session, start_date, end_date, security_ids)
+    earliest_known = min(forward.keys()) if forward else None
+    if earliest_known is None or earliest_known > start_date:
+        backfill_end = (
+            earliest_known - timedelta(days=1)
+            if earliest_known is not None
+            else end_date
+        )
+        backfill = _backfill_subset_values(
+            session, start_date, backfill_end, security_ids
+        )
+        for d, v in backfill.items():
+            forward.setdefault(d, v)
+    return forward
+
+
+def _forward_subset_values(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    security_ids: frozenset[int],
+) -> dict[date, Decimal]:
+    rows = session.execute(
+        select(
+            HoldingSnapshot.snapshot_date,
+            HoldingSnapshot.institution_value,
+            HoldingSnapshot.quantity,
+            HoldingSnapshot.institution_price,
+        )
+        .where(HoldingSnapshot.snapshot_date >= start_date)
+        .where(HoldingSnapshot.snapshot_date <= end_date)
+        .where(HoldingSnapshot.security_id.in_(security_ids))
+    ).all()
+    totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
+    for snap_date, value, quantity, price in rows:
+        if value is not None:
+            totals[snap_date] += Decimal(value)
+        elif price is not None:
+            totals[snap_date] += Decimal(quantity) * Decimal(price)
+    return dict(totals)
+
+
+def _backfill_subset_values(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    security_ids: frozenset[int],
+) -> dict[date, Decimal]:
+    """Walk transactions backward, tracking ONLY the subset's positions.
+
+    No cash adjustment is applied here — the subset's V is just `qty *
+    price` summed across the listed securities, which is what we want for
+    "value of the index-ETF portion."
+    """
+    anchor_date = session.execute(
+        select(HoldingSnapshot.snapshot_date)
+        .order_by(HoldingSnapshot.snapshot_date.asc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if anchor_date is None:
+        return {}
+
+    rows = session.execute(
+        select(HoldingSnapshot.security_id, HoldingSnapshot.quantity)
+        .where(HoldingSnapshot.snapshot_date == anchor_date)
+        .where(HoldingSnapshot.security_id.in_(security_ids))
+    ).all()
+    rolling: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    for sid, qty in rows:
+        rolling[sid] += Decimal(qty)
+
+    backward_tx = session.execute(
+        select(InvestmentTransaction)
+        .where(InvestmentTransaction.security_id.in_(security_ids))
+        .where(InvestmentTransaction.date < anchor_date)
+        .where(InvestmentTransaction.date >= start_date)
+        .order_by(InvestmentTransaction.date.desc())
+    ).scalars().all()
+
+    daily_quantities: dict[date, dict[int, Decimal]] = {}
+    cursor_date = anchor_date - timedelta(days=1)
+    daily_quantities[cursor_date] = dict(rolling)
+    for tx in backward_tx:
+        while cursor_date > tx.date:
+            cursor_date -= timedelta(days=1)
+            daily_quantities[cursor_date] = dict(rolling)
+        if tx.security_id is None:
+            continue
+        delta = _reverse_transaction_quantity(tx)
+        if delta is not None:
+            rolling[tx.security_id] = rolling.get(tx.security_id, Decimal(0)) + delta
+    while cursor_date > start_date:
+        cursor_date -= timedelta(days=1)
+        daily_quantities[cursor_date] = dict(rolling)
+
+    return _value_subset_with_prices(
+        session, daily_quantities, security_ids, start_date, end_date
+    )
+
+
+def _value_subset_with_prices(
+    session: Session,
+    daily_quantities: dict[date, dict[int, Decimal]],
+    security_ids: frozenset[int],
+    start_date: date,
+    end_date: date,
+) -> dict[date, Decimal]:
+    """Mark-to-market valuation for the subset. No `snapshot_price`
+    fallback (the listed securities are liquid index ETFs with full price
+    coverage; if a price is missing on a given day we skip rather than
+    fabricate)."""
+    relevant_dates = [d for d in daily_quantities if start_date <= d <= end_date]
+    if not relevant_dates:
+        return {}
+
+    securities = session.execute(
+        select(Security).where(Security.security_id.in_(security_ids))
+    ).scalars().all()
+    sec_meta: dict[int, Security] = {s.security_id: s for s in securities}
+
+    price_rows = session.execute(
+        select(Price.security_id, Price.date, Price.close)
+        .where(Price.security_id.in_(security_ids))
+        .where(Price.date >= start_date - timedelta(days=14))
+        .where(Price.date <= end_date)
+    ).all()
+    price_lookup: dict[int, dict[date, Decimal]] = defaultdict(dict)
+    for security_id, price_date, close in price_rows:
+        price_lookup[security_id][price_date] = Decimal(close)
+
+    totals: dict[date, Decimal] = {}
+    for current_date in sorted(relevant_dates):
+        snap = daily_quantities[current_date]
+        total = Decimal(0)
+        for security_id, quantity in snap.items():
+            sec = sec_meta.get(security_id)
+            if sec is not None and sec.is_cash_equivalent:
+                total += quantity * Decimal(1)
+                continue
+            close = _last_known_price(price_lookup.get(security_id, {}), current_date)
+            if close is None:
+                continue
+            total += quantity * close
+        totals[current_date] = total
+    return totals
+
+
+def _daily_internal_index_cashflows(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    security_ids: frozenset[int],
+) -> dict[date, Decimal]:
+    """Internal flows from buying / selling broad-index ETFs.
+
+    From the *active-portion* point of view, buying VTI is an OUTFLOW
+    (cash leaves active to fund the index purchase) and selling VTI is
+    an INFLOW (cash from the index sale lands in active). Including these
+    in the cashflow series lets the synthetic benchmark match exactly the
+    money the active portion actually had to work with on each day, so
+    the comparison is fair.
+
+    Sign convention follows `_reverse_transaction_cash_delta` — derive
+    direction from the transaction TYPE, not from amount sign, because
+    Plaid and SnapTrade disagree.
+    """
+    if not security_ids:
+        return {}
+    rows = session.execute(
+        select(InvestmentTransaction)
+        .where(InvestmentTransaction.security_id.in_(security_ids))
+        .where(InvestmentTransaction.date >= start_date)
+        .where(InvestmentTransaction.date <= end_date)
+    ).scalars().all()
+    totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
+    for tx in rows:
+        if tx.amount is None:
+            continue
+        magnitude = abs(Decimal(tx.amount))
+        # SELL of an index → cash returns to the active bucket (inflow).
+        # BUY of an index → cash leaves the active bucket (outflow).
+        if tx.type == InvestmentTransactionType.SELL.value:
+            totals[tx.date] += magnitude
+        elif tx.type == InvestmentTransactionType.BUY.value:
+            totals[tx.date] -= magnitude
+    return dict(totals)
 
 
 def _policy_matched_value(
@@ -452,18 +743,56 @@ def _is_external_cashflow(tx_type: str, tx_subtype: str | None) -> bool:
 def _daily_portfolio_value(
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    """Daily total portfolio value, preferring snapshots and falling back to backfill."""
-    forward = _forward_values_from_snapshots(session, start_date, end_date)
-    earliest_snapshot = min(forward.keys()) if forward else None
+    """Daily total portfolio value across three sources, in priority order:
 
-    if earliest_snapshot is None or earliest_snapshot > start_date:
+    1. **`holdings_snapshots`** (forward) — real broker data for the date.
+       Authoritative whenever it exists. Includes the day's late-arriving
+       SnapTrade pulls if the daily-refresh cron has run.
+    2. **`portfolio_values_daily`** (cache) — pre-baked from earlier runs.
+       Used only for dates with no forward snapshot. Avoids re-walking
+       transactions for old dates that are otherwise stable.
+    3. **Transaction walk-back** — reconstructs anything still missing
+       before the earliest snapshot, with cash adjustment so V_start
+       doesn't collapse on net deployment.
+
+    Cache must NEVER override forward snapshots. Earlier versions of this
+    function did `merged.update(cached)` which clobbered fresh snapshot
+    data with stale cached values — every time the SnapTrade leg of the
+    daily refresh wrote new rows for "today," the next chart load would
+    show the older mid-morning V instead of the post-sync V, manifesting
+    as a fake $80k drop on the chart.
+    """
+    forward = _forward_values_from_snapshots(session, start_date, end_date)
+    cached = _cached_daily_values(session, start_date, end_date)
+
+    # Snapshot wins on overlap; cache fills anything the snapshot missed.
+    merged: dict[date, Decimal] = dict(cached)
+    merged.update(forward)
+
+    # Backfill is anchored on the earliest *real* snapshot, so figure out
+    # whether we still have a gap at the start of the window.
+    earliest_known = min(merged.keys()) if merged else None
+    if earliest_known is None or earliest_known > start_date:
         backfill_end = (
-            earliest_snapshot - timedelta(days=1) if earliest_snapshot is not None else end_date
+            earliest_known - timedelta(days=1) if earliest_known is not None else end_date
         )
         backfill = _backfill_values_from_transactions(session, start_date, backfill_end)
-        forward.update(backfill)
+        # Don't overwrite snapshot or cache rows we already have.
+        for d, v in backfill.items():
+            merged.setdefault(d, v)
 
-    return forward
+    return merged
+
+
+def _cached_daily_values(
+    session: Session, start_date: date, end_date: date
+) -> dict[date, Decimal]:
+    rows = session.execute(
+        select(PortfolioValueDaily.date, PortfolioValueDaily.total_value)
+        .where(PortfolioValueDaily.date >= start_date)
+        .where(PortfolioValueDaily.date <= end_date)
+    ).all()
+    return {d: Decimal(v) for d, v in rows}
 
 
 def _forward_values_from_snapshots(
@@ -494,13 +823,20 @@ def _backfill_values_from_transactions(
 ) -> dict[date, Decimal]:
     """Reconstruct daily portfolio values walking transactions backward.
 
-    Strategy:
-      * Take the earliest snapshot date as the anchor; positions on that date
-        are the truth.
-      * For each transaction strictly before the anchor (in date-descending
-        order), reverse its effect on quantities.
-      * For every trading day in [start_date, end_date], multiply each
-        security's quantity by its `prices.close` and sum.
+    The walk tracks two parallel state machines, both anchored at the first
+    holdings snapshot:
+
+      1. **Positions** — share quantities reconstructed by reversing each
+         BUY / SELL / TRANSFER, then valued at historical prices. Cash
+         equivalents (USD, money-market funds) sit in `positions` at face
+         value; they're the *anchor-date* cash, not historical cash.
+      2. **Cash adjustment (delta)** — a scalar per day capturing how much
+         cash the user held on date *d* relative to anchor cash. Reversing
+         a BUY adds the buy amount (cash was higher before the buy). Without
+         this term, V_start collapses by the cash deployed during the window
+         and the chart shows a fake ramp.
+
+    Daily total = positions × historical_prices  +  cash_adjustment[d].
     """
     anchor_row = session.execute(
         select(HoldingSnapshot.snapshot_date)
@@ -512,35 +848,62 @@ def _backfill_values_from_transactions(
     anchor_date = anchor_row
 
     positions = _anchor_positions(session, anchor_date)
+    cash_equivalent_security_ids = frozenset(
+        session.execute(
+            select(Security.security_id).where(Security.is_cash_equivalent.is_(True))
+        ).scalars().all()
+    )
+    # Walk EVERY transaction in window — pure-cash ones (no security_id)
+    # are needed for the cash-adjustment series even though they don't
+    # affect positions.
     backward_tx = session.execute(
         select(InvestmentTransaction)
-        .where(InvestmentTransaction.security_id.is_not(None))
         .where(InvestmentTransaction.date < anchor_date)
         .where(InvestmentTransaction.date >= start_date)
         .order_by(InvestmentTransaction.date.desc())
     ).scalars().all()
 
     daily_quantities: dict[date, dict[int, Decimal]] = {}
-    rolling = dict(positions)
-    daily_quantities[anchor_date - timedelta(days=1)] = dict(rolling)
+    daily_cash_adj: dict[date, Decimal] = {}
+    rolling_positions = dict(positions)
+    rolling_cash_adj = Decimal(0)
+
     cursor_date = anchor_date - timedelta(days=1)
+    daily_quantities[cursor_date] = dict(rolling_positions)
+    daily_cash_adj[cursor_date] = rolling_cash_adj
+
     for tx in backward_tx:
         while cursor_date > tx.date:
             cursor_date -= timedelta(days=1)
-            daily_quantities[cursor_date] = dict(rolling)
-        if tx.security_id is None:
-            continue
-        delta = _reverse_transaction_quantity(tx)
-        if delta is None:
-            continue
-        rolling[tx.security_id] = rolling.get(tx.security_id, Decimal(0)) + delta
-        daily_quantities[tx.date] = dict(rolling)
+            daily_quantities[cursor_date] = dict(rolling_positions)
+            daily_cash_adj[cursor_date] = rolling_cash_adj
+
+        if tx.security_id is not None:
+            delta = _reverse_transaction_quantity(tx)
+            if delta is not None:
+                rolling_positions[tx.security_id] = (
+                    rolling_positions.get(tx.security_id, Decimal(0)) + delta
+                )
+
+        rolling_cash_adj += _reverse_transaction_cash_delta(
+            tx, cash_equivalent_security_ids
+        )
+
+        # NOTE: do NOT write daily_quantities[tx.date] here. After the
+        # reversal above, `rolling_*` represents EOD (tx.date - 1), not
+        # EOD tx.date. The correct EOD-tx.date state was already written
+        # by the while loop above (or carried over from the prior iter on
+        # the same date). Writing here would shift the chart by one day,
+        # making real cashflows appear on the day AFTER they happened.
 
     while cursor_date > start_date:
         cursor_date -= timedelta(days=1)
-        daily_quantities[cursor_date] = dict(rolling)
+        daily_quantities[cursor_date] = dict(rolling_positions)
+        daily_cash_adj[cursor_date] = rolling_cash_adj
 
-    return _value_quantities_with_prices(session, daily_quantities, start_date, end_date)
+    return _value_quantities_with_prices(
+        session, daily_quantities, daily_cash_adj, start_date, end_date
+    )
 
 
 def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]:
@@ -585,23 +948,101 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
     return None
 
 
+def _reverse_transaction_cash_delta(
+    tx: InvestmentTransaction, cash_equivalent_security_ids: frozenset[int]
+) -> Decimal:
+    """Cash adjustment to apply when walking back through `tx`.
+
+    Returns `cash_adjustment[t-1] − cash_adjustment[t]` due to this
+    transaction. Positive ⇒ the user held *more* cash before the trade.
+
+    Sign convention is **derived from the transaction TYPE, not the sign
+    of `amount`**, because data sources disagree on amount signing:
+
+    * **Plaid** signs `amount` from the cash account's perspective: BUY
+      and FEE have amount > 0 (cash debited), SELL and dividend have
+      amount < 0 (cash credited).
+    * **SnapTrade / Fidelity** signs `amount` the opposite way: BUY has
+      amount < 0, SELL has amount > 0.
+
+    A formula that just does `cash_adj += tx.amount` works for one source
+    and silently inverts for the other, producing huge fake spikes on
+    days with cross-source trades (e.g., Fidelity money-market sweeps).
+    Use `|amount|` and let the type decide the sign:
+
+    | Type   | Cash on day d  | cash_adj[t-1] − cash_adj[t] |
+    |--------|----------------|------------------------------|
+    | BUY    | decreased by m | +m                           |
+    | SELL   | increased by m | −m                           |
+    | FEE    | decreased by m | +m                           |
+    | CASH (internal — div/int) | increased by m | −m         |
+    | TRANSFER (internal)       | varies; default 0            |
+
+    **External flows** (deposit/withdrawal/external TRANSFER) go through
+    `_signed_cashflow`, which already normalizes signs across sources.
+
+    **Cash-equivalent FEE transactions are skipped** (some brokers emit
+    paired `fee/interest` ↔ `fee/miscellaneous fee` entries on the USD
+    position to represent internal margin-sweeps; they sum to zero in
+    theory but leak in practice).
+    """
+    if tx.amount is None:
+        return Decimal(0)
+    amount = Decimal(tx.amount)
+    magnitude = abs(amount)
+
+    if (
+        tx.type == InvestmentTransactionType.FEE.value
+        and tx.security_id in cash_equivalent_security_ids
+    ):
+        return Decimal(0)
+
+    if _is_external_cashflow(tx.type, tx.subtype):
+        return -_signed_cashflow(tx.type, tx.subtype, amount)
+
+    if tx.type == InvestmentTransactionType.BUY.value:
+        return magnitude
+    if tx.type == InvestmentTransactionType.SELL.value:
+        return -magnitude
+    if tx.type == InvestmentTransactionType.FEE.value:
+        return magnitude
+    if tx.type == InvestmentTransactionType.CASH.value:
+        # Internal cash events left after the external-flow check are
+        # dividends / interest / similar credits — money entered, so prior
+        # cash was lower.
+        return -magnitude
+    # Internal TRANSFER (assignment / exercise / merger) typically has
+    # amount ≈ 0 and no net cash movement; safe default.
+    return Decimal(0)
+
+
 def _value_quantities_with_prices(
     session: Session,
     daily_quantities: dict[date, dict[int, Decimal]],
+    daily_cash_adj: dict[date, Decimal],
     start_date: date,
     end_date: date,
 ) -> dict[date, Decimal]:
     """Multiply reconstructed quantities by historical prices to get $ values.
 
-    Three valuation paths per security:
+    Four valuation paths per security:
       1. **Cash equivalents** (USD positions, money market funds) → qty × $1.00.
          These don't have yfinance-pulled price histories but their NAV is
          essentially fixed at $1, so face value is the right answer.
-      2. **Securities with yfinance/stooq price history** → forward-fill the
+      2. **Derivatives** (options, futures) — `type == "derivative"`. Almost
+         always missing from yfinance feeds. We deliberately skip the
+         `snapshot_price` fallback for them: at expiration they're worth
+         $0 (so today's snapshot price is $0 too), and using $0 as the
+         intra-life value avoids the "step-up at trade date" artifact that
+         a constant non-zero fallback would create. The premium paid /
+         received is fully captured by the cash adjustment, so the
+         portfolio total stays right at the boundary even if mid-life MTM
+         is approximated as zero.
+      3. **Securities with yfinance/stooq price history** → forward-fill the
          most recent close on or before `current_date`.
-      3. **No price, not cash** → fall back to the most recent
-         `holdings_snapshots.institution_price` for that security as a
-         last-resort proxy. Better than dropping the position entirely.
+      4. **No price, not cash, not derivative** → fall back to the most
+         recent `holdings_snapshots.institution_price` for that security
+         as a last-resort proxy. Better than dropping the position entirely.
     """
     relevant_dates = [d for d in daily_quantities if start_date <= d <= end_date]
     if not relevant_dates:
@@ -652,11 +1093,21 @@ def _value_quantities_with_prices(
                 total += quantity * Decimal(1)
                 continue
             close = _last_known_price(price_lookup.get(security_id, {}), current_date)
-            if close is None:
+            if close is None and not _is_derivative(sec):
+                # `snapshot_price` is only safe as a fallback for things
+                # whose price doesn't move much (illiquid foreign stock,
+                # niche ETF). For options the snapshot is almost always $0
+                # at expiry, and a constant fallback would create a fake
+                # step at trade dates. Skip it for derivatives.
                 close = snapshot_price.get(security_id)
             if close is None:
                 continue
             total += quantity * close
+        # Add the cash delta induced by trades + external flows after the
+        # anchor date. Anchor cash itself is already counted via cash-equiv
+        # securities in `positions`; this term is the "and how much MORE
+        # cash were they sitting on before the deployment" piece.
+        total += daily_cash_adj.get(current_date, Decimal(0))
         if total > 0:
             totals[current_date] = total
     return totals
@@ -670,6 +1121,17 @@ def _last_known_price(
     if not candidates:
         return None
     return series[max(candidates)]
+
+
+def _is_derivative(sec: Security | None) -> bool:
+    """Plaid security `type` is `'derivative'` for options & futures.
+
+    Used to short-circuit the `snapshot_price` fallback in valuation —
+    derivatives are almost always missing from yfinance, and snapshot prices
+    on them are $0 (post-expiry) which would create a fake step at trade
+    dates if applied uniformly across the option's life.
+    """
+    return sec is not None and (sec.type or "").lower() == "derivative"
 
 
 def _benchmark_series(

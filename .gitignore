@@ -37,8 +37,12 @@ env/
 node_modules/
 frontend/dist/
 frontend/.vite/
+*.tsbuildinfo
 *.log
 npm-debug.log*
+
+# Cron / scheduler logs from local task scheduler
+scripts/logs/
 
 # IDE / local dev tooling
 .vscode/

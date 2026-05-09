@@ -11,6 +11,7 @@ import type {
   PerformanceSeries,
   PolicyOut,
   PolicyWeightIn,
+  TradeAnalysisResult,
 } from "@/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -67,6 +68,8 @@ export const api = {
     endDate?: string;
     benchmark?: string;
     riskFreeAnnual?: number;
+    excludeIndexEtfs?: boolean;
+    reserveAmount?: number;
   }): Promise<BetaResult> => {
     const search = new URLSearchParams();
     if (params?.startDate) search.set("start_date", params.startDate);
@@ -74,6 +77,12 @@ export const api = {
     if (params?.benchmark) search.set("benchmark", params.benchmark);
     if (params?.riskFreeAnnual !== undefined) {
       search.set("risk_free_annual", String(params.riskFreeAnnual));
+    }
+    if (params?.excludeIndexEtfs) {
+      search.set("exclude_index_etfs", "true");
+    }
+    if (params?.reserveAmount !== undefined && params.reserveAmount > 0) {
+      search.set("reserve_amount", String(params.reserveAmount));
     }
     const qs = search.toString();
     return request(`/api/portfolio/beta${qs ? `?${qs}` : ""}`);
@@ -133,6 +142,8 @@ export const api = {
     startDate?: string;
     endDate?: string;
     includeBackfill?: boolean;
+    reserveAmount?: number;
+    excludeIndexEtfs?: boolean;
   }): Promise<PerformanceSeries> => {
     const search = new URLSearchParams();
     if (params?.startDate) search.set("start_date", params.startDate);
@@ -140,8 +151,25 @@ export const api = {
     if (params?.includeBackfill !== undefined) {
       search.set("include_backfill", String(params.includeBackfill));
     }
+    if (params?.reserveAmount !== undefined && params.reserveAmount > 0) {
+      search.set("reserve_amount", String(params.reserveAmount));
+    }
+    if (params?.excludeIndexEtfs) {
+      search.set("exclude_index_etfs", "true");
+    }
     const qs = search.toString();
     return request(`/api/portfolio/performance${qs ? `?${qs}` : ""}`);
+  },
+
+  tradeAnalysis: (params?: {
+    startDate?: string;
+    endDate?: string;
+  }): Promise<TradeAnalysisResult> => {
+    const search = new URLSearchParams();
+    if (params?.startDate) search.set("start_date", params.startDate);
+    if (params?.endDate) search.set("end_date", params.endDate);
+    const qs = search.toString();
+    return request(`/api/portfolio/trade-analysis${qs ? `?${qs}` : ""}`);
   },
 
   // SnapTrade

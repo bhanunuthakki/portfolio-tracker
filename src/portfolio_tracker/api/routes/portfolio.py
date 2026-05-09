@@ -31,7 +31,9 @@ from portfolio_tracker.schemas import (
 )
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
+from portfolio_tracker.services import trade_analysis as trade_analysis_service
 from portfolio_tracker.services.beta import BetaResult
+from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
 from portfolio_tracker.services.performance import (
     _is_external_cashflow,
     _signed_cashflow,
@@ -248,12 +250,38 @@ def performance_series(
             "accuracy matters."
         ),
     ),
+    reserve_amount: float = Query(
+        default=0.0,
+        ge=0,
+        description=(
+            "Dollar amount to subtract from V_start, every daily V, AND each "
+            "synthetic-benchmark starting capital before computing returns. "
+            "Use to carve out an emergency cash reserve so the chart shows "
+            "'investable portion only' instead of the full book."
+        ),
+    ),
+    exclude_index_etfs: bool = Query(
+        default=False,
+        description=(
+            "If true, strip broad-market US-equity ETFs (VTI/VOO/SPY/IVV/RSP) "
+            "from V on every date and add their buy/sell flows as internal "
+            "cashflows. The chart then shows the active stock-picking portion "
+            "of the portfolio vs benchmarks of equivalent size — useful for "
+            "isolating stock-selection alpha from passive-index allocation."
+        ),
+    ),
 ) -> PerformanceSeries:
     if end_date is None:
         end_date = date.today()
     if start_date is None:
         start_date = _default_start_date(session, end_date, include_backfill)
-    return performance.compute_performance_series(session, start_date, end_date)
+    return performance.compute_performance_series(
+        session,
+        start_date,
+        end_date,
+        Decimal(str(reserve_amount)),
+        exclude_index_etfs,
+    )
 
 
 # Forward snapshots needed before the default chart drops the 365-day
@@ -384,6 +412,23 @@ def beta_endpoint(
         default=0.04,
         description="Annualized risk-free rate used by Sharpe and Sortino (0.04 = 4%/year).",
     ),
+    exclude_index_etfs: bool = Query(
+        default=False,
+        description=(
+            "If true, strip broad-market US-equity ETFs (VTI/VOO/SPY/IVV/RSP) "
+            "from V before computing returns. Compare σ of the active portion "
+            "vs benchmark σ to see whether your stock-picking gave a "
+            "diversification / derisking benefit."
+        ),
+    ),
+    reserve_amount: float = Query(
+        default=0.0,
+        ge=0,
+        description=(
+            "Dollar amount of cash reserves to subtract from V before "
+            "computing daily returns. Mirrors the same param on /performance."
+        ),
+    ),
 ) -> BetaResult:
     """Risk + risk-adjusted-return metrics vs a benchmark.
 
@@ -397,7 +442,13 @@ def beta_endpoint(
     if start_date is None:
         start_date = end_date - timedelta(days=365)
     return beta_service.compute_beta(
-        session, start_date, end_date, benchmark, risk_free_annual
+        session,
+        start_date,
+        end_date,
+        benchmark,
+        risk_free_annual,
+        exclude_index_etfs,
+        Decimal(str(reserve_amount)),
     )
 
 
@@ -409,3 +460,26 @@ def data_quality_report(
     which need manual fixes (e.g., entering cost basis for SoFi positions)
     and which are inherent limits (e.g., yfinance can't price options)."""
     return data_quality.build_report(session)
+
+
+@router.get("/trade-analysis", response_model=TradeAnalysisResult)
+def trade_analysis_endpoint(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> TradeAnalysisResult:
+    """Per-ticker buy/sell summary + trading-activity stats.
+
+    Surfaced on the dashboard's Trade Analysis card so the user can see
+    which names made or lost money and whether trading frequency is
+    eating into returns. P&L = today's mark + cumulative sells − cumulative
+    buys, which works for closed and open positions alike. Defaults to
+    the entire transaction history when dates aren't pinned.
+    """
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        # Default to ~24 months — matches Plaid's transaction-retention
+        # window so we don't pretend to analyze data we don't have.
+        start_date = end_date - timedelta(days=730)
+    return trade_analysis_service.analyze_trades(session, start_date, end_date)

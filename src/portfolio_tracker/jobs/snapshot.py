@@ -41,6 +41,13 @@ def run() -> int:
         for item in items:
             rows_written += _snapshot_item(session, item, snapshot_date)
         session.commit()
+
+    # Cache today's total in `portfolio_values_daily` so the chart reads
+    # don't have to recompute it on every request. Imported lazily to keep
+    # snapshot.py free of the performance-service dependency at module load.
+    from portfolio_tracker.jobs import daily_values
+    daily_values.run(start_date=snapshot_date, end_date=snapshot_date)
+
     return rows_written
 
 
