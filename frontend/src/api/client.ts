@@ -12,6 +12,12 @@ import type {
   PolicyOut,
   PolicyWeightIn,
   TradeAnalysisResult,
+  DecisionIn,
+  DecisionOut,
+  DecisionOutcomeIn,
+  TradeTagIn,
+  TradeTagOut,
+  EarningsRow,
 } from "@/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -190,4 +196,63 @@ export const api = {
     holdings_written: number;
     transactions_written: number;
   }> => request(`/api/snaptrade/sync?profile=${profile}`, { method: "POST" }),
+
+  // ---- Decision support ------------------------------------------------
+
+  listDecisions: (params?: {
+    ticker?: string;
+    limit?: number;
+  }): Promise<DecisionOut[]> => {
+    const search = new URLSearchParams();
+    if (params?.ticker) search.set("ticker", params.ticker);
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    return request(`/api/decisions${qs ? `?${qs}` : ""}`);
+  },
+
+  createDecision: (payload: DecisionIn): Promise<DecisionOut> =>
+    request("/api/decisions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  attachOutcome: (
+    decisionId: number,
+    payload: DecisionOutcomeIn,
+  ): Promise<DecisionOut> =>
+    request(`/api/decisions/${decisionId}/outcome`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteDecision: (decisionId: number): Promise<void> =>
+    request(`/api/decisions/${decisionId}`, { method: "DELETE" }),
+
+  tagVocabulary: (): Promise<string[]> => request("/api/trade-tags/vocabulary"),
+
+  listTradeTags: (ticker?: string): Promise<TradeTagOut[]> => {
+    const qs = ticker ? `?ticker=${encodeURIComponent(ticker)}` : "";
+    return request(`/api/trade-tags${qs}`);
+  },
+
+  createTradeTag: (payload: TradeTagIn): Promise<TradeTagOut> =>
+    request("/api/trade-tags", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  deleteTradeTag: (tagId: number): Promise<void> =>
+    request(`/api/trade-tags/${tagId}`, { method: "DELETE" }),
+
+  upcomingEarnings: (params?: {
+    daysAhead?: number;
+    onlyHeld?: boolean;
+  }): Promise<EarningsRow[]> => {
+    const search = new URLSearchParams();
+    if (params?.daysAhead) search.set("days_ahead", String(params.daysAhead));
+    if (params?.onlyHeld !== undefined)
+      search.set("only_held", String(params.onlyHeld));
+    const qs = search.toString();
+    return request(`/api/earnings/upcoming${qs ? `?${qs}` : ""}`);
+  },
 };

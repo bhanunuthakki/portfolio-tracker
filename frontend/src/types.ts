@@ -202,3 +202,73 @@ export interface TradeAnalysisResult {
   tickers: TickerTrade[];
   notes: string[];
 }
+
+export interface DecisionOut {
+  decision_id: number;
+  decision_date: string;
+  ticker: string;
+  action: string;
+  thesis: string;
+  expected_outcome: string | null;
+  invalidation_triggers: string | null;
+  position_size_pct: string | null;
+  time_horizon_months: number | null;
+  confidence: string | null;
+  notes: string | null;
+  outcome_date: string | null;
+  outcome_status: string | null;
+  outcome_notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DecisionIn {
+  decision_date: string;
+  ticker: string;
+  action: string;
+  thesis: string;
+  expected_outcome?: string | null;
+  invalidation_triggers?: string | null;
+  position_size_pct?: number | null;
+  time_horizon_months?: number | null;
+  confidence?: string | null;
+  notes?: string | null;
+}
+
+export interface DecisionOutcomeIn {
+  outcome_date: string;
+  outcome_status: string;
+  outcome_notes?: string | null;
+}
+
+export interface TradeTagOut {
+  tag_id: number;
+  ticker: string;
+  period_start: string;
+  period_end: string | null;
+  tag: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface TradeTagIn {
+  ticker: string;
+  period_start: string;
+  period_end?: string | null;
+  tag: string;
+  notes?: string | null;
+}
+
+export interface EarningsRow {
+  ticker: string;
+  name: string | null;
+  earnings_date: string;
+  earnings_time: string | null;
+  eps_estimate: string | null;
+  eps_actual: string | null;
+  revenue_estimate: string | null;
+  revenue_actual: string | null;
+  days_until: number;
+  held_qty: string | null;
+  held_value: string | null;
+}

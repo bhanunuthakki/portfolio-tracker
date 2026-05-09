@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
+import { DecisionLogCard } from "@/components/DecisionLogCard";
+import { EarningsCalendarCard } from "@/components/EarningsCalendarCard";
 import { PerformanceChart } from "@/components/PerformanceChart";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
 import { TradeAnalysisCard } from "@/components/TradeAnalysisCard";
@@ -263,6 +265,10 @@ export function Dashboard(): JSX.Element {
         startDate={params.startDate}
         endDate={params.endDate}
       />
+
+      <DecisionLogCard />
+
+      <EarningsCalendarCard />
     </div>
   );
 }

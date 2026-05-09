@@ -1,9 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
 import { Card, fmtUSD } from "@/components/ui";
-import type { TickerTrade } from "@/types";
+import type { TickerTrade, TradeTagOut } from "@/types";
 
 /**
  * Trade analysis + light coaching surface.
@@ -113,6 +113,27 @@ export function TradeAnalysisCard({
             </ul>
           )}
 
+          {/*
+            Cost-basis caveat for ACATS-transferred positions. Robinhood
+            inherits shares without their original buy price; SnapTrade /
+            Plaid only see those as $0-cost transfers. The 1099-B reveals
+            the true cost basis when the lot eventually closes — but we
+            don't currently ingest 1099 data into the live DB, so the
+            "P&L $" column overstates closed P&L for tickers that were
+            ACATS-transferred and have since been sold (most notably BABA,
+            HCMLY, AMZN, BAM). The chart's V is unaffected; only the
+            historical-realized-gains attribution here is.
+          */}
+          <div className="border-t border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 leading-relaxed">
+            <strong>Note on closed-position P&amp;L:</strong> Some tickers
+            were transferred in via ACATS (BABA, HCMLY, AMZN, BAM) without
+            cost basis. Their realized P&amp;L on this card is overstated
+            by the original (pre-Robinhood) cost basis the IRS sees on
+            your 1099-B but isn&apos;t in the model. Affects historical
+            attribution only — current portfolio value, risk metrics, and
+            performance chart are correct.
+          </div>
+
           <CoachingPanel />
         </>
       )}
@@ -196,6 +217,24 @@ function TradeTable({
   rows: TickerTrade[];
   kind: "winners" | "losers" | "open";
 }): JSX.Element {
+  // Fetch all tags once and bucket by ticker; cheap and avoids N queries
+  // (and the N+1 footgun of one useQuery per row).
+  const tags = useQuery({
+    queryKey: ["trade-tags"],
+    queryFn: () => api.listTradeTags(),
+  });
+  const tagsByTicker = useMemo(() => {
+    const map: Record<string, TradeTagOut[]> = {};
+    for (const t of tags.data ?? []) {
+      (map[t.ticker] ??= []).push(t);
+    }
+    return map;
+  }, [tags.data]);
+  const vocabulary = useQuery({
+    queryKey: ["tag-vocabulary"],
+    queryFn: () => api.tagVocabulary(),
+  });
+
   if (rows.length === 0) {
     return (
       <div className="px-4 py-6 text-center text-xs text-slate-500">
@@ -208,7 +247,7 @@ function TradeTable({
       <table className="min-w-full divide-y divide-slate-200">
         <thead className="bg-slate-50">
           <tr>
-            <Th>Ticker</Th>
+            <Th>Ticker / tags</Th>
             <Th>First buy</Th>
             <Th>Last action</Th>
             <Th align="right">Bought</Th>
@@ -241,6 +280,13 @@ function TradeTable({
                       data incomplete
                     </div>
                   )}
+                  <TagsCell
+                    ticker={r.ticker}
+                    firstBuy={r.first_buy}
+                    lastAction={r.last_action}
+                    tags={tagsByTicker[r.ticker] ?? []}
+                    vocabulary={vocabulary.data ?? []}
+                  />
                 </Td>
                 <Td className="text-xs text-slate-500 tabular-nums">
                   {r.first_buy ?? "—"}
@@ -276,6 +322,107 @@ function TradeTable({
           })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/**
+ * Tags cell — shows existing behavioral tags for a ticker plus a "+ tag"
+ * dropdown to add new ones from the curated vocabulary.
+ *
+ * Tags are stored against a holding window (period_start, period_end) but
+ * the per-ticker view here just attaches them to the most recent window
+ * available from the analysis row (first_buy → last_action). Pre-existing
+ * tags display as removable chips. Adding a new tag fires
+ * `POST /api/trade-tags`; removing fires `DELETE /api/trade-tags/{id}`.
+ *
+ * Why a curated vocabulary rather than free-text: tags are most useful
+ * months later when you mine your own patterns. "panic_sold" is mineable;
+ * "I freaked out and dumped it" is not.
+ */
+function TagsCell({
+  ticker,
+  firstBuy,
+  lastAction,
+  tags,
+  vocabulary,
+}: {
+  ticker: string;
+  firstBuy: string | null;
+  lastAction: string | null;
+  tags: TradeTagOut[];
+  vocabulary: string[];
+}): JSX.Element {
+  const [showPicker, setShowPicker] = useState(false);
+  const queryClient = useQueryClient();
+  const create = useMutation({
+    mutationFn: (tag: string) =>
+      api.createTradeTag({
+        ticker,
+        period_start: firstBuy ?? new Date().toISOString().slice(0, 10),
+        period_end: lastAction,
+        tag,
+      }),
+    onSuccess: () => {
+      setShowPicker(false);
+      queryClient.invalidateQueries({ queryKey: ["trade-tags"] });
+    },
+  });
+  const remove = useMutation({
+    mutationFn: (tagId: number) => api.deleteTradeTag(tagId),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["trade-tags"] }),
+  });
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-1">
+      {tags.map((t) => (
+        <span
+          key={t.tag_id}
+          className="inline-flex items-center gap-1 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800"
+          title={t.notes ?? undefined}
+        >
+          {t.tag}
+          <button
+            type="button"
+            onClick={() => remove.mutate(t.tag_id)}
+            className="ml-0.5 text-indigo-600 hover:text-indigo-900"
+            aria-label={`Remove ${t.tag}`}
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => setShowPicker((v) => !v)}
+          className="inline-flex items-center rounded border border-dashed border-slate-300 bg-white px-1.5 py-0.5 text-[10px] text-slate-500 hover:border-slate-400 hover:text-slate-700"
+        >
+          + tag
+        </button>
+        {showPicker && vocabulary.length > 0 && (
+          <div className="absolute left-0 top-full z-20 mt-1 w-44 rounded border border-slate-200 bg-white shadow-lg">
+            {vocabulary
+              .filter((v) => !tags.some((t) => t.tag === v))
+              .map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => create.mutate(v)}
+                  className="block w-full px-2 py-1 text-left text-[11px] text-slate-700 hover:bg-indigo-50 hover:text-indigo-800"
+                >
+                  {v}
+                </button>
+              ))}
+            {vocabulary.every((v) => tags.some((t) => t.tag === v)) && (
+              <div className="px-2 py-1 text-[10px] text-slate-400">
+                All tags applied
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
