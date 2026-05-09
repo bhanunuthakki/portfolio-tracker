@@ -219,15 +219,24 @@ def _validate_plaid_item(session: Session, item_id: int) -> Item:
 
 
 def _normalize_mask(s: str | None) -> str | None:
-    """Strip leading asterisks/whitespace from broker mask strings.
+    """Reduce broker mask strings to a comparable canonical form.
 
-    Plaid emits bare 4-digit masks (e.g., "8521"); SnapTrade emits
-    asterisk-prefixed masks (e.g., "*****8521"). We compare by the
-    trailing identifier only.
+    Different aggregators emit different mask formats:
+      * Plaid: bare 4-digit suffix (e.g., "8521")
+      * SnapTrade Fidelity: asterisk-prefixed last 4 (e.g., "*****8521")
+      * SnapTrade Robinhood: 9-digit full account number (e.g., "REDACTED")
+
+    All three encode the same trailing 4 digits — so we normalize to
+    the *last 4 digits* of the numeric portion. That's enough to match
+    accounts in practice. Returns the full digit string if shorter than
+    4 (shouldn't happen for real brokerage masks, but defensive).
     """
     if s is None:
         return None
-    return s.lstrip("*").strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if not digits:
+        return None
+    return digits[-4:]
 
 
 def _backup_plaid_data(
