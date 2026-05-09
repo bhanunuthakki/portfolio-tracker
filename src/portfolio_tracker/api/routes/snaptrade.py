@@ -93,6 +93,18 @@ def connection_portal_url(
 def sync(
     session: Annotated[Session, Depends(get_session)],
     profile: Annotated[SnapTradeProfile, Query()] = SnapTradeProfile.PRIMARY,
+    lookback_days: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=3650,
+            description=(
+                "How far back to pull transaction activity. Default 730 (24 months) "
+                "matches Plaid's retention so daily syncs don't redo work. The migration "
+                "script bumps this to 3650 (10 years) for a one-shot deep pull."
+            ),
+        ),
+    ] = 730,
 ) -> SyncResultOut:
     creds = _load_credentials(session, profile)
     if creds is None:
@@ -107,7 +119,7 @@ def sync(
     holdings_written = 0
     transactions_written = 0
     today = date.today()
-    backfill_start = today - timedelta(days=730)
+    backfill_start = today - timedelta(days=lookback_days)
 
     for auth in authorizations:
         item = _upsert_item(session, profile, creds, auth)
