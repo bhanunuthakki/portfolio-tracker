@@ -1,30 +1,80 @@
 # Portfolio Tracker
 
-A self-hosted, single-user personal investment tracker. Aggregates holdings and
-transactions from Plaid + SnapTrade, snapshots them daily, and benchmarks the
-portfolio against SPY / QQQ using money-flow-matched returns.
+Self-hosted, single-user personal investment tracker. Aggregates holdings and
+transactions from Plaid + SnapTrade, snapshots them daily, computes risk and
+return metrics against multiple benchmarks, and provides a structured journal
+for trade decisions.
 
 Runs entirely on localhost. No multi-tenant auth, no cloud dependencies except
-your aggregator(s) of choice and yfinance for prices.
+your aggregator(s) and yfinance.
 
 ## What it does
 
-- **Aggregates accounts** from Plaid (most US brokerages) and SnapTrade
-  (covers Fidelity, which Plaid often can't). One UI for both.
-- **Consolidates positions by ticker** with weighted-average cost basis,
-  expandable per-account drill-down.
-- **Daily snapshot job** appends today's positions to a permanent local
-  database — even after Plaid drops the underlying transactions at the
-  24-month retention edge, your historical record stays.
-- **24-month transaction backfill** so you can see deposits, sells,
-  dividends, and contributions immediately after linking.
-- **Money-flow-matched return chart** comparing the portfolio against
-  synthetic SPY / QQQ portfolios that received the same contributions on the
-  same dates. The gap shows true relative performance.
-- **Data-quality report** surfacing every issue (missing cost basis,
-  un-tickered securities, unreliable backfilled days, stale items) with
-  inline forms to fix the ones you can.
-- **Local SQLite backups** via a one-line command.
+**Aggregation**
+- Plaid for most US brokerages, SnapTrade for the ones Plaid handles poorly
+  (Fidelity especially). One UI, both data paths normalized into the same
+  tables.
+- Per-Item `is_data_active` flag — keep redundant connections linked (so the
+  Plaid Item slot stays occupied) while excluding their data from every
+  aggregation. Useful when the same brokerage is reachable through two
+  aggregators.
+- Consolidated holdings rolled up by ticker with weighted-average cost
+  basis, drill-down per account.
+
+**Time series**
+- Forward-snapshot writer (`jobs.snapshot`) appends today's positions
+  permanently, so you keep history past Plaid's 24-month transaction
+  retention floor.
+- Walk-back reconstruction for any date older than the earliest snapshot,
+  including ACATS in/out events, option assignment/expiration, and dividend
+  reinvestments — anything SnapTrade emits as `cash/*` that changes share
+  quantity.
+- Cached `portfolio_values_daily` table so chart reads are O(days), not
+  O(transactions).
+
+**Returns vs benchmarks**
+- Modified Dietz on a money-flow-matched basis. Same `V_start`, same
+  cashflows, same dates across the portfolio and synthetic SPY/QQQ/policy
+  portfolios — the gap between lines is true relative performance.
+- User-defined **policy benchmark**: enter target weights (`/api/policy`),
+  the chart adds a synthetic line for "what your intended allocation would
+  have done." Missing-data weights renormalize automatically.
+- Two carve-out toggles on the chart: subtract a fixed cash reserve (e.g.
+  $30k in SGOV) and/or strip broad-market US ETFs (VTI/VOO/SPY/IVV/RSP) so
+  you can see the active stock-picking portion in isolation.
+
+**Risk metrics** (`/api/portfolio/beta`)
+- Beta + alpha + R² (regression vs any benchmark), Sharpe, Sortino,
+  Information Ratio, tracking error, annualized σ. Same carve-out toggles
+  apply.
+
+**Trade analysis & journaling**
+- Per-ticker lifetime P&L (winners / losers / open). Detects ACATS-in /
+  pre-history shares and flags rows as `cost_basis_unreliable` so the
+  numbers aren't trusted past their data.
+- **Pre-trade decision log** — write a thesis before clicking buy/sell;
+  attach an outcome later.
+- **Trade tags** — curated vocabulary (`panic_sold`, `held_too_long`,
+  `thesis_validated`, etc.) attached to per-ticker holding windows for
+  pattern mining.
+- **Earnings calendar** — yfinance pull, color-banded by proximity, only
+  for held tickers.
+
+**Data quality** (`/api/portfolio/data-quality`)
+- Surfaces missing cost basis, untickered securities, missing prices,
+  anomalous backfill days, stale items, sparse forward snapshots,
+  overlapping aggregator connections, and missing policy-ticker benchmarks.
+  Each finding has a recommended fix.
+
+**Operations**
+- One-shot `daily_refresh` orchestrates Plaid snapshot → SnapTrade sync →
+  cache rebuild → benchmarks pull → earnings refresh.
+- `dedupe_securities` merges duplicate `securities` rows that arose from
+  Plaid + SnapTrade ingesting the same ticker under different opaque IDs.
+- `migrate_broker_to_snaptrade` repoints accounts from Plaid to SnapTrade
+  while preserving history.
+- Daily SQLite backup (`jobs.backup --keep 365`) — point the folder at
+  iCloud/Dropbox/OneDrive for off-machine durability.
 
 ## Architecture
 
@@ -42,67 +92,57 @@ src/portfolio_tracker/                  frontend/src/
 alembic/        DB migrations
 ```
 
-### How performance over time actually works
+## How the V series actually gets built
 
-Neither Plaid nor SnapTrade returns a true time series of past portfolio value.
-We build it two ways:
+Neither Plaid nor SnapTrade returns a true time series of past portfolio
+value. The pipeline is three-tiered, in priority order:
 
-| Path | Source | Coverage | Accuracy |
-|---|---|---|---|
-| **Forward snapshot** | `jobs/snapshot.py` writes one row per `(account, security)` per day | from the day you start running it | high — observed, straight from the institution |
-| **Backfill** | `services/performance.py` walks `investment_transactions` backward from today's snapshot, valuing each day with `prices` from yfinance | up to ~24 months (Plaid retention) | **unreliable** — see below |
+| Source | Coverage | Notes |
+|---|---|---|
+| `holdings_snapshots` (forward) | from the day you start running `jobs.snapshot` | Authoritative — straight from the institution. |
+| `portfolio_values_daily` (cache) | reflects past walk-backs, plus today's snapshot | Avoids re-walking transactions on every chart read. Forward snapshots always win on overlap. |
+| Walk-back reconstruction | up to ~24 months back (Plaid retention) or as far as SnapTrade's history reaches (~5 years for some) | Tracks two parallel state machines: positions (reverses every BUY/SELL/TRANSFER + share-moving `cash/*` event) and a cash adjustment series (so V_start doesn't collapse on net deployment). |
 
-The backfill reconstructs *positions* but not *cash*. When you bought stock
-during the backfill window with cash already in the account, reversing those
-buys collapses the apparent starting portfolio because the funding cash is
-invisible. The result is a wildly understated `V_start` and inflated returns.
+**Active-item filter**: every aggregation query goes through
+`active_account_ids()`, which returns only accounts whose Item has
+`is_data_active=True`. Set an Item inactive on the Accounts page when you
+have the same brokerage connected through two aggregators.
 
-**The pragmatic stance:** forward snapshots are observations; backfill is a
-model. Run the snapshot job nightly. After ~1 week of forward data, the chart
-auto-switches from backfill to forward-observed and the numbers become trustable.
+**ACATS as cashflow**: outgoing share-side ACATS events have `amount=$0`
+in the txn record, but represent value leaving the portfolio. The
+performance pipeline values them at the close on the transfer date and
+adds them to the cashflow series, so a $136k transfer doesn't show as a
+phantom market loss.
 
-### Money-flow-matched return (% comparison)
+## Cashflow direction inference
 
-Both the portfolio and the synthetic SPY / QQQ benchmark portfolios use the
-same `V_start` and receive the same cashflows on the same dates. Each day's
-% return is Modified Dietz:
-
-```
-return_pct(d) = (V(d) − V_start − ΣC(≤d)) / (V_start + Σ C_i · w_i)
-                                              where w_i = (d − d_i) / (d − d_0)
-```
-
-The synthetic SPY portfolio invests `V_start` in SPY at the start date and
-each cashflow in SPY at its date — `V_spy(d) = total_shares × spy_close(d)`.
-Same for QQQ. Both lines start at 0% and diverge by real performance.
-
-When `V_start` is a backfill artifact, all three lines are inflated; the
-chart includes a prominent warning explaining this and what's still
-trustworthy (current value, contributions, market returns).
-
-### Cashflow direction inference
-
-Brokers report `cash` transaction signs inconsistently (some from the
-investor's perspective, some from the cash account's). The audit endpoint
-classifies each `(type, subtype)` as inflow / outflow / internal by NAME:
+Brokers report `cash` transaction signs inconsistently. Each `(type, subtype)`
+is classified by NAME, not sign:
 
 | Subtype | Treated as |
 |---|---|
 | `deposit`, `contribution`, `rollover`, `wire`, `ach` | external inflow |
 | `withdrawal` | external outflow |
-| `transfer` (cash type) | sign-based (uses Plaid's amount) |
-| `transfer` (top-level type) | external inflow if Plaid amount is negative; outflow if positive — except internal subtypes (`assignment`, `merger`, `spin off`, `split`) which are skipped |
+| `transfer` (cash type) | sign-based (Plaid amount) |
+| `transfer` (top-level) | external in/out by Plaid sign — except internal subtypes (`assignment`, `merger`, `spin off`, `split`, `stock distribution`) which are skipped |
+| `external_asset_transfer_in/out` | net residual after matching internal moves → external in/out, valued at close |
+| `optionassignment`, `optionexpiration`, `rei` | internal — share-moving with no external cash effect |
 | `dividend`, `interest`, `buy`, `sell`, `fee` | internal — affects value, not basis |
 
-Inspect at `GET /api/portfolio/cashflow-audit`.
+Inspect via `GET /api/portfolio/cashflow-audit`.
 
-### Local data preservation
+## Data preservation
 
 Plaid retains investment transactions for **only 24 months**. Two layers
 protect against losing data:
 
-1. **Application never deletes.** Every `holdings_snapshots`, `investment_transactions`, `prices`, and `benchmarks` row is appended forever. After 5 years of nightly snapshots, you'll have 5 years of data even though Plaid only ever shows 2.
-2. **Daily SQLite backup** to `backups/` — `python -m portfolio_tracker.jobs.backup --keep 365` writes a transactionally-consistent copy and prunes old ones. Point that folder at iCloud / Dropbox / OneDrive for off-machine durability.
+1. **Application never deletes.** Every `holdings_snapshots`,
+   `investment_transactions`, `prices`, and `benchmarks` row is appended
+   forever. After 5 years of nightly snapshots you'll have 5 years of
+   data even though Plaid only ever shows 2.
+2. **Daily SQLite backup** to `backups/` —
+   `python -m portfolio_tracker.jobs.backup --keep 365` writes a
+   transactionally-consistent copy and prunes old ones.
 
 ## One-time setup
 
@@ -123,16 +163,13 @@ pip install -e ".[dev]"
 
 ### 2. Aggregator credentials
 
-#### Plaid (free Trial plan covers personal use up to 10 institutions)
+**Plaid** (free Trial covers personal use up to 10 institutions): sign up at
+<https://dashboard.plaid.com/signup>, pull `client_id` + production secret
+from Team Settings → Keys.
 
-Sign up at <https://dashboard.plaid.com/signup>. Plaid auto-approves Trial in
-US/CA. Pull `client_id` + production secret from Team Settings → Keys.
-
-#### SnapTrade (optional, recommended for Fidelity)
-
-Plaid's Fidelity coverage is patchy. SnapTrade is a separate aggregator with
-better Fidelity support. Free Developer plan: <https://snaptrade.com/signup>.
-Pull `clientId` + `consumerKey`.
+**SnapTrade** (optional, recommended for Fidelity and for >24mo Robinhood
+history): free Developer plan at <https://snaptrade.com/signup>, pull
+`clientId` + `consumerKey`.
 
 ### 3. Generate a Fernet key (encrypts access tokens at rest)
 
@@ -144,8 +181,8 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 ```bash
 cp .env.example .env
-# Edit .env, fill in: PLAID_CLIENT_ID, PLAID_SECRET, PLAID_ENV=production,
-#                    FERNET_KEY, optionally SNAPTRADE_CLIENT_ID + SNAPTRADE_CONSUMER_KEY
+# Fill in: PLAID_CLIENT_ID, PLAID_SECRET, PLAID_ENV=production, FERNET_KEY,
+# optionally SNAPTRADE_CLIENT_ID + SNAPTRADE_CONSUMER_KEY.
 ```
 
 `.env` is gitignored. Never commit it.
@@ -159,14 +196,10 @@ alembic upgrade head
 ### 6. Frontend
 
 ```bash
-cd frontend
-npm install
-cd ..
+cd frontend && npm install && cd ..
 ```
 
 ## Daily use
-
-Start both servers in separate terminals:
 
 ```bash
 # Terminal 1 — backend
@@ -180,42 +213,61 @@ Open <http://localhost:5173>.
 
 ### Linking accounts
 
-- **Plaid**: Accounts page → `+ Mine` (or `+ Spouse's` for separate phone-cache profiles) → Plaid Link opens → log in to your brokerage.
-- **SnapTrade**: Accounts page → `+ Mine` (under "via SnapTrade") → portal opens in new tab → log in → return → click `Sync mine`.
+- **Plaid**: Accounts page → `+ Mine` (or `+ Spouse's` for separate
+  phone-cache profiles) → Plaid Link opens.
+- **SnapTrade**: Accounts page → `+ Mine` under "via SnapTrade" → portal
+  opens in a new tab → return → click `Sync mine`.
 
 ### Pulling data
 
 After linking at least one Item:
 
 ```bash
-python -m portfolio_tracker.jobs.snapshot       # write today's holdings snapshot
-python -m portfolio_tracker.jobs.backfill       # 24mo of investment transactions (Plaid items)
+python -m portfolio_tracker.jobs.daily_refresh    # everything below, in one shot
+# OR individually:
+python -m portfolio_tracker.jobs.snapshot         # today's Plaid holdings
+python -m portfolio_tracker.jobs.backfill         # 24mo of Plaid transactions
 python -m portfolio_tracker.jobs.benchmarks --start 2024-01-01
 python -m portfolio_tracker.jobs.prices --start 2024-01-01
-python -m portfolio_tracker.jobs.scrub          # drop any non-investment accounts that slipped in
+python -m portfolio_tracker.jobs.earnings_calendar
+python -m portfolio_tracker.jobs.scrub            # drop any non-investment accounts
 ```
 
-The SnapTrade `Sync` button does its own snapshot + 24mo backfill inline — the
-`snapshot` and `backfill` jobs only touch Plaid items.
+The SnapTrade `Sync` button does its own snapshot + multi-year backfill
+inline.
 
 ### Daily schedule
 
 ```cron
-# Linux/macOS — 8 PM ET, after market close (weekdays)
-0 20 * * 1-5  cd /path/to/portfolio-tracker && .venv/bin/python -m portfolio_tracker.jobs.snapshot
-0 20 * * 1-5  cd /path/to/portfolio-tracker && .venv/bin/python -m portfolio_tracker.jobs.benchmarks --start 2024-01-01
+# Linux/macOS — 8 PM ET, weekdays
+0 20 * * 1-5  cd /path/to/portfolio-tracker && .venv/bin/python -m portfolio_tracker.jobs.daily_refresh
 0 21 * * *    cd /path/to/portfolio-tracker && .venv/bin/python -m portfolio_tracker.jobs.backup --keep 365
 ```
 
-Windows: Task Scheduler with `.\.venv\Scripts\python.exe -m portfolio_tracker.jobs.snapshot` daily at 8 PM, working directory set to the project root.
+Windows: see `scripts/SCHEDULING.md`.
 
 ## Manual overrides
 
 Some institutions don't expose `cost_basis` (notably SoFi via Plaid). The
 **Holdings** page surfaces these as data-quality findings with inline forms:
 
-- **Cost basis override** — enter total dollars paid (price × shares + fees) for an `(account, security)` pair. Once saved, weighted-avg cost and unrealized P&L populate.
-- **Ticker override** — for un-tickered securities (mutual funds with internal codes, foreign listings), enter a yfinance-compatible symbol. Re-run `jobs.prices` to populate history.
+- **Cost basis override** — total dollars paid (price × shares + fees) for
+  an `(account, security)` pair.
+- **Ticker override** — for un-tickered securities (mutual funds with
+  internal codes, foreign listings), enter a yfinance-compatible symbol,
+  re-run `jobs.prices`.
+
+## Maintenance jobs
+
+```bash
+# Merge duplicate `securities` rows when Plaid and SnapTrade keyed the
+# same instrument under different opaque IDs (one-shot, idempotent):
+python -m portfolio_tracker.jobs.dedupe_securities --commit
+
+# Re-anchor Plaid-linked accounts onto SnapTrade equivalents (preserves
+# history; flips Item to inactive on the old aggregator):
+python -m portfolio_tracker.jobs.migrate_broker_to_snaptrade --commit
+```
 
 ## Pre-push checklist
 
@@ -227,27 +279,23 @@ cd frontend && npm run typecheck && npm run build
 
 ## Troubleshooting
 
-**Plaid Link won't open OAuth institutions (Chase, Schwab, Capital One).**
-Add `http://localhost:5173/oauth-redirect` to Team Settings → API → Allowed
-redirect URIs.
-
-**SnapTrade portal succeeds but `Sync` returns 404.** The user_secret was
-lost mid-flow (early bug, fixed). Click portal again — auto-recovery
-deletes the orphaned SnapTrade user and re-registers, persisting the secret
-to the `snaptrade_users` table.
-
-**`investments_transactions_get` returns 0.** Plaid sometimes needs ~2
-minutes to ingest historical transactions for a freshly linked Item. Wait
-and re-run `jobs.backfill`.
-
-**yfinance can't find a ticker.** Set a `ticker_override` via the Holdings
-page → Data Quality finding, then re-run `jobs.prices`. The job has a
-Stooq fallback for tickers yfinance fails on, but exotic listings may still
-require manual handling.
-
-**Vite says ready but browser shows ERR_CONNECTION_REFUSED.** IPv4/IPv6
-binding mismatch. The shipped `vite.config.ts` binds `host: true` (all
-interfaces) and proxies to `127.0.0.1:8000` to avoid this.
+- **Plaid Link won't open OAuth institutions** (Chase, Schwab, Capital One):
+  add `http://localhost:5173/oauth-redirect` to Team Settings → API →
+  Allowed redirect URIs.
+- **SnapTrade portal succeeds but Sync 404s**: lost `user_secret` mid-flow
+  (early bug, fixed). Click portal again — auto-recovery deletes the
+  orphaned user and re-registers, persisting the secret.
+- **`investments_transactions_get` returns 0**: Plaid sometimes needs ~2
+  minutes to ingest historical transactions for a freshly linked Item.
+  Wait, re-run `jobs.backfill`.
+- **yfinance can't find a ticker**: set a `ticker_override`, re-run
+  `jobs.prices`. The job has a Stooq fallback.
+- **Vite shows ERR_CONNECTION_REFUSED**: IPv4/IPv6 binding mismatch.
+  `vite.config.ts` binds `host: true` and proxies `127.0.0.1:8000`.
+- **Phantom V steps in the historical chart**: usually a duplicate
+  `securities` row (run `dedupe_securities`) or an ACATS that wasn't in
+  the cashflow series (already handled, but check
+  `/api/portfolio/cashflow-audit` for unclassified subtypes).
 
 ## License
 
