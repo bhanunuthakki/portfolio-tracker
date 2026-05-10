@@ -222,9 +222,9 @@ def _normalize_mask(s: str | None) -> str | None:
     """Reduce broker mask strings to a comparable canonical form.
 
     Different aggregators emit different mask formats:
-      * Plaid: bare 4-digit suffix (e.g., "8521")
-      * SnapTrade Fidelity: asterisk-prefixed last 4 (e.g., "*****8521")
-      * SnapTrade Robinhood: 9-digit full account number (e.g., "REDACTED")
+      * Plaid: bare 4-digit suffix (e.g., "1234")
+      * SnapTrade Fidelity: asterisk-prefixed last 4 (e.g., "*****1234")
+      * SnapTrade Robinhood: full account number; only the last 4 are stable
 
     All three encode the same trailing 4 digits — so we normalize to
     the *last 4 digits* of the numeric portion. That's enough to match

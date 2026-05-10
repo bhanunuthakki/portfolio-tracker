@@ -41,8 +41,8 @@ deferred until you wake it up.
 4. Trigger: **Daily** → start time `06:00 AM` (or whenever you're
    comfortable hitting the brokerage APIs — pre-market is fine).
 5. Action: **Start a program**.
-   * Program/script: `C:\Users\REDACTED\.gemini\antigravity\scratch\portfolio-tracker\scripts\run_daily_refresh.bat`
-   * Start in: `C:\Users\REDACTED\.gemini\antigravity\scratch\portfolio-tracker`
+   * Program/script: `C:\path\to\portfolio-tracker\scripts\run_daily_refresh.bat`
+   * Start in: `C:\path\to\portfolio-tracker`
 6. Finish → check **Open the Properties dialog** → OK.
 7. In Properties:
    * **General** tab → "Run whether user is logged on or not." (Asks for
@@ -108,7 +108,7 @@ data physically on your network. Same crontab pattern as Option 2.
 A daily check that's worth doing for the first week:
 
 ```powershell
-Get-ChildItem "C:\Users\REDACTED\.gemini\antigravity\scratch\portfolio-tracker\scripts\logs" |
+Get-ChildItem "C:\path\to\portfolio-tracker\scripts\logs" |
   Sort-Object LastWriteTime -Descending |
   Select-Object -First 3 Name, LastWriteTime, Length
 ```
