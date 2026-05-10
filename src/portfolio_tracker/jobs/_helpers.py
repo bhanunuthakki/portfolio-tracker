@@ -64,10 +64,38 @@ def upsert_account(session: Session, item_id: int, plaid_account: PlaidAccount) 
 
 
 def upsert_security(session: Session, plaid_security: PlaidSecurity) -> Security:
+    """Find-or-create a Security row for an aggregator-supplied identity.
+
+    Lookup precedence:
+      1. **`plaid_security_id`** (the aggregator's internal ID) — exact
+         match. The fast path for "I've seen this exact security row
+         before from this aggregator."
+      2. **`ticker`** — fall back when the aggregator's ID isn't in the
+         table yet but a row with the same ticker exists from a *different*
+         aggregator. Without this, both Plaid and SnapTrade ingest paths
+         create separate rows for the same instrument (NU, VTI, etc.):
+         transactions and prices land under different IDs and the walk-back
+         drops positions whose `security_id` happens to be the one without
+         pulled prices. We adopt the existing row, repoint
+         `plaid_security_id` to whichever aggregator we're currently
+         seeing, and refresh metadata. Tickers without a value (None or
+         empty) skip step 2.
+    """
     existing = session.execute(
         select(Security).where(Security.plaid_security_id == plaid_security.plaid_security_id)
     ).scalar_one_or_none()
+    if existing is None and plaid_security.ticker:
+        existing = session.execute(
+            select(Security).where(Security.ticker == plaid_security.ticker)
+        ).scalar_one_or_none()
     if existing is not None:
+        # Last-writer-wins on metadata is fine — both aggregators report
+        # essentially the same info. Repoint plaid_security_id only if
+        # the row was found by ticker (different aggregator's view); the
+        # column is unique, so we keep one canonical ID per row and
+        # silently swap to whichever ID we're currently ingesting under.
+        if existing.plaid_security_id != plaid_security.plaid_security_id:
+            existing.plaid_security_id = plaid_security.plaid_security_id
         existing.ticker = plaid_security.ticker
         existing.cusip = plaid_security.cusip
         existing.isin = plaid_security.isin

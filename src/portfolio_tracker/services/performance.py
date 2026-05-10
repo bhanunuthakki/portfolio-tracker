@@ -43,6 +43,7 @@ from portfolio_tracker.models import (
     Security,
 )
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
+from portfolio_tracker.services.active_items import active_account_ids
 
 # Diagnostics-only threshold: daily portfolio-value swings beyond this are
 # almost certainly reconstruction artifacts (unobserved transfers, gifted
@@ -91,6 +92,33 @@ _OUTFLOW_CASH_SUBTYPES: frozenset[str] = frozenset(
 _AMBIGUOUS_CASH_SUBTYPES: frozenset[str] = frozenset(
     {
         "transfer",
+    }
+)
+
+# `cash`-typed subtypes that **change share quantities** without a real cash
+# flow. SnapTrade emits these instead of TRANSFER for ACATS in/out, option
+# assignment/expiration to underlying shares, and dividend reinvestments.
+# The walk-back must reverse the *quantity* (treat exactly like TRANSFER —
+# `rolling[sid] += -signed_quantity`) AND must NOT touch the cash adjustment
+# series (these have either amount=$0 or a paired-but-not-recorded cash
+# event, so applying the default cash/`-magnitude` rule produces phantom
+# cash holes on past dates).
+#
+# Surfaced bug this fixes: an outgoing ACATS that moved several positions
+# out of a brokerage IRA
+# was not being reversed during walk-back. Anchor positions (today) reflect
+# the post-transfer state — without reversing the transfer, the walk-back
+# left those shares OUT of historical rolling. Combined with the buys we
+# do reverse during walk-back, the rolling quantity went **negative**,
+# producing negative dollar position values that flipped sign across days
+# and manifested as $30-$60k step-ups in the chart.
+_SHARE_MOVING_CASH_SUBTYPES: frozenset[str] = frozenset(
+    {
+        "external_asset_transfer_in",
+        "external_asset_transfer_out",
+        "optionassignment",
+        "optionexpiration",
+        "rei",  # dividend reinvestment — shares acquired, no separate cash leg
     }
 )
 
@@ -318,6 +346,9 @@ def _forward_subset_values(
     end_date: date,
     security_ids: frozenset[int],
 ) -> dict[date, Decimal]:
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     rows = session.execute(
         select(
             HoldingSnapshot.snapshot_date,
@@ -328,6 +359,7 @@ def _forward_subset_values(
         .where(HoldingSnapshot.snapshot_date >= start_date)
         .where(HoldingSnapshot.snapshot_date <= end_date)
         .where(HoldingSnapshot.security_id.in_(security_ids))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
     for snap_date, value, quantity, price in rows:
@@ -350,8 +382,12 @@ def _backfill_subset_values(
     price` summed across the listed securities, which is what we want for
     "value of the index-ETF portion."
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     anchor_date = session.execute(
         select(HoldingSnapshot.snapshot_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .order_by(HoldingSnapshot.snapshot_date.asc())
         .limit(1)
     ).scalar_one_or_none()
@@ -362,6 +398,7 @@ def _backfill_subset_values(
         select(HoldingSnapshot.security_id, HoldingSnapshot.quantity)
         .where(HoldingSnapshot.snapshot_date == anchor_date)
         .where(HoldingSnapshot.security_id.in_(security_ids))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
     rolling: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
     for sid, qty in rows:
@@ -370,6 +407,7 @@ def _backfill_subset_values(
     backward_tx = session.execute(
         select(InvestmentTransaction)
         .where(InvestmentTransaction.security_id.in_(security_ids))
+        .where(InvestmentTransaction.account_id.in_(accts))
         .where(InvestmentTransaction.date < anchor_date)
         .where(InvestmentTransaction.date >= start_date)
         .order_by(InvestmentTransaction.date.desc())
@@ -464,9 +502,13 @@ def _daily_internal_index_cashflows(
     """
     if not security_ids:
         return {}
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     rows = session.execute(
         select(InvestmentTransaction)
         .where(InvestmentTransaction.security_id.in_(security_ids))
+        .where(InvestmentTransaction.account_id.in_(accts))
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
     ).scalars().all()
@@ -498,23 +540,30 @@ def _policy_matched_value(
     in their target weights. Each lot is valued at today's prices for
     every component.
 
-    If any ticker is missing benchmark data on the start date, that ticker
-    is skipped from the lot — the remaining weights still get invested.
-    Total exposure scales down accordingly so the synthetic value is
-    conservative rather than failing entirely.
+    Missing-data handling: when a policy ticker has no benchmark price on
+    the deployment date, we **renormalize** the remaining weights so the
+    full lot still gets invested. Pre-fix behavior dropped the missing
+    ticker silently and only invested the surviving fraction of capital,
+    which manifested as a hard −70% drop on day 1 if (e.g.) VTI/VWO had
+    no pulled benchmark data and only QQQ/SGOV did. The chart line was
+    "sit at full capital but only invest 30% of it" — a meaningless
+    portfolio that's not the user's policy at all.
+
+    The renormalized version answers the right hypothetical: "what would
+    your full capital have done invested in the *priceable* portion of
+    your policy mix in the same proportions?" The data-quality report
+    surfaces the missing-data condition separately so the user knows the
+    line is approximated.
     """
     if not sorted_dates or not weights:
         return {}
     start_date = sorted_dates[0]
 
-    # lots: list of {ticker: qty} — each lot is one purchase event
-    initial_lot: dict[str, Decimal] = {}
-    for ticker, weight in weights.items():
-        closes = benchmark_series.get(ticker, {})
-        price = _last_known_price(closes, start_date)
-        if price is None or price == 0:
-            continue
-        initial_lot[ticker] = (base_value * weight) / price
+    # Initial lot at start_date: split base_value across priceable tickers,
+    # renormalized to sum to 1.
+    initial_lot = _build_lot_renormalized(
+        base_value, weights, benchmark_series, start_date
+    )
     if not initial_lot:
         return {}
     lots: list[dict[str, Decimal]] = [initial_lot]
@@ -523,13 +572,9 @@ def _policy_matched_value(
     for current_date in sorted_dates:
         cf = daily_cashflow.get(current_date, Decimal(0))
         if cf != 0:
-            cf_lot: dict[str, Decimal] = {}
-            for ticker, weight in weights.items():
-                closes = benchmark_series.get(ticker, {})
-                price = _last_known_price(closes, current_date)
-                if price is None or price == 0:
-                    continue
-                cf_lot[ticker] = (cf * weight) / price
+            cf_lot = _build_lot_renormalized(
+                cf, weights, benchmark_series, current_date
+            )
             if cf_lot:
                 lots.append(cf_lot)
 
@@ -546,6 +591,36 @@ def _policy_matched_value(
         if total > 0:
             out[current_date] = total
     return out
+
+
+def _build_lot_renormalized(
+    capital: Decimal,
+    weights: dict[str, Decimal],
+    benchmark_series: dict[str, dict[date, Decimal]],
+    on_date: date,
+) -> dict[str, Decimal]:
+    """Split `capital` across policy tickers that have a price on `on_date`,
+    renormalizing surviving weights to sum to 1 so the full capital lands.
+
+    Returns `{ticker: shares}`. Empty dict if no policy ticker is priceable
+    on the date — caller decides whether to skip the lot or fail loudly.
+    """
+    priceable: list[tuple[str, Decimal, Decimal]] = []
+    surviving_weight = Decimal(0)
+    for ticker, weight in weights.items():
+        closes = benchmark_series.get(ticker, {})
+        price = _last_known_price(closes, on_date)
+        if price is None or price == 0:
+            continue
+        priceable.append((ticker, weight, price))
+        surviving_weight += weight
+    if not priceable or surviving_weight == 0:
+        return {}
+    lot: dict[str, Decimal] = {}
+    for ticker, weight, price in priceable:
+        renormed_weight = weight / surviving_weight
+        lot[ticker] = (capital * renormed_weight) / price
+    return lot
 
 
 def _money_flow_matched_value(
@@ -686,11 +761,15 @@ def _daily_external_cashflows(
         type), we trust Plaid's standard sign convention: negative amount
         = cash going INTO the account = inflow, so cashflow_in = -amount.
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     rows = session.execute(
         select(InvestmentTransaction.date, InvestmentTransaction.amount,
                InvestmentTransaction.type, InvestmentTransaction.subtype)
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
+        .where(InvestmentTransaction.account_id.in_(accts))
     ).all()
 
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
@@ -699,7 +778,107 @@ def _daily_external_cashflows(
         if cashflow_in == 0:
             continue
         totals[tx_date] += cashflow_in
+
+    # Plus: net dollar value of share-side ACATS in/out events that have
+    # no matching counter-event in our linked accounts. SnapTrade emits
+    # `cash/external_asset_transfer_in/out` with amount=$0 (the
+    # counterparty doesn't tell us a USD value), so we have to compute
+    # it ourselves at the close price on the transfer date. We then
+    # treat the net as an external cashflow for TWR purposes — same
+    # as a deposit / withdrawal — because from our portfolio's frame of
+    # reference, value entered or left without a market gain/loss.
+    #
+    # Matching logic: an in/out pair with same (date, ticker, abs(qty))
+    # netted to zero means an internal move between two of the user's
+    # linked accounts; we skip those. Anything left over is a true
+    # external flow.
+    transfer_flows = _share_transfer_external_cashflows(session, start_date, end_date, accts)
+    for d, c in transfer_flows.items():
+        totals[d] = totals.get(d, Decimal(0)) + c
+
     return dict(totals)
+
+
+def _share_transfer_external_cashflows(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    accts: frozenset[int],
+) -> dict[date, Decimal]:
+    """Net dollar-valued cashflow from unmatched share-side ACATS events.
+
+    For each (date, security_id), sum signed share quantities across
+    `cash/external_asset_transfer_*` events. Net != 0 means the user
+    moved shares to/from an account our DB doesn't see, which from the
+    portfolio's frame is an external dollar inflow (in) or outflow (out).
+
+    We value at close price on the transfer date and contribute the
+    signed dollar to the cashflow series:
+      net_qty > 0 (more in than out) → inflow → cf += +value
+      net_qty < 0 (more out than in) → outflow → cf += -value
+    """
+    rows = session.execute(
+        select(
+            InvestmentTransaction.date,
+            InvestmentTransaction.security_id,
+            InvestmentTransaction.quantity,
+        )
+        .where(InvestmentTransaction.date >= start_date)
+        .where(InvestmentTransaction.date <= end_date)
+        .where(InvestmentTransaction.account_id.in_(accts))
+        .where(InvestmentTransaction.type == InvestmentTransactionType.CASH.value)
+        .where(
+            InvestmentTransaction.subtype.in_(
+                ["external_asset_transfer_in", "external_asset_transfer_out"]
+            )
+        )
+    ).all()
+    if not rows:
+        return {}
+
+    # Net signed qty per (date, sid)
+    net_by: dict[tuple[date, int], Decimal] = defaultdict(lambda: Decimal(0))
+    for tx_date, sid, qty in rows:
+        if sid is None:
+            continue
+        net_by[(tx_date, sid)] += Decimal(qty or 0)
+
+    sids_needed = frozenset(sid for (_, sid) in net_by)
+    if not sids_needed:
+        return {}
+    # Pull a window of prices around the transfer dates so we can
+    # forward-fill if the exact date is a non-trading day.
+    earliest_d = min(d for (d, _) in net_by) - timedelta(days=14)
+    price_rows = session.execute(
+        select(Price.security_id, Price.date, Price.close)
+        .where(Price.security_id.in_(sids_needed))
+        .where(Price.date >= earliest_d)
+        .where(Price.date <= end_date)
+    ).all()
+    price_lookup: dict[int, dict[date, Decimal]] = defaultdict(dict)
+    for sid, d, c in price_rows:
+        price_lookup[sid][d] = Decimal(c)
+
+    out: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
+    for (tx_date, sid), net_qty in net_by.items():
+        if net_qty == 0:
+            continue
+        close = _last_known_price(price_lookup.get(sid, {}), tx_date)
+        if close is None:
+            # Last-resort fallback to today's institution_price. Better
+            # than skipping — that would leave a phantom V step.
+            sp_row = session.execute(
+                select(HoldingSnapshot.institution_price)
+                .where(HoldingSnapshot.security_id == sid)
+                .where(HoldingSnapshot.institution_price.is_not(None))
+                .order_by(HoldingSnapshot.snapshot_date.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if sp_row is None:
+                continue
+            close = Decimal(sp_row)
+        out[tx_date] += net_qty * close
+    return dict(out)
 
 
 def _signed_cashflow(tx_type: str, tx_subtype: str | None, amount: Decimal) -> Decimal:
@@ -798,6 +977,9 @@ def _cached_daily_values(
 def _forward_values_from_snapshots(
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     rows = session.execute(
         select(
             HoldingSnapshot.snapshot_date,
@@ -807,6 +989,7 @@ def _forward_values_from_snapshots(
         )
         .where(HoldingSnapshot.snapshot_date >= start_date)
         .where(HoldingSnapshot.snapshot_date <= end_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
 
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
@@ -838,8 +1021,12 @@ def _backfill_values_from_transactions(
 
     Daily total = positions × historical_prices  +  cash_adjustment[d].
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     anchor_row = session.execute(
         select(HoldingSnapshot.snapshot_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .order_by(HoldingSnapshot.snapshot_date.asc())
         .limit(1)
     ).scalar_one_or_none()
@@ -858,6 +1045,7 @@ def _backfill_values_from_transactions(
     # affect positions.
     backward_tx = session.execute(
         select(InvestmentTransaction)
+        .where(InvestmentTransaction.account_id.in_(accts))
         .where(InvestmentTransaction.date < anchor_date)
         .where(InvestmentTransaction.date >= start_date)
         .order_by(InvestmentTransaction.date.desc())
@@ -907,9 +1095,13 @@ def _backfill_values_from_transactions(
 
 
 def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]:
+    accts = active_account_ids(session)
+    if not accts:
+        return {}
     rows = session.execute(
         select(HoldingSnapshot.security_id, HoldingSnapshot.quantity)
         .where(HoldingSnapshot.snapshot_date == anchor_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
     positions: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
     for security_id, quantity in rows:
@@ -922,17 +1114,26 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
 
     Sign conventions vary across data sources:
       * Plaid signs the quantity by direction (sell = negative, buy = positive).
-      * SnapTrade reports `units` as an unsigned magnitude regardless of type.
+      * SnapTrade reports `units` as an unsigned magnitude for buy/sell, but
+        SIGNED quantities for transfer-flavored events (ACATS in is
+        positive, ACATS out is negative).
 
     We use the TRANSACTION TYPE — not the sign of `quantity` — to determine
-    direction, treating `quantity` as an unsigned magnitude:
-      * BUY      → user gained shares; reverse subtracts |quantity|
-      * SELL     → user lost shares; reverse adds |quantity|
-      * TRANSFER → direction varies per broker; trust the signed value
-                   and negate (transfer-in qty + → reverse subtracts)
+    direction for BUY/SELL, treating `quantity` as an unsigned magnitude.
+    For SnapTrade's `cash`-typed share-moving events (see
+    `_SHARE_MOVING_CASH_SUBTYPES`), the quantity is already signed, so we
+    just negate it as TRANSFER does:
+      * BUY                    → reverse subtracts |quantity|
+      * SELL                   → reverse adds |quantity|
+      * TRANSFER               → reverse subtracts signed(quantity)
+      * cash/external_asset_transfer_in   (qty +) → reverse subtracts +qty
+      * cash/external_asset_transfer_out  (qty −) → reverse subtracts −qty (= adds)
+      * cash/optionassignment             (qty +) → reverse subtracts +qty
+      * cash/optionexpiration             (qty +) → reverse subtracts +qty
+      * cash/rei                          (qty +) → reverse subtracts +qty
 
-    Returns None for cash / fee / dividend transactions (qty=0 or no
-    position effect).
+    Returns None for events with no position effect (qty=0, plain
+    cash/dividend/withdrawal/contribution, fees on USD).
     """
     tx_type = tx.type
     quantity = Decimal(tx.quantity)
@@ -945,6 +1146,10 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
         return magnitude
     if tx_type == InvestmentTransactionType.TRANSFER.value:
         return -quantity
+    if tx_type == InvestmentTransactionType.CASH.value:
+        subtype = (tx.subtype or "").lower().strip()
+        if subtype in _SHARE_MOVING_CASH_SUBTYPES:
+            return -quantity
     return None
 
 
@@ -1007,6 +1212,14 @@ def _reverse_transaction_cash_delta(
     if tx.type == InvestmentTransactionType.FEE.value:
         return magnitude
     if tx.type == InvestmentTransactionType.CASH.value:
+        # Share-moving cash events (ACATS, option assignment/expiration,
+        # dividend reinvestment) have either amount=$0 or a paired-but-
+        # not-recorded cash event. Treat as cash-neutral so we don't
+        # phantom-debit USD on past dates. The position-quantity reversal
+        # is handled by `_reverse_transaction_quantity`.
+        subtype = (tx.subtype or "").lower().strip()
+        if subtype in _SHARE_MOVING_CASH_SUBTYPES:
+            return Decimal(0)
         # Internal cash events left after the external-flow check are
         # dividends / interest / similar credits — money entered, so prior
         # cash was lower.
