@@ -261,7 +261,16 @@ function TradeTable({
         <tbody className="divide-y divide-slate-100">
           {rows.map((r) => {
             const pnl = parseFloat(r.pnl_dollars);
-            const cls = pnl > 0 ? "text-emerald-700" : pnl < 0 ? "text-red-700" : "";
+            // Pure-grey when the row is flagged unreliable — colored P&L
+            // would imply a confident win/loss, which we don't have when
+            // cost basis is missing.
+            const cls = r.cost_basis_unreliable
+              ? "text-slate-500"
+              : pnl > 0
+                ? "text-emerald-700"
+                : pnl < 0
+                  ? "text-red-700"
+                  : "";
             const pnlPct = r.pnl_pct ?? 0;
             // "Data incomplete" tag: bought without sells AND no current
             // position usually means an untracked ACATS-out.
@@ -270,12 +279,27 @@ function TradeTable({
               parseFloat(r.bought_total) > 0 &&
               parseFloat(r.sold_total) === 0;
             return (
-              <tr key={r.ticker} className="hover:bg-slate-50">
+              <tr
+                key={r.ticker}
+                className={
+                  r.cost_basis_unreliable
+                    ? "bg-amber-50/40 hover:bg-amber-50"
+                    : "hover:bg-slate-50"
+                }
+              >
                 <Td>
                   <div className="font-mono font-semibold text-slate-900">
                     {r.ticker}
                   </div>
-                  {incomplete && (
+                  {r.cost_basis_unreliable && (
+                    <div
+                      className="text-[10px] font-medium text-amber-800"
+                      title="Sold or held more shares than we have recorded buys for — likely ACATS-in / pre-history shares. P&L is overstated by their original cost basis."
+                    >
+                      cost basis incomplete
+                    </div>
+                  )}
+                  {incomplete && !r.cost_basis_unreliable && (
                     <div className="text-[10px] text-amber-700">
                       data incomplete
                     </div>

@@ -43,11 +43,24 @@ class ItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     item_id: int
+    source: str
     institution_name: str | None
     plaid_institution_id: str | None
     linked_at: datetime
     last_refreshed_at: datetime | None
+    is_data_active: bool
     accounts: list[AccountOut]
+
+
+class ItemDataActiveIn(BaseModel):
+    """Toggle whether this Item's data flows into aggregations.
+
+    Setting `is_data_active=False` keeps the connection linked (so the
+    aggregator slot isn't surrendered) but excludes the Item's accounts
+    from every holdings / transactions / V / risk / trade-analysis query.
+    """
+
+    is_data_active: bool
 
 
 class HoldingOut(BaseModel):

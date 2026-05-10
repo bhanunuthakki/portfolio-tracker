@@ -12,6 +12,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -104,6 +105,17 @@ class Item(Base):
         DateTime(timezone=True), nullable=True
     )
     last_transactions_cursor: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # When False, every aggregation query (holdings, transactions, V series,
+    # backfill, data quality, trade analysis) silently skips this item. The
+    # connection itself stays linked and the snapshot job still touches it
+    # so the access_token doesn't go stale — but the data it pulls doesn't
+    # influence any user-facing number. Used to retire a redundant aggregator
+    # connection (e.g., Plaid Robinhood when SnapTrade is now the source of
+    # truth) without surrendering the Plaid Item slot.
+    is_data_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
 
     accounts: Mapped[list[Account]] = relationship(
         back_populates="item", cascade="all, delete-orphan"

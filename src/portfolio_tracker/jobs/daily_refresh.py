@@ -101,7 +101,25 @@ def run() -> int:
         print("[daily_refresh]   daily_values cache: FAILED")
         traceback.print_exc()
 
-    # 4. Earnings calendar — pull upcoming-earnings dates for held names
+    # 4. Benchmarks — pull SPY/QQQ + every policy ticker. Without this,
+    #    a newly added policy ticker (e.g., VTI/VWO after the user edits
+    #    their allocation) silently has no benchmark data, and the policy
+    #    synthetic line on the chart renormalizes around the gap. We run
+    #    benchmarks AFTER snapshots/syncs so any newly-resolved symbols
+    #    from today's transactions also flow into the pull list.
+    try:
+        from datetime import date as _date, timedelta as _td
+        from portfolio_tracker.jobs import benchmarks
+        # 30-day rolling pull is enough to keep the latest closes fresh
+        # without re-fetching years of static history every day.
+        rows = benchmarks.run(today - _td(days=30), today)
+        print(f"[daily_refresh]   benchmarks: {rows} rows upserted")
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   benchmarks: FAILED")
+        traceback.print_exc()
+
+    # 5. Earnings calendar — pull upcoming-earnings dates for held names
     #    via yfinance. Quiet on per-ticker failures so a flaky symbol
     #    doesn't block the rest. Imported lazily to keep yfinance off
     #    the critical-path startup if we ever drop the dependency.

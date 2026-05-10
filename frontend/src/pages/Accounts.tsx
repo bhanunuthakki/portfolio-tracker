@@ -56,6 +56,22 @@ export function Accounts(): JSX.Element {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["items"] }),
   });
 
+  const setDataActive = useMutation({
+    mutationFn: ({ itemId, isActive }: { itemId: number; isActive: boolean }) =>
+      api.setItemDataActive(itemId, isActive),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["items"] });
+      // Aggregations across the dashboard depend on this; bust their caches.
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["holdings-by-account"] });
+      queryClient.invalidateQueries({ queryKey: ["transactions"] });
+      queryClient.invalidateQueries({ queryKey: ["performance"] });
+      queryClient.invalidateQueries({ queryKey: ["beta"] });
+      queryClient.invalidateQueries({ queryKey: ["data-quality"] });
+      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
+    },
+  });
+
   const { open, ready } = usePlaidLink({
     token: linkToken,
     onSuccess: (publicToken, metadata) =>
@@ -108,11 +124,27 @@ export function Accounts(): JSX.Element {
       ) : items.data && items.data.length > 0 ? (
         <ul className="space-y-3">
           {items.data.map((item) => (
-            <Card key={item.item_id} className="p-4">
+            <Card
+              key={item.item_id}
+              className={`p-4 ${item.is_data_active ? "" : "bg-slate-50/60"}`}
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="font-medium text-slate-900 truncate">
-                    {item.institution_name ?? "Unknown institution"}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-slate-900 truncate">
+                      {item.institution_name ?? "Unknown institution"}
+                    </span>
+                    <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-slate-600">
+                      {item.source}
+                    </span>
+                    {!item.is_data_active && (
+                      <span
+                        className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-800"
+                        title="Connection stays linked, but its data is excluded from every aggregation."
+                      >
+                        data inactive
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-slate-500">
                     Linked {new Date(item.linked_at).toLocaleDateString()} ·{" "}
@@ -120,9 +152,31 @@ export function Accounts(): JSX.Element {
                     {item.accounts.length === 1 ? "account" : "accounts"}
                   </div>
                 </div>
-                <DangerLink onClick={() => unlink.mutate(item.item_id)}>
-                  Unlink
-                </DangerLink>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDataActive.mutate({
+                        itemId: item.item_id,
+                        isActive: !item.is_data_active,
+                      })
+                    }
+                    disabled={setDataActive.isPending}
+                    className="text-xs font-medium text-slate-600 underline-offset-2 hover:text-slate-900 hover:underline"
+                    title={
+                      item.is_data_active
+                        ? "Stop counting this Item's data in aggregations (keeps the connection alive)."
+                        : "Start counting this Item's data in aggregations again."
+                    }
+                  >
+                    {item.is_data_active
+                      ? "Exclude from data"
+                      : "Re-include in data"}
+                  </button>
+                  <DangerLink onClick={() => unlink.mutate(item.item_id)}>
+                    Unlink
+                  </DangerLink>
+                </div>
               </div>
               <ul className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                 {item.accounts.map((account) => (

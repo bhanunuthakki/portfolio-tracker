@@ -57,6 +57,12 @@ export const api = {
   unlinkItem: (itemId: number): Promise<void> =>
     request(`/api/plaid/items/${itemId}`, { method: "DELETE" }),
 
+  setItemDataActive: (itemId: number, isActive: boolean): Promise<ItemOut> =>
+    request(`/api/plaid/items/${itemId}/data-active`, {
+      method: "PATCH",
+      body: JSON.stringify({ is_data_active: isActive }),
+    }),
+
   latestHoldings: (): Promise<ConsolidatedHoldingOut[]> =>
     request("/api/portfolio/holdings"),
 

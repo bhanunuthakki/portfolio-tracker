@@ -10,10 +10,12 @@ export interface AccountOut {
 
 export interface ItemOut {
   item_id: number;
+  source: string;
   institution_name: string | null;
   plaid_institution_id: string | null;
   linked_at: string;
   last_refreshed_at: string | null;
+  is_data_active: boolean;
   accounts: AccountOut[];
 }
 
@@ -183,6 +185,7 @@ export interface TickerTrade {
   pnl_pct: number | null;
   trade_count: number;
   is_open: boolean;
+  cost_basis_unreliable: boolean;
 }
 
 export interface TradingActivity {
