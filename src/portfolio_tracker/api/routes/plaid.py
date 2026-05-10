@@ -23,6 +23,7 @@ from portfolio_tracker.schemas import (
     AccountOut,
     ExchangePublicTokenIn,
     ExchangePublicTokenOut,
+    ItemDataActiveIn,
     ItemOut,
     LinkTokenOut,
 )
@@ -124,10 +125,12 @@ def _item_to_out(item: Item) -> ItemOut:
     name = item.institution_name or _derive_institution_name(item.accounts)
     return ItemOut(
         item_id=item.item_id,
+        source=item.source,
         institution_name=name,
         plaid_institution_id=item.plaid_institution_id,
         linked_at=item.linked_at,
         last_refreshed_at=item.last_refreshed_at,
+        is_data_active=item.is_data_active,
         accounts=[AccountOut.model_validate(a) for a in item.accounts],
     )
 
@@ -155,3 +158,30 @@ def unlink_item(item_id: int, session: Annotated[Session, Depends(get_session)])
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     session.delete(item)
     session.commit()
+
+
+@router.patch("/items/{item_id}/data-active", response_model=ItemOut)
+def set_item_data_active(
+    item_id: int,
+    body: ItemDataActiveIn,
+    session: Annotated[Session, Depends(get_session)],
+) -> ItemOut:
+    """Toggle whether this Item's data is used in aggregations.
+
+    Setting `is_data_active=False` is the right move when you have the
+    same brokerage connected via two aggregators (e.g., Plaid + SnapTrade
+    for Robinhood) and don't want the data double-counted, but want to
+    keep the redundant connection linked so the aggregator slot isn't
+    surrendered. The snapshot job continues to refresh the inactive item
+    so its access_token stays alive — only the aggregation queries skip
+    it.
+    """
+    item = session.execute(
+        select(Item).options(selectinload(Item.accounts)).where(Item.item_id == item_id)
+    ).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    item.is_data_active = body.is_data_active
+    session.commit()
+    session.refresh(item)
+    return _item_to_out(item)

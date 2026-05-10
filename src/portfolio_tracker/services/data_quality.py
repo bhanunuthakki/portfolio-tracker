@@ -19,14 +19,17 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
     Account,
+    Benchmark,
     CostBasisOverride,
     HoldingSnapshot,
     Item,
+    PolicyWeight,
     Price,
     Security,
     TickerOverride,
 )
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
+from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.performance import (
     _ABNORMAL_DAILY_RETURN,
     _daily_external_cashflows,
@@ -47,6 +50,8 @@ NO_HISTORICAL_PRICES = "no_historical_prices"
 ANOMALOUS_BACKFILL_DAY = "anomalous_backfill_day"
 STALE_ITEM = "stale_item"
 SPARSE_FORWARD_SNAPSHOTS = "sparse_forward_snapshots"
+OVERLAPPING_BROKER_CONNECTIONS = "overlapping_broker_connections"
+MISSING_POLICY_BENCHMARK = "missing_policy_benchmark"
 
 
 def build_report(session: Session) -> DataQualityReportOut:
@@ -57,6 +62,8 @@ def build_report(session: Session) -> DataQualityReportOut:
     findings.extend(_find_anomalous_backfill_days(session))
     findings.extend(_find_stale_items(session))
     findings.extend(_find_sparse_forward_snapshots(session))
+    findings.extend(_find_overlapping_broker_connections(session))
+    findings.extend(_find_missing_policy_benchmarks(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -76,8 +83,12 @@ def _find_missing_cost_basis(session: Session) -> list[DataQualityFindingOut]:
     """Per-account holdings where the broker didn't provide cost basis AND
     the user hasn't set a manual override.
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
     latest_date = session.execute(
         select(func.max(HoldingSnapshot.snapshot_date))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
@@ -92,6 +103,7 @@ def _find_missing_cost_basis(session: Session) -> list[DataQualityFindingOut]:
         .join(Account, Account.account_id == HoldingSnapshot.account_id)
         .join(Security, Security.security_id == HoldingSnapshot.security_id)
         .where(HoldingSnapshot.snapshot_date == latest_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .where(HoldingSnapshot.cost_basis.is_(None))
         .where(HoldingSnapshot.quantity > 0)
     ).all()
@@ -152,8 +164,12 @@ def _find_untickered_securities(session: Session) -> list[DataQualityFindingOut]
     Doesn't affect today's valuation (Plaid provides current price) but
     blocks historical backfill for that position.
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
     latest_date = session.execute(
         select(func.max(HoldingSnapshot.snapshot_date))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
@@ -167,6 +183,7 @@ def _find_untickered_securities(session: Session) -> list[DataQualityFindingOut]
         select(Security, func.sum(HoldingSnapshot.institution_value))
         .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
         .where(HoldingSnapshot.snapshot_date == latest_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .where(Security.ticker.is_(None))
         .where(HoldingSnapshot.quantity > 0)
         .group_by(Security.security_id)
@@ -212,8 +229,12 @@ def _find_securities_without_prices(session: Session) -> list[DataQualityFinding
     couldn't resolve. Common cause: delisted issues, foreign-listed
     versions yfinance doesn't carry.
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
     latest_date = session.execute(
         select(func.max(HoldingSnapshot.snapshot_date))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
@@ -222,6 +243,7 @@ def _find_securities_without_prices(session: Session) -> list[DataQualityFinding
         select(Security)
         .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
         .where(HoldingSnapshot.snapshot_date == latest_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .where(Security.ticker.is_not(None))
         .where(Security.is_cash_equivalent.is_(False))
         .where(HoldingSnapshot.quantity > 0)
@@ -322,10 +344,16 @@ def _find_anomalous_backfill_days(session: Session) -> list[DataQualityFindingOu
 
 
 def _find_stale_items(session: Session) -> list[DataQualityFindingOut]:
-    """Items that haven't been refreshed in over a week."""
+    """Items that haven't been refreshed in over a week.
+
+    Skips items the user has flagged as data-inactive — those are kept
+    around for connection-slot reasons but explicitly aren't expected to
+    influence the numbers, so a stale snapshot doesn't matter.
+    """
     threshold = datetime.now(timezone.utc) - timedelta(days=7)
     rows = session.execute(
         select(Item)
+        .where(Item.is_data_active.is_(True))
         .where(
             (Item.last_refreshed_at.is_(None))
             | (Item.last_refreshed_at < threshold)
@@ -366,8 +394,12 @@ def _find_stale_items(session: Session) -> list[DataQualityFindingOut]:
 
 def _find_sparse_forward_snapshots(session: Session) -> list[DataQualityFindingOut]:
     """Flag the early-stage state where the portfolio chart relies on backfill."""
+    accts = active_account_ids(session)
+    if not accts:
+        return []
     distinct_dates = session.execute(
         select(func.count(func.distinct(HoldingSnapshot.snapshot_date)))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one()
     if distinct_dates >= 7:
         return []
@@ -390,5 +422,128 @@ def _find_sparse_forward_snapshots(session: Session) -> list[DataQualityFindingO
                 "snapshots, the chart switches to observed data automatically."
             ),
             context={"distinct_snapshot_dates": str(distinct_dates)},
+        )
+    ]
+
+
+def _find_overlapping_broker_connections(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Flag the same brokerage being reachable through two aggregators.
+
+    When Robinhood is connected via *both* Plaid and SnapTrade, the same
+    physical accounts get snapshotted twice and the same trades land in
+    `investment_transactions` twice — every aggregation (V, P&L, turnover)
+    silently double-counts. The fix is to mark one of the duplicate items
+    `is_data_active=False`; this finding surfaces the situation so the
+    user knows to do that.
+
+    Heuristic: group by case-insensitive `institution_name`, count items
+    where `is_data_active=True`. >1 active item per institution is the
+    overlap.
+    """
+    rows = session.execute(
+        select(Item).order_by(Item.institution_name, Item.source)
+    ).scalars().all()
+
+    by_institution: dict[str, list[Item]] = defaultdict(list)
+    for item in rows:
+        key = (item.institution_name or "").strip().lower()
+        if not key:
+            continue
+        by_institution[key].append(item)
+
+    findings: list[DataQualityFindingOut] = []
+    for key, group in by_institution.items():
+        active = [i for i in group if i.is_data_active]
+        if len(active) <= 1:
+            continue
+        sources = ", ".join(sorted({i.source for i in active}))
+        names = ", ".join(f"#{i.item_id}({i.source})" for i in active)
+        findings.append(
+            DataQualityFindingOut(
+                category=OVERLAPPING_BROKER_CONNECTIONS,
+                severity=WARNING,
+                title=(
+                    f"{group[0].institution_name}: connected via {sources} "
+                    f"— data is being double-counted"
+                ),
+                detail=(
+                    f"{len(active)} active items reference "
+                    f"{group[0].institution_name}: {names}. The same physical "
+                    f"accounts are being snapshotted by both, so holdings, "
+                    f"transactions, V series, and trade-analysis all "
+                    f"double-count this brokerage's activity. Mark one of "
+                    f"the duplicates as data-inactive (PATCH "
+                    f"/api/plaid/items/{{id}}/data-active) to keep the "
+                    f"connection alive while excluding its data from "
+                    f"aggregations."
+                ),
+                recommended_action=(
+                    "Decide which aggregator should be the source of truth "
+                    "(SnapTrade typically has more transaction history; "
+                    "Plaid is more reliable for current-day holdings). Mark "
+                    "the other one is_data_active=False on the Items page."
+                ),
+                context={
+                    "institution": group[0].institution_name or "",
+                    "active_item_ids": ",".join(str(i.item_id) for i in active),
+                    "sources": sources,
+                },
+            )
+        )
+    return findings
+
+
+def _find_missing_policy_benchmarks(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Flag policy tickers with no rows in the `benchmarks` table.
+
+    The synthetic policy line is the user's intended allocation valued
+    at historical benchmark closes. If a policy ticker has no benchmark
+    data (because the user added it after the last benchmarks-job run),
+    the policy series silently renormalizes around the missing weight
+    — which produces an approximated (not zero, but not exact) line.
+    Run `python -m portfolio_tracker.jobs.benchmarks --start <date>` to
+    fix.
+    """
+    policy_tickers = session.execute(
+        select(PolicyWeight.ticker).where(PolicyWeight.weight_bps > 0)
+    ).scalars().all()
+    if not policy_tickers:
+        return []
+
+    found_symbols = set(
+        session.execute(
+            select(Benchmark.symbol).where(Benchmark.symbol.in_(policy_tickers))
+        ).scalars().all()
+    )
+    missing = [t for t in policy_tickers if t not in found_symbols]
+    if not missing:
+        return []
+
+    return [
+        DataQualityFindingOut(
+            category=MISSING_POLICY_BENCHMARK,
+            severity=WARNING,
+            title=(
+                f"Policy benchmark missing for: {', '.join(missing)}"
+            ),
+            detail=(
+                f"Your policy weights reference {len(missing)} ticker(s) "
+                f"({', '.join(missing)}) that have no rows in the "
+                f"`benchmarks` table. The synthetic-policy line on the "
+                f"performance chart renormalizes around the missing "
+                f"weights so the line still represents 100% deployed "
+                f"capital, but it's an approximation of your true policy "
+                f"mix until those benchmarks are pulled."
+            ),
+            recommended_action=(
+                "Run `python -m portfolio_tracker.jobs.benchmarks "
+                "--start 2024-01-01`. The benchmarks job pulls every "
+                "ticker referenced in policy_weights automatically."
+            ),
+            context={"missing_tickers": ",".join(missing)},
         )
     ]

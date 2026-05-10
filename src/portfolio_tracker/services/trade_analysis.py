@@ -15,12 +15,34 @@ That's true total return on the name within the window: it nets the
 realized cash flows against today's mark, regardless of how many phases
 the position went through. It still misses option-premium income (puts
 sold for cash, then assigned), but it correctly reflects the share-side
-P&L. We surface that caveat to the UI.
+P&L.
 
-Returns one row per ticker plus an aggregate "trading activity" summary:
-total transactions, total notional, annualized turnover. The UI uses
-this as the data backing for the Trade Analysis section on the
-dashboard — "what worked, what didn't, am I overtrading."
+Two important corners we've gotten wrong before:
+
+1. **Window-bounded buys, lifetime today_value.** If we filter buys to
+   the user's chart window but today_value still reflects the full open
+   position, P&L is overstated for every ticker that was opened before
+   the window. A position bought 3 years ago at $20 (outside window),
+   still held at $40 today, with no in-window activity, looked like a
+   $40-of-pure-profit-per-share winner. Fix: aggregates over **all-time**
+   transactions; the activity counters and trade-count remain
+   window-bounded, since the question "was I overtrading?" is a
+   window-bounded one.
+
+2. **ACATS-in / pre-history shares with no recorded buy.** SnapTrade
+   sees Robinhood holdings transferred in from another broker as $0-
+   cost shares without a buy transaction. So lifetime "bought" misses
+   their cost basis entirely, and P&L = today_value + sells − bought
+   massively overstates the win. We can't recover the true cost basis
+   without ingesting 1099-Bs, but we *can* detect the condition (sold
+   shares > bought shares OR today_qty > total_buys_qty) and surface a
+   per-row warning so the user knows the row is unreliable.
+
+3. **Duplicate aggregator connections.** When the same brokerage is
+   reachable via two aggregators (Plaid + SnapTrade for Robinhood),
+   transactions get recorded twice — both `bought` and `sold` get
+   double-counted, shifting P&L unpredictably. Filtering through
+   `active_account_ids()` drops the data-disabled half cleanly.
 """
 
 from __future__ import annotations
@@ -39,11 +61,19 @@ from portfolio_tracker.models import (
     InvestmentTransactionType,
     Security,
 )
+from portfolio_tracker.services.active_items import active_account_ids
 
 # Tickers below this combined buy+sell notional are dropped from the
 # per-ticker breakdown. They're noise — small one-off trades that don't
 # warrant a coaching call-out.
 _MIN_TICKER_NOTIONAL: Decimal = Decimal(2000)
+
+# When sold-share count exceeds bought-share count by more than this
+# fraction (or today_qty exceeds total bought by it), almost certainly
+# the position had ACATS-in / pre-history shares with no recorded buy.
+# In that case bought_total under-counts the true cost basis and P&L
+# is overstated — flag the row so the UI can mark it unreliable.
+_ACATS_INFLATION_THRESHOLD: Decimal = Decimal("0.10")
 
 
 class TickerTrade(BaseModel):
@@ -55,10 +85,11 @@ class TickerTrade(BaseModel):
     sold_total: Decimal
     today_qty: Decimal
     today_value: Decimal
-    pnl_dollars: Decimal           # market_value + sells − buys
+    pnl_dollars: Decimal           # market_value + sells − buys (lifetime)
     pnl_pct: float | None          # vs total $ deployed (buys); None if buys = 0
-    trade_count: int
+    trade_count: int               # window-bounded, not lifetime
     is_open: bool                  # today_qty > 0
+    cost_basis_unreliable: bool    # ACATS-in / pre-history shares detected
 
 
 class TradingActivity(BaseModel):
@@ -86,13 +117,45 @@ def analyze_trades(
 ) -> TradeAnalysisResult:
     """Build the trade-analysis payload for [start_date, end_date].
 
-    Includes only tickers with > _MIN_TICKER_NOTIONAL notional traded.
-    Ranks descending by absolute P&L magnitude so the most material
-    trades show up first.
-    """
-    today = _latest_snapshot_date(session) or end_date
+    Per-ticker P&L is **lifetime** (regardless of `start_date`) because
+    today's market value reflects a lifetime position; pairing window-
+    bounded buys against a lifetime position is the bug source we've
+    repeatedly hit. Activity stats (turnover, trade count by month) stay
+    window-bounded, since "am I overtrading lately?" is the window-bounded
+    question.
 
-    # ---- per-ticker buy / sell aggregates ------------------------------
+    Includes only tickers with > _MIN_TICKER_NOTIONAL lifetime notional
+    traded. Ranks descending by absolute P&L so the most material trades
+    show up first.
+    """
+    accts = active_account_ids(session)
+    if not accts:
+        return TradeAnalysisResult(
+            start_date=start_date,
+            end_date=end_date,
+            activity=TradingActivity(
+                start_date=start_date,
+                end_date=end_date,
+                total_trades=0,
+                total_notional=Decimal(0),
+                average_position_value=None,
+                annualized_turnover_pct=None,
+                trade_count_by_month={},
+            ),
+            tickers=[],
+            notes=[
+                "No active items — every linked aggregator is currently set "
+                "to is_data_active=False. Mark at least one item active to "
+                "see trade analysis."
+            ],
+        )
+
+    today = _latest_snapshot_date(session, accts) or end_date
+
+    # ---- per-ticker lifetime buy / sell aggregates ---------------------
+    # NOTE: no start_date filter on transactions for the per-ticker pass.
+    # See module docstring point (1) — pairing window-bounded buys with
+    # a lifetime today_value overstates winners that were opened pre-window.
     rows = session.execute(
         select(
             Security.security_id,
@@ -101,9 +164,10 @@ def analyze_trades(
             InvestmentTransaction.date,
             InvestmentTransaction.type,
             InvestmentTransaction.amount,
+            InvestmentTransaction.quantity,
         )
         .join(InvestmentTransaction, InvestmentTransaction.security_id == Security.security_id)
-        .where(InvestmentTransaction.date >= start_date)
+        .where(InvestmentTransaction.account_id.in_(accts))
         .where(InvestmentTransaction.date <= end_date)
         .where(Security.is_cash_equivalent.is_(False))
         .where(Security.ticker.is_not(None))
@@ -116,26 +180,34 @@ def analyze_trades(
             "last_action": None,
             "bought": Decimal(0),
             "sold": Decimal(0),
+            "bought_qty": Decimal(0),
+            "sold_qty": Decimal(0),
             "trade_count": 0,
         }
     )
-    for sid, ticker, name, tx_date, tx_type, amount in rows:
+    for sid, ticker, name, tx_date, tx_type, amount, quantity in rows:
         if amount is None:
             continue
         bucket = by_ticker[ticker]
         if bucket["name"] is None:
             bucket["name"] = name
         magnitude = abs(Decimal(amount))
+        qty_magnitude = abs(Decimal(quantity or 0))
+        in_window = start_date <= tx_date <= end_date
         if tx_type == InvestmentTransactionType.BUY.value:
             bucket["bought"] += magnitude
-            bucket["trade_count"] += 1
+            bucket["bought_qty"] += qty_magnitude
+            if in_window:
+                bucket["trade_count"] += 1
             if bucket["first_buy"] is None or tx_date < bucket["first_buy"]:
                 bucket["first_buy"] = tx_date
             if bucket["last_action"] is None or tx_date > bucket["last_action"]:
                 bucket["last_action"] = tx_date
         elif tx_type == InvestmentTransactionType.SELL.value:
             bucket["sold"] += magnitude
-            bucket["trade_count"] += 1
+            bucket["sold_qty"] += qty_magnitude
+            if in_window:
+                bucket["trade_count"] += 1
             if bucket["last_action"] is None or tx_date > bucket["last_action"]:
                 bucket["last_action"] = tx_date
 
@@ -148,6 +220,7 @@ def analyze_trades(
         )
         .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
         .where(HoldingSnapshot.snapshot_date == today)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .where(Security.is_cash_equivalent.is_(False))
         .where(Security.ticker.is_not(None))
     ).all()
@@ -185,12 +258,17 @@ def analyze_trades(
                 pnl_pct=pnl_pct,
                 trade_count=b["trade_count"],
                 is_open=today_qty.get(ticker, Decimal(0)) > 0,
+                cost_basis_unreliable=_detect_cost_basis_gap(
+                    bought_qty=b["bought_qty"],
+                    sold_qty=b["sold_qty"],
+                    today_qty=today_qty.get(ticker, Decimal(0)),
+                ),
             )
         )
     tickers.sort(key=lambda t: -abs(t.pnl_dollars))
 
     # ---- trading activity / turnover -----------------------------------
-    activity = _trading_activity(session, start_date, end_date, today_value)
+    activity = _trading_activity(session, accts, start_date, end_date, today_value)
 
     notes = _build_notes(activity, tickers)
     return TradeAnalysisResult(
@@ -202,9 +280,41 @@ def analyze_trades(
     )
 
 
-def _latest_snapshot_date(session: Session) -> date | None:
+def _detect_cost_basis_gap(
+    bought_qty: Decimal,
+    sold_qty: Decimal,
+    today_qty: Decimal,
+) -> bool:
+    """Return True if the share-count math implies missing buy transactions.
+
+    Two flavors of the same condition:
+      - sells exceed buys: shares were sold that we never saw bought
+        (ACATS-in shares typically)
+      - today's holding exceeds net (bought − sold): same root cause,
+        showing up as currently-held shares with no acquisition record
+
+    Either way, our `bought_total` under-counts the true cost basis and
+    P&L on this ticker is overstated. The threshold tolerates small
+    rounding noise (fractional reinvested-dividend shares etc.).
+    """
+    if bought_qty <= 0:
+        # Pure transfer-in with no buys. If they sold or still hold any,
+        # cost basis is missing.
+        return sold_qty > 0 or today_qty > 0
+    if sold_qty > bought_qty * (Decimal(1) + _ACATS_INFLATION_THRESHOLD):
+        return True
+    expected_today = bought_qty - sold_qty
+    if today_qty > expected_today * (Decimal(1) + _ACATS_INFLATION_THRESHOLD):
+        return True
+    return False
+
+
+def _latest_snapshot_date(
+    session: Session, accts: frozenset[int]
+) -> date | None:
     return session.execute(
         select(HoldingSnapshot.snapshot_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .order_by(HoldingSnapshot.snapshot_date.desc())
         .limit(1)
     ).scalar_one_or_none()
@@ -212,6 +322,7 @@ def _latest_snapshot_date(session: Session) -> date | None:
 
 def _trading_activity(
     session: Session,
+    accts: frozenset[int],
     start_date: date,
     end_date: date,
     today_value: dict[str, Decimal],
@@ -224,6 +335,7 @@ def _trading_activity(
         )
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
+        .where(InvestmentTransaction.account_id.in_(accts))
         .where(
             InvestmentTransaction.type.in_(
                 [
@@ -285,19 +397,32 @@ def _build_notes(activity: TradingActivity, tickers: list[TickerTrade]) -> list[
                 f"Worth checking whether each trade had a written thesis or was "
                 f"reactive."
             )
-    winners = [t for t in tickers if t.pnl_dollars > 0]
-    losers = [t for t in tickers if t.pnl_dollars < 0]
+    reliable = [t for t in tickers if not t.cost_basis_unreliable]
+    winners = [t for t in reliable if t.pnl_dollars > 0]
+    losers = [t for t in reliable if t.pnl_dollars < 0]
+    unreliable = [t for t in tickers if t.cost_basis_unreliable]
     if winners and losers:
         win_total = sum((t.pnl_dollars for t in winners), Decimal(0))
         loss_total = sum((t.pnl_dollars for t in losers), Decimal(0))
         notes.append(
-            f"Net realized + unrealized: ${float(win_total + loss_total):+,.0f} "
+            f"Net realized + unrealized (reliable rows only): "
+            f"${float(win_total + loss_total):+,.0f} "
             f"(winners ${float(win_total):+,.0f} on {len(winners)} names, "
             f"losers ${float(loss_total):+,.0f} on {len(losers)})."
         )
+    if unreliable:
+        names = ", ".join(t.ticker for t in unreliable[:8])
+        more = f" + {len(unreliable) - 8} more" if len(unreliable) > 8 else ""
+        notes.append(
+            f"{len(unreliable)} ticker(s) flagged as cost-basis unreliable "
+            f"(likely ACATS-in / pre-history shares with no recorded buy): "
+            f"{names}{more}. Their P&L on this card is missing those shares' "
+            f"original cost basis — treat the dollar values as upper bounds."
+        )
     notes.append(
-        "P&L = today's market value + cumulative sell proceeds − cumulative buy "
-        "cost. Excludes option-premium income (puts sold and assigned aren't "
-        "fully captured). For closed positions, equals realized cash gain."
+        "P&L = today's market value + lifetime sell proceeds − lifetime buy "
+        "cost. Activity counts (trades, notional, turnover) are window-bounded; "
+        "P&L is lifetime so today's open position is paired with the right "
+        "cost basis instead of just window-internal buys."
     )
     return notes

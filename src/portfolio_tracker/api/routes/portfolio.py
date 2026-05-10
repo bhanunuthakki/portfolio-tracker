@@ -32,6 +32,7 @@ from portfolio_tracker.schemas import (
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
+from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
 from portfolio_tracker.services.performance import (
@@ -97,8 +98,12 @@ def latest_holdings_by_account(
 def _latest_holding_rows(
     session: Session,
 ) -> list[tuple[HoldingSnapshot, Account, Security]]:
+    accts = active_account_ids(session)
+    if not accts:
+        return []
     latest_date = session.execute(
         select(HoldingSnapshot.snapshot_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .order_by(HoldingSnapshot.snapshot_date.desc())
         .limit(1)
     ).scalar_one_or_none()
@@ -109,6 +114,7 @@ def _latest_holding_rows(
         .join(Account, Account.account_id == HoldingSnapshot.account_id)
         .join(Security, Security.security_id == HoldingSnapshot.security_id)
         .where(HoldingSnapshot.snapshot_date == latest_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
         .order_by(Security.ticker, Account.name)
     ).all()
     return [(h, a, s) for h, a, s in rows]
@@ -200,6 +206,9 @@ def transactions(
     if start_date is None:
         start_date = end_date - timedelta(days=730)  # 24 months default
 
+    accts = active_account_ids(session)
+    if not accts:
+        return []
     rows = session.execute(
         select(InvestmentTransaction, Account, Security)
         .join(Account, Account.account_id == InvestmentTransaction.account_id)
@@ -210,6 +219,7 @@ def transactions(
         )
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
+        .where(InvestmentTransaction.account_id.in_(accts))
         .order_by(InvestmentTransaction.date.desc())
         .limit(limit)
     ).all()
@@ -305,11 +315,16 @@ def _default_start_date(
         transaction-walk backfill so the chart isn't a single dot. The UI
         shows the backfill caveat in the chart caption either way.
     """
+    accts = active_account_ids(session)
+    if not accts:
+        return end_date - timedelta(days=365)
     earliest_snap = session.execute(
         select(func.min(HoldingSnapshot.snapshot_date))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     earliest_tx = session.execute(
         select(func.min(InvestmentTransaction.date))
+        .where(InvestmentTransaction.account_id.in_(accts))
     ).scalar_one_or_none()
 
     if include_backfill and earliest_tx is not None:
@@ -318,6 +333,7 @@ def _default_start_date(
 
     snap_count = session.execute(
         select(func.count(func.distinct(HoldingSnapshot.snapshot_date)))
+        .where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one()
     if snap_count >= _MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT and earliest_snap is not None:
         return earliest_snap
@@ -340,12 +356,14 @@ def cashflow_audit(
     """
     if end_date is None:
         end_date = date.today()
+    accts = active_account_ids(session)
     if start_date is None:
         # For diagnostics, always go as far back as the data goes (24 months
         # by Plaid's retention) so the user sees every external cashflow.
         earliest_tx = session.execute(
             select(func.min(InvestmentTransaction.date))
-        ).scalar_one_or_none()
+            .where(InvestmentTransaction.account_id.in_(accts))
+        ).scalar_one_or_none() if accts else None
         start_date = earliest_tx or (end_date - timedelta(days=730))
 
     rows = session.execute(
@@ -357,9 +375,10 @@ def cashflow_audit(
         )
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
+        .where(InvestmentTransaction.account_id.in_(accts))
         .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
         .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-    ).all()
+    ).all() if accts else []
 
     groups: list[CashflowGroupOut] = []
     net_in = Decimal(0)
