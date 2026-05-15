@@ -206,6 +206,45 @@ export interface TradeAnalysisResult {
   notes: string[];
 }
 
+export interface TimelineRow {
+  row_kind: "closed" | "open";
+  ticker: string | null;
+  name: string | null;
+  description: string;
+  acquired_date: string | null;
+  disposed_date: string;
+  acquired_approx: boolean;
+  holding_days: number;
+  quantity: string | null;
+  proceeds: string;
+  cost_basis: string;
+  realized_gain: string;
+  return_pct: number | null;
+  spy_start_price: string | null;
+  spy_end_price: string | null;
+  spy_return_pct: number | null;
+  spy_counterfactual_dollars: string | null;
+  alpha_dollars: string | null;
+  source: "1099" | "broker";
+  broker: string | null;
+  tax_year: number | null;
+  term: string | null;
+}
+
+export interface YearSummary {
+  year: number;
+  closed_count: number;
+  realized_total: string;
+  spy_counterfactual_total: string;
+  alpha_total: string;
+}
+
+export interface TradeTimelineResult {
+  rows: TimelineRow[];
+  by_year: YearSummary[];
+  notes: string[];
+}
+
 export interface DecisionOut {
   decision_id: number;
   decision_date: string;
