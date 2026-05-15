@@ -7,6 +7,7 @@ import { EarningsCalendarCard } from "@/components/EarningsCalendarCard";
 import { PerformanceChart } from "@/components/PerformanceChart";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
 import { TradeAnalysisCard } from "@/components/TradeAnalysisCard";
+import { TradeTimelineCard } from "@/components/TradeTimelineCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
 
 type RangePreset = "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "MAX" | "CUSTOM";
@@ -265,6 +266,8 @@ export function Dashboard(): JSX.Element {
         startDate={params.startDate}
         endDate={params.endDate}
       />
+
+      <TradeTimelineCard />
 
       <DecisionLogCard />
 
