@@ -967,6 +967,7 @@ def effective_classification(
     tx_type: str,
     tx_subtype: str | None,
     override: str | None,
+    amount: Decimal | None = None,
 ) -> str | None:
     """Resolve the cashflow classification used by the pipeline.
 
@@ -978,6 +979,11 @@ def effective_classification(
                           ACATS recognized as internal)
       * `None`          — a non-cashflow row (buy/sell/fee on a security)
                           for which classification doesn't apply
+
+    `amount` is required to direction-resolve ambiguous subtypes (the bare
+    `transfer/transfer` and `cash/transfer`, both of which Plaid signs from
+    the cash account's perspective). For unambiguous subtypes (contribution,
+    deposit, withdrawal) the amount sign is ignored.
 
     `override` short-circuits the heuristic when supplied.
     """
@@ -994,7 +1000,11 @@ def effective_classification(
         if is_transfer_or_cash and subtype_norm in _INTERNAL_TRANSFER_SUBTYPES:
             return "internal"
         return None
-    cf = _signed_cashflow(tx_type, tx_subtype, Decimal("1"))
+    # Use the actual tx amount when available so ambiguous subtypes (where
+    # direction depends on Plaid's sign) resolve correctly. Falling back to
+    # Decimal("1") gives the heuristic's "default direction" for the subtype.
+    probe = amount if amount is not None else Decimal("1")
+    cf = _signed_cashflow(tx_type, tx_subtype, probe)
     if cf > 0:
         return "external_in"
     if cf < 0:
