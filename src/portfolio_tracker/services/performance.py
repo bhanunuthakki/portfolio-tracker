@@ -771,6 +771,7 @@ def _daily_external_cashflows(
             InvestmentTransaction.amount,
             InvestmentTransaction.type,
             InvestmentTransaction.subtype,
+            InvestmentTransaction.name,
         )
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
@@ -779,9 +780,13 @@ def _daily_external_cashflows(
 
     overrides = _load_transaction_overrides(session)
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for tx_id, tx_date, amount, tx_type, tx_subtype in rows:
+    for tx_id, tx_date, amount, tx_type, tx_subtype, tx_name in rows:
         cashflow_in = _signed_cashflow(
-            tx_type, tx_subtype, Decimal(amount), override=overrides.get(tx_id)
+            tx_type,
+            tx_subtype,
+            Decimal(amount),
+            override=overrides.get(tx_id),
+            name=tx_name,
         )
         if cashflow_in == 0:
             continue
@@ -889,25 +894,68 @@ def _share_transfer_external_cashflows(
     return dict(out)
 
 
+def _classify_by_name(name: str | None) -> str | None:
+    """Direction hint derived from the transaction's `name` field.
+
+    Some aggregators bury the actual direction in free-text instead of the
+    subtype:
+      * Plaid surfaces SoFi/Robinhood DRIPs as `transfer/transfer` with
+        name "Dividend reinvestment purchase of N shares" — these aren't
+        external cashflow at all, they're internal share moves backed by
+        a dividend that's already accounted for elsewhere.
+      * SnapTrade marks outgoing/incoming margin-balance moves as the
+        bare `transfer/transfer` subtype but spells out the direction in
+        the name ("Completed outgoing margin balance transfer of $-100").
+
+    Without this, both cases get the wrong sign under the default Plaid
+    sign-convention rule for `transfer/transfer`.
+
+    Returns one of `external_in` / `external_out` / `internal` / `None`.
+    Returning None means "no name-based opinion; fall through to the
+    subtype heuristic."
+    """
+    if not name:
+        return None
+    n = name.lower()
+    if "reinvestment" in n or "drip" in n:
+        return "internal"
+    if "outgoing" in n:
+        return "external_out"
+    if "incoming" in n:
+        return "external_in"
+    return None
+
+
 def _signed_cashflow(
     tx_type: str,
     tx_subtype: str | None,
     amount: Decimal,
     override: str | None = None,
+    name: str | None = None,
 ) -> Decimal:
     """Return the signed cashflow INTO the portfolio for one transaction.
 
     Returns Decimal(0) for internal events (trades, dividends, fees, etc.).
     Positive return = money entered the portfolio. Negative = money left.
 
-    If `override` is supplied (`external_in` / `external_out` / `internal`),
-    it short-circuits the heuristic. See `transaction_overrides` table.
+    Precedence:
+      1. Explicit user override (transaction_overrides table)
+      2. Name-based hint (drip/outgoing/incoming patterns)
+      3. (type, subtype) heuristic with aggregator sign convention
     """
     if override == "internal":
         return Decimal(0)
     if override == "external_in":
         return abs(amount)
     if override == "external_out":
+        return -abs(amount)
+
+    name_hint = _classify_by_name(name)
+    if name_hint == "internal":
+        return Decimal(0)
+    if name_hint == "external_in":
+        return abs(amount)
+    if name_hint == "external_out":
         return -abs(amount)
 
     subtype_norm = (tx_subtype or "").lower().strip()
@@ -932,11 +980,17 @@ def _is_external_cashflow(
     tx_type: str,
     tx_subtype: str | None,
     override: str | None = None,
+    name: str | None = None,
 ) -> bool:
     """Boolean version of `_signed_cashflow` used by the audit endpoint."""
     if override == "internal":
         return False
     if override in ("external_in", "external_out"):
+        return True
+    name_hint = _classify_by_name(name)
+    if name_hint == "internal":
+        return False
+    if name_hint in ("external_in", "external_out"):
         return True
     subtype_norm = (tx_subtype or "").lower().strip()
     if tx_type == InvestmentTransactionType.TRANSFER.value:
@@ -968,6 +1022,7 @@ def effective_classification(
     tx_subtype: str | None,
     override: str | None,
     amount: Decimal | None = None,
+    name: str | None = None,
 ) -> str | None:
     """Resolve the cashflow classification used by the pipeline.
 
@@ -989,6 +1044,9 @@ def effective_classification(
     """
     if override is not None:
         return override
+    name_hint = _classify_by_name(name)
+    if name_hint is not None:
+        return name_hint
     if not _is_external_cashflow(tx_type, tx_subtype):
         # Distinguish "internal transfer/cash event" (still cashflow-related,
         # just zeroed) from "completely unrelated to cashflow."
@@ -1004,7 +1062,7 @@ def effective_classification(
     # direction depends on Plaid's sign) resolve correctly. Falling back to
     # Decimal("1") gives the heuristic's "default direction" for the subtype.
     probe = amount if amount is not None else Decimal("1")
-    cf = _signed_cashflow(tx_type, tx_subtype, probe)
+    cf = _signed_cashflow(tx_type, tx_subtype, probe, name=name)
     if cf > 0:
         return "external_in"
     if cf < 0:
@@ -1300,8 +1358,10 @@ def _reverse_transaction_cash_delta(
     ):
         return Decimal(0)
 
-    if _is_external_cashflow(tx.type, tx.subtype, override=override):
-        return -_signed_cashflow(tx.type, tx.subtype, amount, override=override)
+    if _is_external_cashflow(tx.type, tx.subtype, override=override, name=tx.name):
+        return -_signed_cashflow(
+            tx.type, tx.subtype, amount, override=override, name=tx.name
+        )
 
     if tx.type == InvestmentTransactionType.BUY.value:
         return magnitude
