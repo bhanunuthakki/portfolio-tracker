@@ -59,3 +59,7 @@ Thumbs.db
 .cache/
 data/
 backups/
+
+# Source tax PDFs — contain SSN digits, full account numbers, addresses
+tax_forms/
+*.bak
