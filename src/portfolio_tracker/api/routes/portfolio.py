@@ -39,7 +39,9 @@ from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
 from portfolio_tracker.services.trade_timeline import TradeTimelineResult
 from portfolio_tracker.services.performance import (
     _is_external_cashflow,
+    _load_transaction_overrides,
     _signed_cashflow,
+    effective_classification,
 )
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -226,6 +228,7 @@ def transactions(
         .limit(limit)
     ).all()
 
+    overrides = _load_transaction_overrides(session)
     return [
         InvestmentTransactionOut(
             plaid_investment_transaction_id=t.plaid_investment_transaction_id,
@@ -242,6 +245,12 @@ def transactions(
             type=t.type,
             subtype=t.subtype,
             currency=t.currency,
+            override_classification=overrides.get(t.plaid_investment_transaction_id),
+            effective_classification=effective_classification(
+                t.type,
+                t.subtype,
+                overrides.get(t.plaid_investment_transaction_id),
+            ),
         )
         for t, a, s in rows
     ]

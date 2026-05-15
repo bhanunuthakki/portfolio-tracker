@@ -765,16 +765,24 @@ def _daily_external_cashflows(
     if not accts:
         return {}
     rows = session.execute(
-        select(InvestmentTransaction.date, InvestmentTransaction.amount,
-               InvestmentTransaction.type, InvestmentTransaction.subtype)
+        select(
+            InvestmentTransaction.plaid_investment_transaction_id,
+            InvestmentTransaction.date,
+            InvestmentTransaction.amount,
+            InvestmentTransaction.type,
+            InvestmentTransaction.subtype,
+        )
         .where(InvestmentTransaction.date >= start_date)
         .where(InvestmentTransaction.date <= end_date)
         .where(InvestmentTransaction.account_id.in_(accts))
     ).all()
 
+    overrides = _load_transaction_overrides(session)
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for tx_date, amount, tx_type, tx_subtype in rows:
-        cashflow_in = _signed_cashflow(tx_type, tx_subtype, Decimal(amount))
+    for tx_id, tx_date, amount, tx_type, tx_subtype in rows:
+        cashflow_in = _signed_cashflow(
+            tx_type, tx_subtype, Decimal(amount), override=overrides.get(tx_id)
+        )
         if cashflow_in == 0:
             continue
         totals[tx_date] += cashflow_in
@@ -881,12 +889,27 @@ def _share_transfer_external_cashflows(
     return dict(out)
 
 
-def _signed_cashflow(tx_type: str, tx_subtype: str | None, amount: Decimal) -> Decimal:
+def _signed_cashflow(
+    tx_type: str,
+    tx_subtype: str | None,
+    amount: Decimal,
+    override: str | None = None,
+) -> Decimal:
     """Return the signed cashflow INTO the portfolio for one transaction.
 
     Returns Decimal(0) for internal events (trades, dividends, fees, etc.).
     Positive return = money entered the portfolio. Negative = money left.
+
+    If `override` is supplied (`external_in` / `external_out` / `internal`),
+    it short-circuits the heuristic. See `transaction_overrides` table.
     """
+    if override == "internal":
+        return Decimal(0)
+    if override == "external_in":
+        return abs(amount)
+    if override == "external_out":
+        return -abs(amount)
+
     subtype_norm = (tx_subtype or "").lower().strip()
 
     if tx_type == InvestmentTransactionType.TRANSFER.value:
@@ -905,8 +928,16 @@ def _signed_cashflow(tx_type: str, tx_subtype: str | None, amount: Decimal) -> D
     return Decimal(0)
 
 
-def _is_external_cashflow(tx_type: str, tx_subtype: str | None) -> bool:
+def _is_external_cashflow(
+    tx_type: str,
+    tx_subtype: str | None,
+    override: str | None = None,
+) -> bool:
     """Boolean version of `_signed_cashflow` used by the audit endpoint."""
+    if override == "internal":
+        return False
+    if override in ("external_in", "external_out"):
+        return True
     subtype_norm = (tx_subtype or "").lower().strip()
     if tx_type == InvestmentTransactionType.TRANSFER.value:
         return subtype_norm not in _INTERNAL_TRANSFER_SUBTYPES
@@ -917,6 +948,58 @@ def _is_external_cashflow(tx_type: str, tx_subtype: str | None) -> bool:
             or subtype_norm in _AMBIGUOUS_CASH_SUBTYPES
         )
     return False
+
+
+def _load_transaction_overrides(session: Session) -> dict[str, str]:
+    """Map tx_id -> classification for every row in transaction_overrides."""
+    from portfolio_tracker.models import TransactionOverride
+
+    rows = session.execute(
+        select(
+            TransactionOverride.plaid_investment_transaction_id,
+            TransactionOverride.classification,
+        )
+    ).all()
+    return {tx_id: cls for tx_id, cls in rows}
+
+
+def effective_classification(
+    tx_type: str,
+    tx_subtype: str | None,
+    override: str | None,
+) -> str | None:
+    """Resolve the cashflow classification used by the pipeline.
+
+    Returns one of:
+      * `external_in`   — counts as a contribution / deposit
+      * `external_out`  — counts as a withdrawal
+      * `internal`      — a transfer or cash event explicitly excluded
+                          from external cashflow (e.g. dividends, fees,
+                          ACATS recognized as internal)
+      * `None`          — a non-cashflow row (buy/sell/fee on a security)
+                          for which classification doesn't apply
+
+    `override` short-circuits the heuristic when supplied.
+    """
+    if override is not None:
+        return override
+    if not _is_external_cashflow(tx_type, tx_subtype):
+        # Distinguish "internal transfer/cash event" (still cashflow-related,
+        # just zeroed) from "completely unrelated to cashflow."
+        subtype_norm = (tx_subtype or "").lower().strip()
+        is_transfer_or_cash = tx_type in (
+            InvestmentTransactionType.TRANSFER.value,
+            InvestmentTransactionType.CASH.value,
+        )
+        if is_transfer_or_cash and subtype_norm in _INTERNAL_TRANSFER_SUBTYPES:
+            return "internal"
+        return None
+    cf = _signed_cashflow(tx_type, tx_subtype, Decimal("1"))
+    if cf > 0:
+        return "external_in"
+    if cf < 0:
+        return "external_out"
+    return "internal"
 
 
 def _daily_portfolio_value(
@@ -1040,6 +1123,7 @@ def _backfill_values_from_transactions(
             select(Security.security_id).where(Security.is_cash_equivalent.is_(True))
         ).scalars().all()
     )
+    tx_overrides = _load_transaction_overrides(session)
     # Walk EVERY transaction in window — pure-cash ones (no security_id)
     # are needed for the cash-adjustment series even though they don't
     # affect positions.
@@ -1074,7 +1158,9 @@ def _backfill_values_from_transactions(
                 )
 
         rolling_cash_adj += _reverse_transaction_cash_delta(
-            tx, cash_equivalent_security_ids
+            tx,
+            cash_equivalent_security_ids,
+            override=tx_overrides.get(tx.plaid_investment_transaction_id),
         )
 
         # NOTE: do NOT write daily_quantities[tx.date] here. After the
@@ -1154,7 +1240,9 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
 
 
 def _reverse_transaction_cash_delta(
-    tx: InvestmentTransaction, cash_equivalent_security_ids: frozenset[int]
+    tx: InvestmentTransaction,
+    cash_equivalent_security_ids: frozenset[int],
+    override: str | None = None,
 ) -> Decimal:
     """Cash adjustment to apply when walking back through `tx`.
 
@@ -1202,8 +1290,8 @@ def _reverse_transaction_cash_delta(
     ):
         return Decimal(0)
 
-    if _is_external_cashflow(tx.type, tx.subtype):
-        return -_signed_cashflow(tx.type, tx.subtype, amount)
+    if _is_external_cashflow(tx.type, tx.subtype, override=override):
+        return -_signed_cashflow(tx.type, tx.subtype, amount, override=override)
 
     if tx.type == InvestmentTransactionType.BUY.value:
         return magnitude
