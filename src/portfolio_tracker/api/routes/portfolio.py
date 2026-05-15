@@ -251,6 +251,7 @@ def transactions(
                 t.subtype,
                 overrides.get(t.plaid_investment_transaction_id),
                 amount=Decimal(t.amount) if t.amount is not None else None,
+                name=t.name,
             ),
         )
         for t, a, s in rows
