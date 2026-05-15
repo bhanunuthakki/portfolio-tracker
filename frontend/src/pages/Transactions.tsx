@@ -1,21 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
-import { Card, EmptyState, ErrorBanner, Td, Th } from "@/components/ui";
+import {
+  filterBySearch,
+  useTableSort,
+} from "@/components/useTableSort";
+import { Card, EmptyState, ErrorBanner } from "@/components/ui";
 import type { InvestmentTransactionOut, TxClassification } from "@/types";
 
 /**
- * Transactions table with inline cashflow-classification overrides.
+ * Transactions table with inline + bulk cashflow-classification overrides.
  *
- * Each row's "Counted as" column shows what the TWR / contributions pipeline
- * does with that row today. A small popover lets the user force a different
- * classification (writes to `transaction_overrides`). Useful when an ACATS
- * move shows up as a "contribution" in one feed but is really an internal
- * transfer between two of your own accounts.
+ * Each row has a "Counted as" chip showing what the TWR / contributions
+ * pipeline does with it. Click the chip to edit one row. Or check rows
+ * and use the bulk action bar to tag many at once — useful for cleaning
+ * up ACATS pairs (mark both legs as internal in one batch).
  *
- * Filters at the top let the user narrow to just transfers/cash events (where
- * the override matters) so the table isn't a 500-row wall.
+ * Sortable columns + free-text search filter across date / account /
+ * type / ticker / description / classification.
  */
 
 type Filter = "all" | "cashflow" | "overridden";
@@ -38,14 +41,85 @@ const CLASSIFICATION_CHIP_CLASSES: Record<TxClassification, string> = {
   internal: "bg-slate-200 text-slate-700",
 };
 
+const CLASSIFICATION_BTN_CLASSES: Record<TxClassification, string> = {
+  external_in: "bg-emerald-600 hover:bg-emerald-700 text-white",
+  external_out: "bg-rose-600 hover:bg-rose-700 text-white",
+  internal: "bg-slate-700 hover:bg-slate-800 text-white",
+};
+
 export function Transactions(): JSX.Element {
   const [filter, setFilter] = useState<Filter>("all");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["transactions"],
     queryFn: () => api.transactions({ limit: 500 }),
   });
+
+  const baseFiltered = useMemo(() => {
+    if (!data) return [];
+    return data.filter((t) => {
+      if (filter === "all") return true;
+      if (filter === "overridden") return t.override_classification !== null;
+      if (filter === "cashflow") return t.effective_classification !== null;
+      return true;
+    });
+  }, [data, filter]);
+
+  const searchFiltered = useMemo(
+    () =>
+      filterBySearch(baseFiltered, search, [
+        (t) => t.date,
+        (t) => t.account_name,
+        (t) => t.type,
+        (t) => t.subtype,
+        (t) => t.ticker,
+        (t) => t.name,
+        (t) => t.amount,
+        (t) =>
+          t.effective_classification
+            ? CLASSIFICATION_LABELS[t.effective_classification]
+            : null,
+      ]),
+    [baseFiltered, search],
+  );
+
+  const accessors = useMemo(
+    () => ({
+      date: (t: InvestmentTransactionOut) => t.date,
+      account: (t: InvestmentTransactionOut) => t.account_name,
+      type: (t: InvestmentTransactionOut) => t.subtype ?? t.type,
+      ticker: (t: InvestmentTransactionOut) => t.ticker ?? "",
+      name: (t: InvestmentTransactionOut) => t.name ?? "",
+      quantity: (t: InvestmentTransactionOut) => parseFloat(t.quantity),
+      amount: (t: InvestmentTransactionOut) => parseFloat(t.amount),
+      classification: (t: InvestmentTransactionOut) =>
+        t.effective_classification ?? "",
+    }),
+    [],
+  );
+
+  const { sortedRows, toggle, sortIndicator } = useTableSort(
+    searchFiltered,
+    "date",
+    "desc",
+    accessors,
+  );
+
+  const allVisibleIds = useMemo(
+    () => sortedRows.map((t) => t.plaid_investment_transaction_id),
+    [sortedRows],
+  );
+
+  const allSelected =
+    allVisibleIds.length > 0 &&
+    allVisibleIds.every((id) => selectedIds.has(id));
+
+  const overriddenCount = (data ?? []).filter(
+    (t) => t.override_classification !== null,
+  ).length;
 
   if (isLoading) return <div className="text-sm text-slate-500">Loading…</div>;
   if (isError)
@@ -58,126 +132,268 @@ export function Transactions(): JSX.Element {
     );
   }
 
-  const filtered = data.filter((t) => {
-    if (filter === "all") return true;
-    if (filter === "overridden") return t.override_classification !== null;
-    if (filter === "cashflow") return t.effective_classification !== null;
-    return true;
-  });
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
-  const overriddenCount = data.filter(
-    (t) => t.override_classification !== null,
-  ).length;
+  function toggleSelectAll() {
+    if (allSelected) setSelectedIds(new Set());
+    else setSelectedIds(new Set(allVisibleIds));
+  }
 
   return (
     <div className="space-y-3">
       <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-xs text-slate-500">
-          {data.length} transactions loaded · {overriddenCount} overridden
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">Transactions</h1>
+          <div className="text-xs text-slate-500">
+            {data.length} loaded · {overriddenCount} overridden ·{" "}
+            {sortedRows.length} visible
+          </div>
         </div>
-        <div className="flex items-center gap-1">
-          {(["all", "cashflow", "overridden"] as Filter[]).map((f) => (
-            <button
-              key={f}
-              type="button"
-              onClick={() => setFilter(f)}
-              className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
-                filter === f
-                  ? "bg-slate-900 text-white"
-                  : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-              }`}
-            >
-              {FILTER_LABELS[f]}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1">
+            {(["all", "cashflow", "overridden"] as Filter[]).map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => setFilter(f)}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                  filter === f
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                }`}
+              >
+                {FILTER_LABELS[f]}
+              </button>
+            ))}
+          </div>
+          <input
+            type="search"
+            placeholder="Search date / account / ticker / desc…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="w-full rounded border border-slate-200 px-2 py-1 text-xs sm:w-64"
+          />
         </div>
       </header>
 
+      {selectedIds.size > 0 && (
+        <BulkActionBar
+          selectedIds={selectedIds}
+          onClear={() => setSelectedIds(new Set())}
+        />
+      )}
+
       <Card className="overflow-hidden">
-        <table className="min-w-full divide-y divide-slate-200">
-          <thead className="bg-slate-50">
-            <tr>
-              <Th>Date</Th>
-              <Th>Account</Th>
-              <Th>Type</Th>
-              <Th>Ticker</Th>
-              <Th>Description</Th>
-              <Th align="right">Quantity</Th>
-              <Th align="right">Amount</Th>
-              <Th>Counted as</Th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {filtered.map((t) => (
-              <TxRow
-                key={t.plaid_investment_transaction_id}
-                tx={t}
-                isEditing={
-                  editingId === t.plaid_investment_transaction_id
-                }
-                onStartEdit={() =>
-                  setEditingId(t.plaid_investment_transaction_id)
-                }
-                onCloseEdit={() => setEditingId(null)}
-              />
-            ))}
-          </tbody>
-        </table>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-slate-50 text-slate-600">
+              <tr>
+                <th className="w-8 px-3 py-2">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleSelectAll}
+                    aria-label="Select all visible"
+                  />
+                </th>
+                <Sh onClick={() => toggle("date")}>
+                  Date{sortIndicator("date")}
+                </Sh>
+                <Sh onClick={() => toggle("account")}>
+                  Account{sortIndicator("account")}
+                </Sh>
+                <Sh onClick={() => toggle("type")}>
+                  Type{sortIndicator("type")}
+                </Sh>
+                <Sh onClick={() => toggle("ticker")}>
+                  Ticker{sortIndicator("ticker")}
+                </Sh>
+                <Sh onClick={() => toggle("name")}>
+                  Description{sortIndicator("name")}
+                </Sh>
+                <Sh align="right" onClick={() => toggle("quantity")}>
+                  Quantity{sortIndicator("quantity")}
+                </Sh>
+                <Sh align="right" onClick={() => toggle("amount")}>
+                  Amount{sortIndicator("amount")}
+                </Sh>
+                <Sh onClick={() => toggle("classification")}>
+                  Counted as{sortIndicator("classification")}
+                </Sh>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((t) => (
+                <TxRow
+                  key={t.plaid_investment_transaction_id}
+                  tx={t}
+                  selected={selectedIds.has(t.plaid_investment_transaction_id)}
+                  onToggleSelect={() =>
+                    toggleSelect(t.plaid_investment_transaction_id)
+                  }
+                  isEditing={
+                    editingId === t.plaid_investment_transaction_id
+                  }
+                  onStartEdit={() =>
+                    setEditingId(t.plaid_investment_transaction_id)
+                  }
+                  onCloseEdit={() => setEditingId(null)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
         <p className="border-t border-slate-100 bg-slate-50 px-4 py-2.5 text-xs text-slate-500">
-          Showing {filtered.length} of {data.length}. Click the &ldquo;Counted as&rdquo;
-          chip to override how the TWR / contributions pipeline treats a row.
-          Overrides write to `transaction_overrides` and apply to every window.
+          Click any header to sort. Click the &ldquo;Counted as&rdquo; chip to
+          override one row, or check rows and use the bulk action bar.
         </p>
       </Card>
     </div>
   );
 }
 
+function BulkActionBar({
+  selectedIds,
+  onClear,
+}: {
+  selectedIds: Set<string>;
+  onClear: () => void;
+}): JSX.Element {
+  const queryClient = useQueryClient();
+  const [isPending, setIsPending] = useState(false);
+
+  async function applyToAll(classification: TxClassification | "clear") {
+    setIsPending(true);
+    try {
+      await Promise.all(
+        Array.from(selectedIds).map((id) =>
+          classification === "clear"
+            ? api.deleteTransactionOverride(id).catch(() => null) // 404 is fine
+            : api.setTransactionOverride({
+                plaid_investment_transaction_id: id,
+                classification,
+              }),
+        ),
+      );
+      queryClient.invalidateQueries({ queryKey: ["transactions"] });
+      queryClient.invalidateQueries({ queryKey: ["performance"] });
+      queryClient.invalidateQueries({ queryKey: ["cashflow-audit"] });
+      onClear();
+    } finally {
+      setIsPending(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 shadow-sm">
+      <span className="text-xs font-medium text-slate-700">
+        {selectedIds.size} selected · mark as:
+      </span>
+      {(["external_in", "external_out", "internal"] as TxClassification[]).map(
+        (c) => (
+          <button
+            key={c}
+            type="button"
+            disabled={isPending}
+            onClick={() => applyToAll(c)}
+            className={`rounded px-2 py-1 text-[11px] font-medium disabled:opacity-50 ${CLASSIFICATION_BTN_CLASSES[c]}`}
+          >
+            {CLASSIFICATION_LABELS[c]}
+          </button>
+        ),
+      )}
+      <button
+        type="button"
+        disabled={isPending}
+        onClick={() => applyToAll("clear")}
+        className="rounded border border-slate-300 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+        title="Remove overrides on selected rows"
+      >
+        Clear override
+      </button>
+      <button
+        type="button"
+        onClick={onClear}
+        className="ml-auto text-[11px] text-slate-500 hover:text-slate-900"
+      >
+        Deselect
+      </button>
+    </div>
+  );
+}
+
 function TxRow({
   tx,
+  selected,
+  onToggleSelect,
   isEditing,
   onStartEdit,
   onCloseEdit,
 }: {
   tx: InvestmentTransactionOut;
+  selected: boolean;
+  onToggleSelect: () => void;
   isEditing: boolean;
   onStartEdit: () => void;
   onCloseEdit: () => void;
 }): JSX.Element {
   return (
-    <tr className="hover:bg-slate-50">
-      <Td className="tabular-nums text-slate-900">{tx.date}</Td>
-      <Td>{tx.account_name}</Td>
-      <Td>
-        <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs uppercase tracking-wide text-slate-700">
+    <tr
+      className={
+        selected
+          ? "border-t border-slate-100 bg-indigo-50/50"
+          : "border-t border-slate-100 hover:bg-slate-50"
+      }
+    >
+      <td className="px-3 py-1.5">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggleSelect}
+          aria-label="Select row"
+        />
+      </td>
+      <td className="px-3 py-1.5 tabular-nums text-slate-900">{tx.date}</td>
+      <td className="px-3 py-1.5 text-slate-700">{tx.account_name}</td>
+      <td className="px-3 py-1.5">
+        <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-700">
           {tx.subtype ?? tx.type}
         </span>
-      </Td>
-      <Td className="font-mono text-slate-900">{tx.ticker ?? "—"}</Td>
-      <Td className="text-slate-600">
+      </td>
+      <td className="px-3 py-1.5 font-mono text-slate-900">
+        {tx.ticker ?? "—"}
+      </td>
+      <td className="px-3 py-1.5 text-slate-600">
         <span className="block max-w-[280px] truncate" title={tx.name ?? ""}>
           {tx.name ?? "—"}
         </span>
-      </Td>
-      <Td align="right" className="tabular-nums">
+      </td>
+      <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">
         {parseFloat(tx.quantity).toLocaleString(undefined, {
           maximumFractionDigits: 4,
         })}
-      </Td>
-      <Td align="right" className="tabular-nums">
+      </td>
+      <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">
         ${parseFloat(tx.amount).toLocaleString(undefined, {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2,
         })}
-      </Td>
-      <Td>
+      </td>
+      <td className="px-3 py-1.5">
         <ClassificationCell
           tx={tx}
           isEditing={isEditing}
           onStartEdit={onStartEdit}
           onCloseEdit={onCloseEdit}
         />
-      </Td>
+      </td>
     </tr>
   );
 }
@@ -263,8 +479,6 @@ function ClassificationCell({
 
   const eff = tx.effective_classification;
   if (eff === null) {
-    // Not a cashflow event (buy/sell/dividend); show muted "—" but still
-    // let the user override if they really want to.
     return (
       <button
         type="button"
@@ -292,5 +506,27 @@ function ClassificationCell({
         <span className="text-[8px] uppercase opacity-70">override</span>
       ) : null}
     </button>
+  );
+}
+
+function Sh({
+  children,
+  align,
+  onClick,
+}: {
+  children: React.ReactNode;
+  align?: "left" | "right";
+  onClick: () => void;
+}): JSX.Element {
+  return (
+    <th
+      onClick={onClick}
+      className={[
+        "cursor-pointer select-none px-3 py-2 text-xs font-medium uppercase tracking-wide text-slate-600 hover:bg-slate-100",
+        align === "right" ? "text-right" : "text-left",
+      ].join(" ")}
+    >
+      {children}
+    </th>
   );
 }
