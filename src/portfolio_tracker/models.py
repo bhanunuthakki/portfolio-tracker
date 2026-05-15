@@ -346,6 +346,41 @@ class PolicyWeight(Base):
     )
 
 
+class TransactionOverride(Base):
+    """User-supplied classification override for a single investment_transactions row.
+
+    The TWR / contributions pipeline classifies each tx as external-in,
+    external-out, or internal based on (type, subtype) heuristics. Brokers
+    are inconsistent — an ACATS transfer may look like a contribution to one
+    feed and an internal move to another, causing contribution totals to
+    swing across windows. A row here forces the pipeline to use the user's
+    classification instead.
+
+    Valid `classification` values (enforced by CHECK constraint):
+      * `external_in`   — contribution / deposit
+      * `external_out`  — withdrawal / distribution
+      * `internal`      — internal move; excluded from cashflow
+    """
+
+    __tablename__ = "transaction_overrides"
+
+    plaid_investment_transaction_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "investment_transactions.plaid_investment_transaction_id",
+            ondelete="CASCADE",
+        ),
+        primary_key=True,
+    )
+    classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class TickerOverride(Base):
     """User-supplied ticker symbol for a security Plaid returned without one.
 

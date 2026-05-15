@@ -127,6 +127,14 @@ class InvestmentTransactionOut(BaseModel):
     type: str
     subtype: str | None
     currency: str
+    # User-set override (None if no override). One of:
+    #   external_in / external_out / internal
+    override_classification: str | None = None
+    # The classification actually used by the cashflow / TWR pipeline.
+    # Same as override_classification when set; otherwise derived from
+    # type+subtype heuristics. Useful for the UI to show "what's the
+    # pipeline doing with this row right now."
+    effective_classification: str | None = None
 
 
 class PerformancePoint(BaseModel):
@@ -245,6 +253,28 @@ class TickerOverrideOut(BaseModel):
     ticker: str
     notes: str | None
     updated_at: datetime
+
+
+class TransactionOverrideIn(BaseModel):
+    """Set / replace the cashflow classification for one transaction."""
+
+    plaid_investment_transaction_id: str
+    classification: str  # external_in | external_out | internal
+    notes: str | None = None
+
+
+class TransactionOverrideOut(BaseModel):
+    plaid_investment_transaction_id: str
+    classification: str
+    notes: str | None
+    updated_at: datetime
+    # Helpful context for the UI without a separate fetch.
+    tx_date: date | None = None
+    tx_type: str | None = None
+    tx_subtype: str | None = None
+    tx_amount: Decimal | None = None
+    account_name: str | None = None
+    ticker: str | None = None
 
 
 class PolicyWeightIn(BaseModel):
