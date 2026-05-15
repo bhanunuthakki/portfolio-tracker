@@ -6,6 +6,7 @@ import { DecisionLogCard } from "@/components/DecisionLogCard";
 import { EarningsCalendarCard } from "@/components/EarningsCalendarCard";
 import { PerformanceChart } from "@/components/PerformanceChart";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
+import { ContributionDetailCard } from "@/components/ContributionDetailCard";
 import { TradeAnalysisCard } from "@/components/TradeAnalysisCard";
 import { TradeTimelineCard } from "@/components/TradeTimelineCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
@@ -260,6 +261,11 @@ export function Dashboard(): JSX.Element {
         includeBackfill={params.includeBackfill}
         excludeIndexEtfs={excludeIndexEtfs}
         reserveAmount={reserveAmount}
+      />
+
+      <ContributionDetailCard
+        startDate={params.startDate}
+        endDate={"endDate" in params ? params.endDate : undefined}
       />
 
       <TradeAnalysisCard
