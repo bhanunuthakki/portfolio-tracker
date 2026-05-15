@@ -13,6 +13,8 @@ import type {
   PolicyWeightIn,
   TradeAnalysisResult,
   TradeTimelineResult,
+  TransactionOverrideIn,
+  TransactionOverrideOut,
   DecisionIn,
   DecisionOut,
   DecisionOutcomeIn,
@@ -137,6 +139,25 @@ export const api = {
 
   deleteTickerOverride: (securityId: number): Promise<void> =>
     request(`/api/overrides/ticker/${securityId}`, { method: "DELETE" }),
+
+  listTransactionOverrides: (): Promise<TransactionOverrideOut[]> =>
+    request("/api/overrides/transactions"),
+
+  setTransactionOverride: (
+    input: TransactionOverrideIn,
+  ): Promise<TransactionOverrideOut> =>
+    request("/api/overrides/transactions", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  deleteTransactionOverride: (
+    plaidInvestmentTransactionId: string,
+  ): Promise<void> =>
+    request(
+      `/api/overrides/transactions/${encodeURIComponent(plaidInvestmentTransactionId)}`,
+      { method: "DELETE" },
+    ),
 
   transactions: (params?: {
     startDate?: string;

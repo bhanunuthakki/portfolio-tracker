@@ -1,10 +1,13 @@
 """User-managed overrides for fields the aggregator didn't supply.
 
-Two override types:
-  * cost-basis — total dollars paid for a position in a specific account.
+Three override types:
+  * cost-basis  — total dollars paid for a position in a specific account.
     Used when Plaid/SnapTrade returns NULL cost_basis.
-  * ticker     — yfinance-compatible symbol for a security Plaid couldn't
+  * ticker      — yfinance-compatible symbol for a security Plaid couldn't
     ticker. Re-run `jobs/prices.py` after setting one to populate history.
+  * transaction — per-tx cashflow classification override. Lets the user
+    force a row to count as contribution / withdrawal / internal so the
+    contribution number on the chart matches their mental model.
 
 All endpoints are idempotent (PUT semantics — set or replace).
 """
@@ -21,14 +24,22 @@ from portfolio_tracker.db import get_session
 from portfolio_tracker.models import (
     Account,
     CostBasisOverride,
+    InvestmentTransaction,
     Security,
     TickerOverride,
+    TransactionOverride,
 )
 from portfolio_tracker.schemas import (
     CostBasisOverrideIn,
     CostBasisOverrideOut,
     TickerOverrideIn,
     TickerOverrideOut,
+    TransactionOverrideIn,
+    TransactionOverrideOut,
+)
+
+_VALID_TX_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {"external_in", "external_out", "internal"}
 )
 
 router = APIRouter(prefix="/api/overrides", tags=["overrides"])
@@ -182,6 +193,108 @@ def delete_ticker_override(
     session: Annotated[Session, Depends(get_session)],
 ) -> None:
     record = session.get(TickerOverride, security_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    session.delete(record)
+    session.commit()
+
+
+# ---- transaction classification ------------------------------------------
+
+
+def _serialize_tx_override(
+    ov: TransactionOverride,
+    tx: InvestmentTransaction | None,
+    account: Account | None,
+    security: Security | None,
+) -> TransactionOverrideOut:
+    return TransactionOverrideOut(
+        plaid_investment_transaction_id=ov.plaid_investment_transaction_id,
+        classification=ov.classification,
+        notes=ov.notes,
+        updated_at=ov.updated_at,
+        tx_date=tx.date if tx is not None else None,
+        tx_type=tx.type if tx is not None else None,
+        tx_subtype=tx.subtype if tx is not None else None,
+        tx_amount=tx.amount if tx is not None else None,
+        account_name=account.name if account is not None else None,
+        ticker=security.ticker if security is not None else None,
+    )
+
+
+@router.get("/transactions", response_model=list[TransactionOverrideOut])
+def list_transaction_overrides(
+    session: Annotated[Session, Depends(get_session)],
+) -> list[TransactionOverrideOut]:
+    rows = session.execute(
+        select(TransactionOverride, InvestmentTransaction, Account, Security)
+        .join(
+            InvestmentTransaction,
+            InvestmentTransaction.plaid_investment_transaction_id
+            == TransactionOverride.plaid_investment_transaction_id,
+            isouter=True,
+        )
+        .join(
+            Account,
+            Account.account_id == InvestmentTransaction.account_id,
+            isouter=True,
+        )
+        .join(
+            Security,
+            Security.security_id == InvestmentTransaction.security_id,
+            isouter=True,
+        )
+        .order_by(InvestmentTransaction.date.desc())
+    ).all()
+    return [_serialize_tx_override(ov, tx, a, s) for ov, tx, a, s in rows]
+
+
+@router.put("/transactions", response_model=TransactionOverrideOut)
+def upsert_transaction_override(
+    input: TransactionOverrideIn,
+    session: Annotated[Session, Depends(get_session)],
+) -> TransactionOverrideOut:
+    if input.classification not in _VALID_TX_CLASSIFICATIONS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"classification must be one of "
+                f"{sorted(_VALID_TX_CLASSIFICATIONS)}; got '{input.classification}'"
+            ),
+        )
+    tx = session.get(InvestmentTransaction, input.plaid_investment_transaction_id)
+    if tx is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            detail=f"No transaction with id={input.plaid_investment_transaction_id}",
+        )
+    existing = session.get(TransactionOverride, input.plaid_investment_transaction_id)
+    if existing is None:
+        existing = TransactionOverride(
+            plaid_investment_transaction_id=input.plaid_investment_transaction_id,
+            classification=input.classification,
+            notes=input.notes,
+        )
+        session.add(existing)
+    else:
+        existing.classification = input.classification
+        existing.notes = input.notes
+    session.commit()
+    session.refresh(existing)
+    account = session.get(Account, tx.account_id) if tx else None
+    security = session.get(Security, tx.security_id) if tx and tx.security_id else None
+    return _serialize_tx_override(existing, tx, account, security)
+
+
+@router.delete(
+    "/transactions/{plaid_investment_transaction_id:path}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_transaction_override(
+    plaid_investment_transaction_id: str,
+    session: Annotated[Session, Depends(get_session)],
+) -> None:
+    record = session.get(TransactionOverride, plaid_investment_transaction_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     session.delete(record)

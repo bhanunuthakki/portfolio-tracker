@@ -124,6 +124,8 @@ export interface PolicyWeightIn {
   notes?: string | null;
 }
 
+export type TxClassification = "external_in" | "external_out" | "internal";
+
 export interface InvestmentTransactionOut {
   plaid_investment_transaction_id: string;
   account_id: number;
@@ -139,6 +141,27 @@ export interface InvestmentTransactionOut {
   type: string;
   subtype: string | null;
   currency: string;
+  override_classification: TxClassification | null;
+  effective_classification: TxClassification | null;
+}
+
+export interface TransactionOverrideIn {
+  plaid_investment_transaction_id: string;
+  classification: TxClassification;
+  notes?: string | null;
+}
+
+export interface TransactionOverrideOut {
+  plaid_investment_transaction_id: string;
+  classification: TxClassification;
+  notes: string | null;
+  updated_at: string;
+  tx_date: string | null;
+  tx_type: string | null;
+  tx_subtype: string | null;
+  tx_amount: string | null;
+  account_name: string | null;
+  ticker: string | null;
 }
 
 export interface PerformancePoint {
