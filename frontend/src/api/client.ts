@@ -12,6 +12,7 @@ import type {
   PolicyOut,
   PolicyWeightIn,
   TradeAnalysisResult,
+  TradeTimelineResult,
   DecisionIn,
   DecisionOut,
   DecisionOutcomeIn,
@@ -182,6 +183,17 @@ export const api = {
     if (params?.endDate) search.set("end_date", params.endDate);
     const qs = search.toString();
     return request(`/api/portfolio/trade-analysis${qs ? `?${qs}` : ""}`);
+  },
+
+  tradeTimeline: (params?: {
+    year?: number;
+    includeOpen?: boolean;
+  }): Promise<TradeTimelineResult> => {
+    const search = new URLSearchParams();
+    if (params?.year !== undefined) search.set("year", String(params.year));
+    if (params?.includeOpen === false) search.set("include_open", "false");
+    const qs = search.toString();
+    return request(`/api/portfolio/trade-timeline${qs ? `?${qs}` : ""}`);
   },
 
   // SnapTrade

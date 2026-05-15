@@ -32,9 +32,11 @@ from portfolio_tracker.schemas import (
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
+from portfolio_tracker.services import trade_timeline as trade_timeline_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
+from portfolio_tracker.services.trade_timeline import TradeTimelineResult
 from portfolio_tracker.services.performance import (
     _is_external_cashflow,
     _signed_cashflow,
@@ -502,3 +504,27 @@ def trade_analysis_endpoint(
         # window so we don't pretend to analyze data we don't have.
         start_date = end_date - timedelta(days=730)
     return trade_analysis_service.analyze_trades(session, start_date, end_date)
+
+
+@router.get("/trade-timeline", response_model=TradeTimelineResult)
+def trade_timeline_endpoint(
+    session: Annotated[Session, Depends(get_session)],
+    year: int | None = Query(
+        default=None,
+        description="Tax year filter (applies to 1099 closed-lot rows only). Omit for all years.",
+    ),
+    include_open: bool = Query(
+        default=True,
+        description="Include currently-held positions with unrealized P&L.",
+    ),
+) -> TradeTimelineResult:
+    """Chronological trade timeline with SPY counterfactual.
+
+    Combines 1099 realized lots (authoritative historical) with current open
+    positions (broker snapshots) and computes per-row alpha vs SPY for the
+    same holding window. Designed for a 'which trades earned/cost me alpha'
+    timeline on the dashboard.
+    """
+    return trade_timeline_service.build_timeline(
+        session, year=year, include_open=include_open
+    )
