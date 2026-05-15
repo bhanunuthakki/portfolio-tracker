@@ -1,14 +1,18 @@
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { Accounts } from "./pages/Accounts";
+import { Contributions } from "./pages/Contributions";
 import { Dashboard } from "./pages/Dashboard";
 import { Holdings } from "./pages/Holdings";
+import { TradeAnalysis } from "./pages/TradeAnalysis";
 import { Transactions } from "./pages/Transactions";
 
 const navItems: { to: string; label: string }[] = [
   { to: "/", label: "Dashboard" },
   { to: "/holdings", label: "Holdings" },
   { to: "/transactions", label: "Transactions" },
+  { to: "/contributions", label: "Contributions" },
+  { to: "/trade-analysis", label: "Trade analysis" },
   { to: "/accounts", label: "Accounts" },
 ];
 
@@ -47,6 +51,8 @@ export function App(): JSX.Element {
             <Route path="/" element={<Dashboard />} />
             <Route path="/holdings" element={<Holdings />} />
             <Route path="/transactions" element={<Transactions />} />
+            <Route path="/contributions" element={<Contributions />} />
+            <Route path="/trade-analysis" element={<TradeAnalysis />} />
             <Route path="/accounts" element={<Accounts />} />
           </Routes>
         </div>
