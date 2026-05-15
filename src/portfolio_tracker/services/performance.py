@@ -897,18 +897,21 @@ def _share_transfer_external_cashflows(
 def _classify_by_name(name: str | None) -> str | None:
     """Direction hint derived from the transaction's `name` field.
 
-    Some aggregators bury the actual direction in free-text instead of the
-    subtype:
+    Some aggregators bury the actual direction (or the fact that a row
+    isn't external cashflow at all) in free-text instead of the subtype:
       * Plaid surfaces SoFi/Robinhood DRIPs as `transfer/transfer` with
         name "Dividend reinvestment purchase of N shares" — these aren't
         external cashflow at all, they're internal share moves backed by
         a dividend that's already accounted for elsewhere.
+      * SoFi via Plaid emits dividends as `cash/withdrawal` with name
+        "cash - DIVIDEND USD" — the subtype is wrong; it's income earned
+        inside the portfolio, not a withdrawal.
       * SnapTrade marks outgoing/incoming margin-balance moves as the
         bare `transfer/transfer` subtype but spells out the direction in
         the name ("Completed outgoing margin balance transfer of $-100").
 
-    Without this, both cases get the wrong sign under the default Plaid
-    sign-convention rule for `transfer/transfer`.
+    Without this, those cases get the wrong sign (or wrong category
+    entirely) under the heuristic.
 
     Returns one of `external_in` / `external_out` / `internal` / `None`.
     Returning None means "no name-based opinion; fall through to the
@@ -917,8 +920,14 @@ def _classify_by_name(name: str | None) -> str | None:
     if not name:
         return None
     n = name.lower()
+    # Income earned inside the portfolio (NOT external cashflow), even if
+    # the subtype mis-tags them as withdrawal.
     if "reinvestment" in n or "drip" in n:
         return "internal"
+    if "dividend" in n or "interest payment" in n or "credit interest" in n:
+        return "internal"
+    # Direction markers — used when type/subtype is ambiguous
+    # (typically `transfer/transfer`).
     if "outgoing" in n:
         return "external_out"
     if "incoming" in n:

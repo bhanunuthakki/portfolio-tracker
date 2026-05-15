@@ -6,6 +6,7 @@ import { DecisionLogCard } from "@/components/DecisionLogCard";
 import { EarningsCalendarCard } from "@/components/EarningsCalendarCard";
 import { PerformanceChart } from "@/components/PerformanceChart";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
+import { ContributionAcrossWindowsCard } from "@/components/ContributionAcrossWindowsCard";
 import { ContributionDetailCard } from "@/components/ContributionDetailCard";
 import { TradeAnalysisCard } from "@/components/TradeAnalysisCard";
 import { TradeTimelineCard } from "@/components/TradeTimelineCard";
@@ -262,6 +263,8 @@ export function Dashboard(): JSX.Element {
         excludeIndexEtfs={excludeIndexEtfs}
         reserveAmount={reserveAmount}
       />
+
+      <ContributionAcrossWindowsCard />
 
       <ContributionDetailCard
         startDate={params.startDate}
