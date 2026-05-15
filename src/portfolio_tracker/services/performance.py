@@ -935,6 +935,19 @@ def _classify_by_name(name: str | None) -> str | None:
     return None
 
 
+def _is_cashflow_eligible_type(tx_type: str) -> bool:
+    """Only `cash` and `transfer` rows can be external cashflow events.
+    Buys/sells/fees/dividends-as-CASH-subtype are never cashflow regardless
+    of what their `name` field happens to contain (e.g. a sell of a fund
+    named "Vanguard Dividend Appreciation ETF" should NOT trigger the
+    'dividend' name-hint — name hints only apply to cash/transfer rows
+    where the subtype is the actually-ambiguous one)."""
+    return tx_type in (
+        InvestmentTransactionType.CASH.value,
+        InvestmentTransactionType.TRANSFER.value,
+    )
+
+
 def _signed_cashflow(
     tx_type: str,
     tx_subtype: str | None,
@@ -949,7 +962,8 @@ def _signed_cashflow(
 
     Precedence:
       1. Explicit user override (transaction_overrides table)
-      2. Name-based hint (drip/outgoing/incoming patterns)
+      2. Name-based hint (drip/outgoing/incoming patterns) — only applied
+         for cash/transfer types, never for buy/sell/fee
       3. (type, subtype) heuristic with aggregator sign convention
     """
     if override == "internal":
@@ -959,13 +973,14 @@ def _signed_cashflow(
     if override == "external_out":
         return -abs(amount)
 
-    name_hint = _classify_by_name(name)
-    if name_hint == "internal":
-        return Decimal(0)
-    if name_hint == "external_in":
-        return abs(amount)
-    if name_hint == "external_out":
-        return -abs(amount)
+    if _is_cashflow_eligible_type(tx_type):
+        name_hint = _classify_by_name(name)
+        if name_hint == "internal":
+            return Decimal(0)
+        if name_hint == "external_in":
+            return abs(amount)
+        if name_hint == "external_out":
+            return -abs(amount)
 
     subtype_norm = (tx_subtype or "").lower().strip()
 
@@ -996,11 +1011,12 @@ def _is_external_cashflow(
         return False
     if override in ("external_in", "external_out"):
         return True
-    name_hint = _classify_by_name(name)
-    if name_hint == "internal":
-        return False
-    if name_hint in ("external_in", "external_out"):
-        return True
+    if _is_cashflow_eligible_type(tx_type):
+        name_hint = _classify_by_name(name)
+        if name_hint == "internal":
+            return False
+        if name_hint in ("external_in", "external_out"):
+            return True
     subtype_norm = (tx_subtype or "").lower().strip()
     if tx_type == InvestmentTransactionType.TRANSFER.value:
         return subtype_norm not in _INTERNAL_TRANSFER_SUBTYPES
@@ -1053,9 +1069,13 @@ def effective_classification(
     """
     if override is not None:
         return override
-    name_hint = _classify_by_name(name)
-    if name_hint is not None:
-        return name_hint
+    # Name hints apply ONLY to cash/transfer rows where the subtype is
+    # ambiguous. Buys/sells of a security whose name happens to contain
+    # "dividend" or "reinvestment" should NOT be reclassified.
+    if _is_cashflow_eligible_type(tx_type):
+        name_hint = _classify_by_name(name)
+        if name_hint is not None:
+            return name_hint
     if not _is_external_cashflow(tx_type, tx_subtype):
         # Distinguish "internal transfer/cash event" (still cashflow-related,
         # just zeroed) from "completely unrelated to cashflow."
