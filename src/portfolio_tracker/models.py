@@ -184,6 +184,9 @@ class HoldingSnapshot(Base):
     institution_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     cost_basis: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    # 'broker' = pass-through of Plaid/SnapTrade snapshot; 'manual' = synthesized
+    # by the app to smooth over a known data gap. See migration 0009.
+    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="broker", server_default="broker")
 
 
 class InvestmentTransaction(Base):
@@ -216,6 +219,9 @@ class InvestmentTransaction(Base):
     type: Mapped[str] = mapped_column(String, nullable=False)
     subtype: Mapped[str | None] = mapped_column(String, nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
+    # 'broker' = pass-through of Plaid/SnapTrade tx; 'manual' = synthesized by
+    # the app (typically ACATS in/out matching pair). See migration 0009.
+    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="broker", server_default="broker")
 
 
 class Price(Base):
@@ -446,3 +452,135 @@ class EarningsCalendar(Base):
     fetched_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class TaxFormImport(Base):
+    """One row per imported 1099 PDF. Parent record for all augmentative tax
+    data. Owner attribution is via `recipient_name` so future Elaine 1099s
+    fit the same schema without any change."""
+
+    __tablename__ = "tax_form_imports"
+    __table_args__ = (Index("ix_tax_form_imports_broker_year", "broker", "tax_year"),)
+
+    import_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broker: Mapped[str] = mapped_column(String(32), nullable=False)
+    tax_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    account_mask: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.account_id", ondelete="SET NULL"), nullable=True
+    )
+    form_types: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    file_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    document_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    statement_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    recipient_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class TaxFormRealizedLot(Base):
+    """1099-B sales detail: one row per closed tax lot reported by the broker.
+    Contains acquired/disposed dates, qty, proceeds, cost basis, wash sale
+    disallowed, gain/loss, term. Authoritative for tax records."""
+
+    __tablename__ = "tax_form_realized_lots"
+    __table_args__ = (
+        Index("ix_tax_form_realized_lots_import_id", "import_id"),
+        Index("ix_tax_form_realized_lots_security_id", "security_id"),
+    )
+
+    lot_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    import_id: Mapped[int] = mapped_column(
+        ForeignKey("tax_form_imports.import_id", ondelete="CASCADE"), nullable=False
+    )
+    description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    cusip: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    security_id: Mapped[int | None] = mapped_column(
+        ForeignKey("securities.security_id", ondelete="SET NULL"), nullable=True
+    )
+    acquired_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    acquired_various: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    disposed_date: Mapped[date] = mapped_column(Date, nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    proceeds: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    cost_basis: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    wash_sale_loss_disallowed: Mapped[Decimal | None] = mapped_column(
+        Numeric(20, 6), nullable=True
+    )
+    net_gain_loss: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    # 'short' | 'long' | 'undetermined'
+    term: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 'A' | 'B' | 'C' | 'D' | 'E' | 'F' per Form 8949
+    form_8949_type: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # 'N' (net of option premium) | 'G' (gross)
+    proceeds_net_or_gross: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    additional_info: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TaxFormDividend(Base):
+    """1099-DIV payment-level detail. Includes qualified/nonqualified
+    dividends, foreign tax paid, Section 199A dividends, etc."""
+
+    __tablename__ = "tax_form_dividends"
+    __table_args__ = (Index("ix_tax_form_dividends_import_id", "import_id"),)
+
+    div_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    import_id: Mapped[int] = mapped_column(
+        ForeignKey("tax_form_imports.import_id", ondelete="CASCADE"), nullable=False
+    )
+    security_description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    cusip: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    security_id: Mapped[int | None] = mapped_column(
+        ForeignKey("securities.security_id", ondelete="SET NULL"), nullable=True
+    )
+    payment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    transaction_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    country: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class TaxFormInterest(Base):
+    """1099-INT detail: interest payments, security lending income, etc."""
+
+    __tablename__ = "tax_form_interest"
+    __table_args__ = (Index("ix_tax_form_interest_import_id", "import_id"),)
+
+    int_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    import_id: Mapped[int] = mapped_column(
+        ForeignKey("tax_form_imports.import_id", ondelete="CASCADE"), nullable=False
+    )
+    description: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    payment_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    transaction_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="Interest", server_default="Interest"
+    )
+
+
+class TaxFormRetirementDistribution(Base):
+    """1099-R: retirement distributions, rollovers, conversions."""
+
+    __tablename__ = "tax_form_retirement_distributions"
+    __table_args__ = (
+        Index("ix_tax_form_retirement_distributions_import_id", "import_id"),
+    )
+
+    dist_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    import_id: Mapped[int] = mapped_column(
+        ForeignKey("tax_form_imports.import_id", ondelete="CASCADE"), nullable=False
+    )
+    gross_distribution: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    taxable_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    federal_tax_withheld: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    state_tax_withheld: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    distribution_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    payer: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
