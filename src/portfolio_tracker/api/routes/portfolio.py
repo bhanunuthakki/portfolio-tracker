@@ -68,10 +68,17 @@ def latest_holdings_consolidated(
     return _consolidate_holdings(snapshot_date, rows, overrides)
 
 
-def _load_cost_basis_overrides(session: Session) -> dict[tuple[int, int], Decimal]:
-    """Map (account_id, security_id) → user-supplied total cost basis."""
+def _load_cost_basis_overrides(
+    session: Session,
+) -> dict[tuple[int, int], tuple[Decimal, str]]:
+    """Map (account_id, security_id) → (total_cost_basis, source).
+
+    `source` is one of `manual` / `inferred_acats` / `inferred_1099` per
+    the row's origin marker (see migration 0012). Consumers use it to
+    decide whether to badge the row in the UI.
+    """
     rows = session.execute(select(CostBasisOverride)).scalars().all()
-    return {(o.account_id, o.security_id): o.total_cost_basis for o in rows}
+    return {(o.account_id, o.security_id): (o.total_cost_basis, o.source) for o in rows}
 
 
 @router.get("/holdings/by-account", response_model=list[HoldingOut])
@@ -127,7 +134,7 @@ def _latest_holding_rows(
 def _consolidate_holdings(
     snapshot_date: date,
     rows: list[tuple[HoldingSnapshot, Account, Security]],
-    cost_basis_overrides: dict[tuple[int, int], Decimal],
+    cost_basis_overrides: dict[tuple[int, int], tuple[Decimal, str]],
 ) -> list[ConsolidatedHoldingOut]:
     """Group per-account holdings by security_id and compute weighted cost.
 
@@ -153,8 +160,19 @@ def _consolidate_holdings(
         total_cost = Decimal(0)
         currency = "USD"
         for h, a, _ in group:
-            override = cost_basis_overrides.get((a.account_id, security_id))
-            effective_cost = h.cost_basis if h.cost_basis is not None else override
+            override_entry = cost_basis_overrides.get((a.account_id, security_id))
+            override_amount = override_entry[0] if override_entry else None
+            override_source = override_entry[1] if override_entry else None
+            # Override wins when present (including over $0 / wrong broker values).
+            # An ACATS-in position often gets `cost_basis=0` from the receiving
+            # broker which inflates P&L; the manual / inferred override is the
+            # right number.
+            if override_amount is not None:
+                effective_cost = override_amount
+                cost_basis_source: str | None = override_source
+            else:
+                effective_cost = h.cost_basis
+                cost_basis_source = None
             per_account.append(
                 HoldingByAccountOut(
                     account_id=a.account_id,
@@ -162,6 +180,7 @@ def _consolidate_holdings(
                     quantity=h.quantity,
                     institution_value=h.institution_value,
                     cost_basis=effective_cost,
+                    cost_basis_source=cost_basis_source,
                 )
             )
             currency = h.currency

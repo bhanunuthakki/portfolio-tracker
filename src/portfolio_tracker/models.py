@@ -289,17 +289,22 @@ class SnapTradeUser(Base):
 
 
 class CostBasisOverride(Base):
-    """User-supplied cost basis for an (account, security) pair.
+    """Authoritative cost basis for an (account, security) pair.
 
-    Plaid returns `cost_basis` for some institutions but not all (notably
-    SoFi via Plaid). When the broker doesn't supply it, derived metrics
-    like weighted-avg cost and unrealized P&L are unavailable. This table
-    lets the user provide the value manually — checked from brokerage
-    statements or computed from transaction history.
+    Used when broker-reported cost_basis is missing, $0 from an ACATS
+    transfer, or otherwise wrong. The consolidated-holdings endpoint
+    prefers this row when present — see `source` for who set it.
 
     `total_cost_basis` is the TOTAL dollars paid (price × shares + fees),
-    matching Plaid's convention. The consolidated-holdings endpoint
-    transparently falls back to this value when the snapshot is missing.
+    matching Plaid's convention.
+
+    `source` distinguishes who/what set the override:
+      * `manual`          — user-entered via API/UI
+      * `inferred_acats`  — derived from source-account buy history at
+                            ACATS transfer date (see infer_acats_cost_basis.py)
+      * `inferred_1099`   — reserved for future 1099-B based inference
+    The marker is on the row itself (not on a separate registry) so any
+    downstream consumer can filter by origin without consulting other tables.
     """
 
     __tablename__ = "cost_basis_overrides"
@@ -312,6 +317,12 @@ class CostBasisOverride(Base):
     )
     total_cost_basis: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="manual",
+        server_default="manual",
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
