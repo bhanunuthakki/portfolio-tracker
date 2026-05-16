@@ -94,6 +94,20 @@ class HoldingByAccountOut(BaseModel):
     cost_basis_source: str | None = None
 
 
+class EarningsEnrichment(BaseModel):
+    """Per-ticker context pulled from the companion earnings-summary project.
+    All fields nullable so the dashboard degrades cleanly when the companion
+    project isn't available."""
+
+    tracked: bool = False                     # in earnings-summary's watchlist?
+    list_type: str | None = None              # "portfolio" | "watchlist"
+    next_earnings_date: date | None = None
+    thesis_status: str | None = None          # "ok" | "breach" | ...
+    thesis_summary: str | None = None
+    has_brief: bool = False
+    latest_brief_iso_date: str | None = None
+
+
 class ConsolidatedHoldingOut(BaseModel):
     """A position rolled up across all accounts that hold the same security.
 
@@ -117,6 +131,8 @@ class ConsolidatedHoldingOut(BaseModel):
     unrealized_pnl: Decimal | None
     accounts: list[HoldingByAccountOut]
     currency: str
+    # Cross-project enrichment from earnings-summary, if available.
+    earnings: EarningsEnrichment | None = None
 
 
 class InvestmentTransactionOut(BaseModel):

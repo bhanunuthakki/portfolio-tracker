@@ -27,6 +27,73 @@ const SOURCE_CLASS: Record<CostBasisSource, string> = {
   inferred_1099: "bg-indigo-100 text-indigo-800",
 };
 
+function daysUntil(iso: string | null): number | null {
+  if (!iso) return null;
+  const d = new Date(iso + "T00:00:00Z").getTime();
+  const today = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z").getTime();
+  return Math.round((d - today) / 86_400_000);
+}
+
+function EarningsThesisCell({
+  h,
+}: {
+  h: ConsolidatedHoldingOut;
+}): JSX.Element {
+  const es = h.earnings;
+  if (!es || (!es.tracked && !es.has_brief && es.next_earnings_date === null)) {
+    return <span className="text-slate-400 text-[11px]">—</span>;
+  }
+  const dUntil = daysUntil(es.next_earnings_date);
+  const earningsChipColor =
+    dUntil === null
+      ? "bg-slate-100 text-slate-600"
+      : dUntil <= 7
+        ? "bg-rose-100 text-rose-800"
+        : dUntil <= 14
+          ? "bg-amber-100 text-amber-800"
+          : "bg-slate-100 text-slate-700";
+  const thesisColor =
+    es.thesis_status === "breach"
+      ? "bg-rose-100 text-rose-800"
+      : es.thesis_status === "ok"
+        ? "bg-emerald-100 text-emerald-800"
+        : "bg-slate-100 text-slate-600";
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1"
+      onClick={(e) => e.stopPropagation()}
+    >
+      {es.next_earnings_date ? (
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${earningsChipColor}`}
+          title={`Next earnings ${es.next_earnings_date}${dUntil !== null ? ` (${dUntil}d)` : ""}`}
+        >
+          {es.next_earnings_date.slice(5)}
+        </span>
+      ) : null}
+      {es.thesis_status ? (
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${thesisColor}`}
+          title={es.thesis_summary ?? `thesis status: ${es.thesis_status}`}
+        >
+          {es.thesis_status}
+        </span>
+      ) : null}
+      {es.has_brief && h.ticker ? (
+        <a
+          href={`/api/earnings-summary/brief/${encodeURIComponent(h.ticker)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800 hover:bg-indigo-200"
+          title={`Open latest research brief (${es.latest_brief_iso_date})`}
+        >
+          brief
+        </a>
+      ) : null}
+    </div>
+  );
+}
+
 export function Holdings(): JSX.Element {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["holdings"],
@@ -58,6 +125,7 @@ export function Holdings(): JSX.Element {
               <Th align="right">Cost basis</Th>
               <Th align="right">Value</Th>
               <Th align="right">Unrealized</Th>
+              <Th>Earnings / thesis</Th>
               <Th align="right">Accounts</Th>
             </tr>
           </thead>
@@ -147,13 +215,14 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
         >
           {fmtSignedUSD(unrealized)}
         </Td>
+        <Td><EarningsThesisCell h={h} /></Td>
         <Td align="right" className="text-slate-500">
           {accountCount} {accountCount === 1 ? "account" : "accounts"}
         </Td>
       </tr>
       {open && (
         <tr className="bg-slate-50/60">
-          <td colSpan={8} className="px-4 py-3">
+          <td colSpan={9} className="px-4 py-3">
             <table className="min-w-full text-xs">
               <thead className="text-slate-500 uppercase tracking-wide">
                 <tr>

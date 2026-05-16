@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from portfolio_tracker.api.routes import (
     decision_support,
+    earnings_summary,
     overrides,
     plaid,
     policy,
@@ -36,6 +37,7 @@ def create_app() -> FastAPI:
     app.include_router(overrides.router)
     app.include_router(policy.router)
     app.include_router(decision_support.router)
+    app.include_router(earnings_summary.router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
