@@ -13,7 +13,19 @@ import {
   Td,
   Th,
 } from "@/components/ui";
-import type { ConsolidatedHoldingOut } from "@/types";
+import type { ConsolidatedHoldingOut, CostBasisSource } from "@/types";
+
+const SOURCE_LABEL: Record<CostBasisSource, string> = {
+  manual: "manual",
+  inferred_acats: "ACATS inferred",
+  inferred_1099: "1099 inferred",
+};
+
+const SOURCE_CLASS: Record<CostBasisSource, string> = {
+  manual: "bg-amber-100 text-amber-800",
+  inferred_acats: "bg-sky-100 text-sky-800",
+  inferred_1099: "bg-indigo-100 text-indigo-800",
+};
 
 export function Holdings(): JSX.Element {
   const { data, isLoading, isError } = useQuery({
@@ -74,6 +86,20 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
       ? parseFloat(h.weighted_avg_cost_per_share)
       : null;
   const accountCount = h.accounts.length;
+  // Aggregate per-account cost basis sources for the top-row badge.
+  const sources = new Set(
+    h.accounts.map((a) => a.cost_basis_source).filter(Boolean) as CostBasisSource[],
+  );
+  // Pick the most specific badge: prefer inferred over manual when both
+  // are present (inferred is the more interesting case).
+  const headlineSource: CostBasisSource | null =
+    sources.has("inferred_acats")
+      ? "inferred_acats"
+      : sources.has("inferred_1099")
+        ? "inferred_1099"
+        : sources.has("manual")
+          ? "manual"
+          : null;
 
   return (
     <>
@@ -97,7 +123,17 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
           {avgCost !== null ? `$${avgCost.toFixed(2)}` : "—"}
         </Td>
         <Td align="right" className="tabular-nums">
-          {fmtUSD(cost)}
+          <span className="inline-flex items-center gap-1">
+            {fmtUSD(cost)}
+            {headlineSource ? (
+              <span
+                className={`rounded px-1 py-0.5 text-[9px] uppercase tracking-wide ${SOURCE_CLASS[headlineSource]}`}
+                title={`Cost basis is ${SOURCE_LABEL[headlineSource]} for at least one account (not broker-reported). Click the row to see per-account detail.`}
+              >
+                {headlineSource === "manual" ? "MAN" : "INF"}
+              </span>
+            ) : null}
+          </span>
         </Td>
         <Td
           align="right"
@@ -149,7 +185,17 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
                         })}
                       </td>
                       <td className="py-1 text-right tabular-nums">
-                        {fmtUSD(aCost)}
+                        <span className="inline-flex items-center gap-1">
+                          {fmtUSD(aCost)}
+                          {a.cost_basis_source ? (
+                            <span
+                              className={`rounded px-1 py-0.5 text-[9px] uppercase tracking-wide ${SOURCE_CLASS[a.cost_basis_source]}`}
+                              title={`Source: ${SOURCE_LABEL[a.cost_basis_source]}. Not broker-reported.`}
+                            >
+                              {SOURCE_LABEL[a.cost_basis_source]}
+                            </span>
+                          ) : null}
+                        </span>
                       </td>
                       <td className="py-1 text-right tabular-nums">
                         {fmtUSD(aValue)}

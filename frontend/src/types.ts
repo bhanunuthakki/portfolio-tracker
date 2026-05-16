@@ -33,12 +33,15 @@ export interface HoldingOut {
   currency: string;
 }
 
+export type CostBasisSource = "manual" | "inferred_acats" | "inferred_1099";
+
 export interface HoldingByAccountOut {
   account_id: number;
   account_name: string;
   quantity: string;
   institution_value: string | null;
   cost_basis: string | null;
+  cost_basis_source: CostBasisSource | null;
 }
 
 export interface ConsolidatedHoldingOut {
