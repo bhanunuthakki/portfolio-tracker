@@ -287,6 +287,15 @@ export interface TradeTimelineResult {
   notes: string[];
 }
 
+export interface MatchedExecutions {
+  direction: string;
+  transaction_count: number;
+  total_quantity: string;
+  total_amount: string;
+  first_date: string;
+  last_date: string;
+}
+
 export interface DecisionOut {
   decision_id: number;
   decision_date: string;
@@ -303,6 +312,7 @@ export interface DecisionOut {
   outcome_status: string | null;
   outcome_notes: string | null;
   linked_brief_path: string | null;
+  matched_executions: MatchedExecutions | null;
   created_at: string;
   updated_at: string;
 }

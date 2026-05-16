@@ -454,6 +454,27 @@ function DecisionList({
                   </a>
                 </div>
               )}
+              {d.matched_executions && (
+                <div className="mt-2 text-xs">
+                  <span
+                    className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-800 ring-1 ring-emerald-200"
+                    title={`Detected by auto-match within 14d of decision_date. ${d.matched_executions.first_date} → ${d.matched_executions.last_date}`}
+                  >
+                    ✓ Acted —{" "}
+                    {d.matched_executions.transaction_count}{" "}
+                    {d.matched_executions.direction}
+                    {d.matched_executions.transaction_count === 1 ? "" : "s"} ·{" "}
+                    {parseFloat(d.matched_executions.total_quantity).toLocaleString(
+                      undefined,
+                      { maximumFractionDigits: 4 },
+                    )}{" "}
+                    sh · $
+                    {Math.abs(
+                      parseFloat(d.matched_executions.total_amount),
+                    ).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                  </span>
+                </div>
+              )}
               {d.outcome_status && (
                 <div className="mt-2 text-xs">
                   <span
