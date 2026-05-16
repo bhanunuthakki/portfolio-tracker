@@ -34,6 +34,11 @@ function daysUntil(iso: string | null): number | null {
   return Math.round((d - today) / 86_400_000);
 }
 
+function daysAgo(iso: string | null): number | null {
+  const u = daysUntil(iso);
+  return u === null ? null : -u;
+}
+
 function EarningsThesisCell({
   h,
 }: {
@@ -79,17 +84,30 @@ function EarningsThesisCell({
           {es.thesis_status}
         </span>
       ) : null}
-      {es.has_brief && h.ticker ? (
-        <a
-          href={`/api/earnings-summary/brief/${encodeURIComponent(h.ticker)}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800 hover:bg-indigo-200"
-          title={`Open latest research brief (${es.latest_brief_iso_date})`}
-        >
-          brief
-        </a>
-      ) : null}
+      {es.has_brief && h.ticker ? (() => {
+        const age = daysAgo(es.latest_brief_iso_date);
+        const briefClass =
+          age === null
+            ? "bg-indigo-100 text-indigo-800 hover:bg-indigo-200"
+            : age <= 30
+              ? "bg-indigo-100 text-indigo-800 hover:bg-indigo-200"
+              : age <= 90
+                ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
+                : "bg-rose-100 text-rose-800 hover:bg-rose-200";
+        const ageLabel =
+          age === null ? "" : age === 0 ? " · today" : ` · ${age}d`;
+        return (
+          <a
+            href={`/api/earnings-summary/brief/${encodeURIComponent(h.ticker)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${briefClass}`}
+            title={`Open latest research brief (${es.latest_brief_iso_date}${age !== null ? `, ${age}d ago` : ""})`}
+          >
+            brief{ageLabel}
+          </a>
+        );
+      })() : null}
     </div>
   );
 }
