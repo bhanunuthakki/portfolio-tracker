@@ -106,6 +106,7 @@ function DecisionForm({
     time_horizon_months: undefined,
     confidence: "medium",
     notes: "",
+    linked_brief_path: "",
   });
 
   const create = useMutation({
@@ -127,6 +128,7 @@ function DecisionForm({
       expected_outcome: form.expected_outcome?.trim() || null,
       invalidation_triggers: form.invalidation_triggers?.trim() || null,
       notes: form.notes?.trim() || null,
+      linked_brief_path: form.linked_brief_path?.trim() || null,
     });
   };
 
@@ -273,6 +275,18 @@ function DecisionForm({
         </Field>
       </div>
 
+      <Field label="Linked brief (optional)">
+        <input
+          type="text"
+          value={form.linked_brief_path ?? ""}
+          onChange={(e) =>
+            setForm((f) => ({ ...f, linked_brief_path: e.target.value }))
+          }
+          placeholder='e.g. "research/NU/2026-05-13_report.html" from earnings-summary'
+          className="w-full rounded border border-slate-300 px-2 py-1 text-xs font-mono"
+        />
+      </Field>
+
       <div className="flex items-center justify-end gap-2">
         <SecondaryButton onClick={onCancel}>Cancel</SecondaryButton>
         <PrimaryButton type="submit" disabled={create.isPending}>
@@ -381,6 +395,19 @@ function DecisionList({
                       </span>
                     </div>
                   )}
+                </div>
+              )}
+              {d.linked_brief_path && (
+                <div className="mt-2 text-xs">
+                  <a
+                    href={`/api/earnings-summary/brief/${encodeURIComponent(d.ticker)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded bg-indigo-100 px-1.5 py-0.5 font-medium text-indigo-800 hover:bg-indigo-200"
+                    title={d.linked_brief_path}
+                  >
+                    📄 brief at decision time
+                  </a>
                 </div>
               )}
               {d.outcome_status && (

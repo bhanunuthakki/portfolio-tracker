@@ -24,11 +24,13 @@ from portfolio_tracker.schemas import (
     CashflowGroupOut,
     ConsolidatedHoldingOut,
     DataQualityReportOut,
+    EarningsEnrichment,
     HoldingByAccountOut,
     HoldingOut,
     InvestmentTransactionOut,
     PerformanceSeries,
 )
+from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
@@ -59,13 +61,36 @@ def latest_holdings_consolidated(
 
     Cost basis falls back to `cost_basis_overrides` when the snapshot's
     value is NULL — see `services/overrides.py` for the merge logic.
+
+    Each row is also enriched with cross-project data from
+    `earnings-summary` (next earnings date, thesis status, brief link)
+    when that companion project's DB is reachable.
     """
     rows = _latest_holding_rows(session)
     if not rows:
         return []
     snapshot_date = rows[0][0].snapshot_date
     overrides = _load_cost_basis_overrides(session)
-    return _consolidate_holdings(snapshot_date, rows, overrides)
+    consolidated = _consolidate_holdings(snapshot_date, rows, overrides)
+    # Enrich with earnings-summary data (no-op when unavailable)
+    tickers = [c.ticker for c in consolidated if c.ticker]
+    enrichment = earnings_summary_svc.summary_by_ticker(tickers)
+    for c in consolidated:
+        if not c.ticker:
+            continue
+        es = enrichment.get(c.ticker.upper())
+        if es is None or not es.tracked and not es.has_brief and es.next_earnings_date is None:
+            continue
+        c.earnings = EarningsEnrichment(
+            tracked=es.tracked,
+            list_type=es.list_type,
+            next_earnings_date=es.next_earnings_date,
+            thesis_status=es.thesis_status,
+            thesis_summary=es.thesis_summary,
+            has_brief=es.has_brief,
+            latest_brief_iso_date=es.latest_brief_iso_date,
+        )
+    return consolidated
 
 
 def _load_cost_basis_overrides(

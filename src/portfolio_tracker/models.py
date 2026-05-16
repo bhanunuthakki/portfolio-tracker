@@ -445,6 +445,10 @@ class TradeDecision(Base):
     outcome_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     outcome_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     outcome_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Optional backlink to a research brief in the companion `earnings-summary`
+    # project. Relative path under its output dir (e.g.
+    # "research/NU/2026-05-13_report.html"). See migration 0013.
+    linked_brief_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

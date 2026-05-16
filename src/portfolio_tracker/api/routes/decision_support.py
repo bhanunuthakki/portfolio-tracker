@@ -52,6 +52,10 @@ class DecisionIn(BaseModel):
     time_horizon_months: int | None = Field(default=None, ge=0, le=120)
     confidence: str | None = Field(default=None, pattern=r"^(low|medium|high)$")
     notes: str | None = None
+    # Optional link to a research brief in earnings-summary. Stored as a
+    # relative path like "research/NU/2026-05-13_report.html" so it
+    # resolves through portfolio-tracker's brief-passthrough route.
+    linked_brief_path: str | None = Field(default=None, max_length=512)
 
 
 class DecisionOutcomeIn(BaseModel):
@@ -75,6 +79,7 @@ class DecisionOut(BaseModel):
     outcome_date: date | None
     outcome_status: str | None
     outcome_notes: str | None
+    linked_brief_path: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -103,6 +108,7 @@ def create_decision(
         time_horizon_months=payload.time_horizon_months,
         confidence=payload.confidence,
         notes=payload.notes.strip() if payload.notes else None,
+        linked_brief_path=payload.linked_brief_path.strip() if payload.linked_brief_path else None,
     )
     session.add(decision)
     session.commit()
@@ -174,6 +180,7 @@ def _decision_to_out(d: TradeDecision) -> DecisionOut:
         outcome_date=d.outcome_date,
         outcome_status=d.outcome_status,
         outcome_notes=d.outcome_notes,
+        linked_brief_path=d.linked_brief_path,
         created_at=d.created_at,
         updated_at=d.updated_at,
     )
