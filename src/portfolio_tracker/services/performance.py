@@ -927,10 +927,12 @@ def _classify_by_name(name: str | None) -> str | None:
     if "dividend" in n or "interest payment" in n or "credit interest" in n:
         return "internal"
     # Direction markers — used when type/subtype is ambiguous
-    # (typically `transfer/transfer`).
-    if "outgoing" in n:
+    # (typically `transfer/transfer`). "deposit" and "withdrawal" are
+    # cross-aggregator-safe because they make the direction explicit
+    # regardless of which sign convention the source uses.
+    if "outgoing" in n or "withdrawal" in n:
         return "external_out"
-    if "incoming" in n:
+    if "incoming" in n or "deposit" in n:
         return "external_in"
     return None
 
