@@ -85,6 +85,13 @@ class HoldingByAccountOut(BaseModel):
     quantity: Decimal
     institution_value: Decimal | None
     cost_basis: Decimal | None
+    # Where the cost basis came from:
+    #   None              — Plaid/SnapTrade-reported (broker truth)
+    #   'manual'          — user-entered override
+    #   'inferred_acats'  — derived from ACATS pair-matching
+    #   'inferred_1099'   — reserved
+    # Surfaced so the UI can badge inferred / manual rows distinctly.
+    cost_basis_source: str | None = None
 
 
 class ConsolidatedHoldingOut(BaseModel):
@@ -235,6 +242,8 @@ class CostBasisOverrideOut(BaseModel):
     security_name: str | None
     total_cost_basis: Decimal
     notes: str | None
+    # 'manual' | 'inferred_acats' | 'inferred_1099'
+    source: str = "manual"
     updated_at: datetime
 
 

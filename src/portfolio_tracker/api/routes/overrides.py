@@ -67,6 +67,7 @@ def list_cost_basis_overrides(
             security_name=s.name,
             total_cost_basis=ov.total_cost_basis,
             notes=ov.notes,
+            source=ov.source,
             updated_at=ov.updated_at,
         )
         for ov, a, s in rows
@@ -94,11 +95,16 @@ def upsert_cost_basis_override(
             security_id=body.security_id,
             total_cost_basis=body.total_cost_basis,
             notes=body.notes,
+            source="manual",
         )
         session.add(existing)
     else:
+        # PUT through the API is always a manual edit; promote source to
+        # "manual" so a later inference script doesn't quietly overwrite
+        # the user's chosen value.
         existing.total_cost_basis = body.total_cost_basis
         existing.notes = body.notes
+        existing.source = "manual"
     session.commit()
     session.refresh(existing)
     return CostBasisOverrideOut(
@@ -109,6 +115,7 @@ def upsert_cost_basis_override(
         security_name=security.name,
         total_cost_basis=existing.total_cost_basis,
         notes=existing.notes,
+        source=existing.source,
         updated_at=existing.updated_at,
     )
 
