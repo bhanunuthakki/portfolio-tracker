@@ -22,12 +22,27 @@ import type { InvestmentTransactionOut, TxClassification } from "@/types";
  */
 
 type Filter = "all" | "cashflow" | "overridden";
+type RangePreset = "6M" | "1Y" | "2Y" | "5Y" | "MAX";
 
 const FILTER_LABELS: Record<Filter, string> = {
   all: "All",
   cashflow: "Cashflow rows",
   overridden: "Overridden only",
 };
+
+const RANGE_PRESETS: { key: RangePreset; label: string; days: number | null }[] = [
+  { key: "6M", label: "6M", days: 180 },
+  { key: "1Y", label: "1Y", days: 365 },
+  { key: "2Y", label: "2Y", days: 730 },
+  { key: "5Y", label: "5Y", days: 1825 },
+  { key: "MAX", label: "Max", days: null },
+];
+
+function isoDaysAgo(days: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
 
 const CLASSIFICATION_LABELS: Record<TxClassification, string> = {
   external_in: "Contribution",
@@ -49,13 +64,21 @@ const CLASSIFICATION_BTN_CLASSES: Record<TxClassification, string> = {
 
 export function Transactions(): JSX.Element {
   const [filter, setFilter] = useState<Filter>("all");
+  const [rangePreset, setRangePreset] = useState<RangePreset>("2Y");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
+  const startDate = useMemo(() => {
+    const p = RANGE_PRESETS.find((x) => x.key === rangePreset);
+    // For "Max" we pass an explicit ancient date so the backend doesn't
+    // fall back to its 730-day default cap when start_date is None.
+    return p?.days ? isoDaysAgo(p.days) : "2000-01-01";
+  }, [rangePreset]);
+
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["transactions"],
-    queryFn: () => api.transactions({ limit: 500 }),
+    queryKey: ["transactions", { startDate, limit: 5000 }],
+    queryFn: () => api.transactions({ startDate, limit: 5000 }),
   });
 
   const baseFiltered = useMemo(() => {
@@ -157,6 +180,23 @@ export function Transactions(): JSX.Element {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1">
+            {RANGE_PRESETS.map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => setRangePreset(p.key)}
+                className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
+                  rangePreset === p.key
+                    ? "bg-slate-200 text-slate-900"
+                    : "text-slate-600 hover:bg-slate-100"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-slate-300">|</span>
           <div className="flex items-center gap-1">
             {(["all", "cashflow", "overridden"] as Filter[]).map((f) => (
               <button
