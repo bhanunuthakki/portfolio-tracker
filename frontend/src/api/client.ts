@@ -159,6 +159,14 @@ export const api = {
       { method: "DELETE" },
     ),
 
+  // earnings-summary companion project
+  listBriefsForTicker: (
+    ticker: string,
+  ): Promise<{ ticker: string; briefs: { iso_date: string; path: string }[] }> =>
+    request(
+      `/api/earnings-summary/briefs?ticker=${encodeURIComponent(ticker)}`,
+    ),
+
   transactions: (params?: {
     startDate?: string;
     endDate?: string;

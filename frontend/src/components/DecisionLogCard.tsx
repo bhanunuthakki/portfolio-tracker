@@ -276,14 +276,10 @@ function DecisionForm({
       </div>
 
       <Field label="Linked brief (optional)">
-        <input
-          type="text"
+        <BriefPicker
+          ticker={form.ticker}
           value={form.linked_brief_path ?? ""}
-          onChange={(e) =>
-            setForm((f) => ({ ...f, linked_brief_path: e.target.value }))
-          }
-          placeholder='e.g. "research/NU/2026-05-13_report.html" from earnings-summary'
-          className="w-full rounded border border-slate-300 px-2 py-1 text-xs font-mono"
+          onChange={(v) => setForm((f) => ({ ...f, linked_brief_path: v }))}
         />
       </Field>
 
@@ -294,6 +290,54 @@ function DecisionForm({
         </PrimaryButton>
       </div>
     </form>
+  );
+}
+
+function BriefPicker({
+  ticker,
+  value,
+  onChange,
+}: {
+  ticker: string;
+  value: string;
+  onChange: (v: string) => void;
+}): JSX.Element {
+  const tickerNorm = ticker.toUpperCase().trim();
+  const { data } = useQuery({
+    queryKey: ["briefs-for-ticker", tickerNorm],
+    queryFn: () => api.listBriefsForTicker(tickerNorm),
+    enabled: tickerNorm.length > 0,
+  });
+  const briefs = data?.briefs ?? [];
+  return (
+    <div className="space-y-1">
+      {briefs.length > 0 ? (
+        <select
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="w-full rounded border border-slate-300 px-2 py-1 text-xs font-mono"
+        >
+          <option value="">— no brief —</option>
+          {briefs.map((b) => (
+            <option key={b.path} value={b.path}>
+              {b.iso_date}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={
+            tickerNorm
+              ? `No briefs found for ${tickerNorm}. Paste a path if you have one.`
+              : "Enter a ticker above to see available briefs"
+          }
+          className="w-full rounded border border-slate-300 px-2 py-1 text-xs font-mono"
+        />
+      )}
+    </div>
   );
 }
 
