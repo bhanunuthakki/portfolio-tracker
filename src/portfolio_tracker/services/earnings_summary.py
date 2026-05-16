@@ -85,6 +85,26 @@ def summary_by_ticker(tickers: list[str]) -> dict[str, TickerSummary]:
     return out
 
 
+def all_brief_iso_dates(ticker: str) -> list[str]:
+    """Every {date} stem found under output/research/{TICKER}/, sorted
+    newest-first. Empty list when nothing exists or ticker is unsafe."""
+    ticker_norm = ticker.upper().strip()
+    if not _safe_ticker(ticker_norm):
+        return []
+    output_dir = _output_dir()
+    tdir = output_dir / "research" / ticker_norm
+    if not tdir.is_dir():
+        return []
+    iso_dates: list[str] = []
+    for f in tdir.iterdir():
+        name = f.name
+        if name.endswith("_report.html"):
+            iso = name[: -len("_report.html")]
+            if _is_iso_date(iso):
+                iso_dates.append(iso)
+    return sorted(iso_dates, reverse=True)
+
+
 def latest_brief_path(ticker: str) -> Path | None:
     """Absolute path to the most recent {date}_report.html for a ticker.
 

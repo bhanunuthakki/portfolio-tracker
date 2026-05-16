@@ -33,6 +33,28 @@ def status_endpoint() -> JSONResponse:
     )
 
 
+@router.get("/briefs")
+def list_briefs(ticker: str) -> JSONResponse:
+    """List every available brief date for a ticker, newest-first.
+    Used by the decision form to populate a dropdown of "which brief
+    was current at decision time?"."""
+    dates = svc.all_brief_iso_dates(ticker)
+    return JSONResponse(
+        content={
+            "ticker": ticker.upper().strip(),
+            "briefs": [
+                {
+                    "iso_date": d,
+                    # relative path (matches what we store in
+                    # trade_decisions.linked_brief_path)
+                    "path": f"research/{ticker.upper().strip()}/{d}_report.html",
+                }
+                for d in dates
+            ],
+        }
+    )
+
+
 @router.get("/brief/{ticker}")
 def brief_passthrough(ticker: str) -> FileResponse:
     """Stream the latest {date}_report.html for a ticker.
