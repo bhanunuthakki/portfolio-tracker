@@ -279,6 +279,22 @@ def analyze_trades(
         pnl_pct = (
             float(pnl / denom * 100) if denom > 0 else None
         )
+        # The cost_basis_unreliable flag previously fired any time
+        # today_qty exceeded bought_qty (the classic ACATS-in detector:
+        # shares appeared without buy transactions). Once an override has
+        # filled in the cost basis — manual entry, or inferred_acats from
+        # the inference script — the row is reliable again. Suppress the
+        # warning in that case so the UI stops nagging on rows we've fixed.
+        has_basis_now = qty_today > 0 and effective_cost_known.get(ticker)
+        unreliable = (
+            False
+            if has_basis_now
+            else _detect_cost_basis_gap(
+                bought_qty=b["bought_qty"],
+                sold_qty=b["sold_qty"],
+                today_qty=today_qty.get(ticker, Decimal(0)),
+            )
+        )
         tickers.append(
             TickerTrade(
                 ticker=ticker,
@@ -293,11 +309,7 @@ def analyze_trades(
                 pnl_pct=pnl_pct,
                 trade_count=b["trade_count"],
                 is_open=today_qty.get(ticker, Decimal(0)) > 0,
-                cost_basis_unreliable=_detect_cost_basis_gap(
-                    bought_qty=b["bought_qty"],
-                    sold_qty=b["sold_qty"],
-                    today_qty=today_qty.get(ticker, Decimal(0)),
-                ),
+                cost_basis_unreliable=unreliable,
             )
         )
     tickers.sort(key=lambda t: -abs(t.pnl_dollars))
