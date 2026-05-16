@@ -3,11 +3,8 @@ import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
 import { DecisionLogCard } from "@/components/DecisionLogCard";
-import { EarningsCalendarCard } from "@/components/EarningsCalendarCard";
 import { PerformanceChart } from "@/components/PerformanceChart";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
-import { ContributionAcrossWindowsCard } from "@/components/ContributionAcrossWindowsCard";
-import { TradeTimelineCard } from "@/components/TradeTimelineCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
 
 type RangePreset = "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "MAX" | "CUSTOM";
@@ -262,13 +259,7 @@ export function Dashboard(): JSX.Element {
         reserveAmount={reserveAmount}
       />
 
-      <ContributionAcrossWindowsCard />
-
-      <TradeTimelineCard />
-
       <DecisionLogCard />
-
-      <EarningsCalendarCard />
     </div>
   );
 }

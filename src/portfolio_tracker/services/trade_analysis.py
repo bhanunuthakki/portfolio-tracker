@@ -56,12 +56,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
+    CostBasisOverride,
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
     Security,
 )
 from portfolio_tracker.services.active_items import active_account_ids
+from sqlalchemy import func, and_
 
 # Tickers below this combined buy+sell notional are dropped from the
 # per-ticker breakdown. They're noise — small one-off trades that don't
@@ -211,12 +213,20 @@ def analyze_trades(
             if bucket["last_action"] is None or tx_date > bucket["last_action"]:
                 bucket["last_action"] = tx_date
 
-    # ---- today's market value per ticker -------------------------------
+    # ---- today's market value AND effective cost basis per ticker ------
+    # Pulls the latest snapshot's market value AND the effective cost basis
+    # (snapshot.cost_basis, with cost_basis_overrides winning when present).
+    # Using the same merge logic Holdings uses, so P&L numbers agree on
+    # currently-held positions — critical for ACATS-in shares where the
+    # broker reports $0 cost.
     today_rows = session.execute(
         select(
             Security.ticker,
+            HoldingSnapshot.account_id,
+            HoldingSnapshot.security_id,
             HoldingSnapshot.quantity,
             HoldingSnapshot.institution_value,
+            HoldingSnapshot.cost_basis,
         )
         .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
         .where(HoldingSnapshot.snapshot_date == today)
@@ -224,12 +234,24 @@ def analyze_trades(
         .where(Security.is_cash_equivalent.is_(False))
         .where(Security.ticker.is_not(None))
     ).all()
+    overrides = {
+        (o.account_id, o.security_id): o.total_cost_basis
+        for o in session.execute(select(CostBasisOverride)).scalars()
+    }
     today_qty: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     today_value: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
-    for ticker, qty, val in today_rows:
+    effective_cost: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    effective_cost_known: dict[str, bool] = defaultdict(lambda: False)
+    for ticker, acct_id, sec_id, qty, val, cb in today_rows:
         today_qty[ticker] += Decimal(qty or 0)
         if val is not None:
             today_value[ticker] += Decimal(val)
+        # Override wins (matches Holdings consolidation logic)
+        override = overrides.get((acct_id, sec_id))
+        effective = override if override is not None else cb
+        if effective is not None:
+            effective_cost[ticker] += Decimal(effective)
+            effective_cost_known[ticker] = True
 
     # ---- compose ticker rows -------------------------------------------
     tickers: list[TickerTrade] = []
@@ -238,11 +260,24 @@ def analyze_trades(
         if notional < _MIN_TICKER_NOTIONAL:
             continue
         mv = today_value.get(ticker, Decimal(0))
-        pnl = mv + b["sold"] - b["bought"]
+        qty_today = today_qty.get(ticker, Decimal(0))
+        # P&L methodology:
+        #   * Currently-held positions: use Holdings-style math
+        #     (today_value - effective_cost_basis). This matches the
+        #     Holdings page exactly when ACATS overrides are present.
+        #   * Closed positions (qty=0 today): fall back to lifetime
+        #     `sold - bought` (realized cashflow).
+        #   * If the position is open but we have no effective cost
+        #     basis (no snapshot, no override), fall back to bought/sold
+        #     math too.
+        if qty_today > 0 and effective_cost_known.get(ticker):
+            pnl = mv - effective_cost.get(ticker, Decimal(0))
+            denom = effective_cost.get(ticker, Decimal(0))
+        else:
+            pnl = mv + b["sold"] - b["bought"]
+            denom = b["bought"]
         pnl_pct = (
-            float(pnl / b["bought"] * 100)
-            if b["bought"] > 0
-            else None
+            float(pnl / denom * 100) if denom > 0 else None
         )
         tickers.append(
             TickerTrade(
