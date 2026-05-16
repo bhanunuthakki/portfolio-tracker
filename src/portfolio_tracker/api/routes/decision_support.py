@@ -21,17 +21,34 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import get_session
 from portfolio_tracker.models import (
     EarningsCalendar,
     HoldingSnapshot,
+    InvestmentTransaction,
     Security,
     TradeDecision,
     TradeTag,
 )
+
+# Days after a decision_date that we'll scan for matching transactions
+# when computing the "did you act on this?" badge. 14 days is wide enough
+# to absorb settlement/limit-order delays but narrow enough that the next
+# decision's window doesn't pull in unrelated trades.
+EXECUTION_MATCH_WINDOW_DAYS = 14
+
+# Decision action → transaction types that count as "executing" it. 'hold'
+# decisions never execute (they're an explicit *don't trade* call).
+_ACTION_TO_TX_TYPES: dict[str, tuple[str, ...]] = {
+    "buy": ("buy",),
+    "add": ("buy",),
+    "sell": ("sell",),
+    "trim": ("sell",),
+    "hold": (),
+}
 
 router = APIRouter(prefix="/api", tags=["decision-support"])
 
@@ -64,6 +81,23 @@ class DecisionOutcomeIn(BaseModel):
     outcome_notes: str | None = None
 
 
+class MatchedExecutions(BaseModel):
+    """Investment transactions that look like the user acting on a decision.
+
+    Matched by (ticker, direction, decision_date .. decision_date + 14d).
+    The badge they render on a decision card says "you bought N sh over D days
+    after logging this thesis." Auto-detection only — outcome_status stays a
+    manual call by the user (executing a buy doesn't prove the thesis worked).
+    """
+
+    direction: str  # 'buy' or 'sell'
+    transaction_count: int
+    total_quantity: Decimal  # magnitude (SUM(ABS)) — direction carried separately
+    total_amount: Decimal    # magnitude (SUM(ABS)) — broker conventions vary
+    first_date: date
+    last_date: date
+
+
 class DecisionOut(BaseModel):
     decision_id: int
     decision_date: date
@@ -80,6 +114,7 @@ class DecisionOut(BaseModel):
     outcome_status: str | None
     outcome_notes: str | None
     linked_brief_path: str | None
+    matched_executions: MatchedExecutions | None
     created_at: datetime
     updated_at: datetime
 
@@ -113,7 +148,7 @@ def create_decision(
     session.add(decision)
     session.commit()
     session.refresh(decision)
-    return _decision_to_out(decision)
+    return _decision_to_out(decision, session)
 
 
 @router.get("/decisions", response_model=list[DecisionOut])
@@ -129,7 +164,7 @@ def list_decisions(
         query = query.where(TradeDecision.ticker == ticker.upper().strip())
     query = query.limit(limit)
     rows = session.execute(query).scalars().all()
-    return [_decision_to_out(r) for r in rows]
+    return [_decision_to_out(r, session) for r in rows]
 
 
 @router.put("/decisions/{decision_id}/outcome", response_model=DecisionOut)
@@ -149,7 +184,7 @@ def attach_outcome(
     decision.updated_at = datetime.now(timezone.utc)
     session.commit()
     session.refresh(decision)
-    return _decision_to_out(decision)
+    return _decision_to_out(decision, session)
 
 
 @router.delete("/decisions/{decision_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -164,7 +199,55 @@ def delete_decision(
     session.commit()
 
 
-def _decision_to_out(d: TradeDecision) -> DecisionOut:
+def _matched_executions(
+    session: Session, d: TradeDecision
+) -> MatchedExecutions | None:
+    """Find transactions that look like the user acting on this decision.
+
+    Joined on Security.ticker (case-insensitive) and filtered by tx type
+    in the set that matches the decision's action direction. Window is
+    decision_date <= tx.date <= decision_date + EXECUTION_MATCH_WINDOW_DAYS.
+
+    Returns None when the action has no executing tx types (hold) or
+    when no transactions are found in the window.
+    """
+    tx_types = _ACTION_TO_TX_TYPES.get(d.action, ())
+    if not tx_types:
+        return None
+    window_end = d.decision_date + timedelta(days=EXECUTION_MATCH_WINDOW_DAYS)
+    # SUM(ABS(...)) because brokers split between signed (Plaid) and unsigned
+    # (SnapTrade) amount/quantity conventions for buy/sell rows. We display a
+    # magnitude only — direction is carried separately.
+    row = session.execute(
+        select(
+            func.count(InvestmentTransaction.plaid_investment_transaction_id),
+            func.sum(func.abs(InvestmentTransaction.quantity)),
+            func.sum(func.abs(InvestmentTransaction.amount)),
+            func.min(InvestmentTransaction.date),
+            func.max(InvestmentTransaction.date),
+        )
+        .join(Security, Security.security_id == InvestmentTransaction.security_id)
+        .where(func.upper(Security.ticker) == d.ticker.upper())
+        .where(InvestmentTransaction.type.in_(tx_types))
+        .where(InvestmentTransaction.date >= d.decision_date)
+        .where(InvestmentTransaction.date <= window_end)
+    ).one()
+    count, total_qty, total_amount, first_date, last_date = row
+    if not count or count == 0:
+        return None
+    direction = "buy" if tx_types == ("buy",) else "sell"
+    return MatchedExecutions(
+        direction=direction,
+        transaction_count=int(count),
+        total_quantity=Decimal(total_qty) if total_qty is not None else Decimal(0),
+        total_amount=Decimal(total_amount) if total_amount is not None else Decimal(0),
+        first_date=first_date,
+        last_date=last_date,
+    )
+
+
+def _decision_to_out(d: TradeDecision, session: Session | None = None) -> DecisionOut:
+    matched = _matched_executions(session, d) if session is not None else None
     return DecisionOut(
         decision_id=d.decision_id,
         decision_date=d.decision_date,
@@ -181,6 +264,7 @@ def _decision_to_out(d: TradeDecision) -> DecisionOut:
         outcome_status=d.outcome_status,
         outcome_notes=d.outcome_notes,
         linked_brief_path=d.linked_brief_path,
+        matched_executions=matched,
         created_at=d.created_at,
         updated_at=d.updated_at,
     )
