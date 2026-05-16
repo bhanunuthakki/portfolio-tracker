@@ -54,6 +54,37 @@ class Settings(BaseSettings):
 
     cors_origins: str = Field(alias="CORS_ORIGINS", default="http://localhost:5173")
 
+    # Optional companion project: earnings-summary. When present, the Holdings
+    # and Trade Analysis surfaces enrich each ticker with next-earnings date,
+    # thesis breach status, and a link to the latest research brief. When
+    # the DB / output dir don't exist, enrichment is silently skipped.
+    #
+    # Default resolves to `../earnings-summary/data/portfolio.db` relative
+    # to PROJECT_ROOT, which is where the sibling project lives by
+    # convention.
+    earnings_summary_db_path: str = Field(
+        alias="EARNINGS_SUMMARY_DB_PATH",
+        default="../earnings-summary/data/portfolio.db",
+    )
+    earnings_summary_output_dir: str = Field(
+        alias="EARNINGS_SUMMARY_OUTPUT_DIR",
+        default="../earnings-summary/output",
+    )
+
+    @property
+    def resolved_earnings_summary_db_path(self) -> Path:
+        p = Path(self.earnings_summary_db_path)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        return p.resolve()
+
+    @property
+    def resolved_earnings_summary_output_dir(self) -> Path:
+        p = Path(self.earnings_summary_output_dir)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        return p.resolve()
+
     @field_validator("plaid_products", "plaid_country_codes", "cors_origins")
     @classmethod
     def _strip_whitespace(cls, v: str) -> str:

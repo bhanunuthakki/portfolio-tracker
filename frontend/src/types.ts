@@ -35,6 +35,16 @@ export interface HoldingOut {
 
 export type CostBasisSource = "manual" | "inferred_acats" | "inferred_1099";
 
+export interface EarningsEnrichment {
+  tracked: boolean;
+  list_type: string | null;
+  next_earnings_date: string | null;
+  thesis_status: string | null;
+  thesis_summary: string | null;
+  has_brief: boolean;
+  latest_brief_iso_date: string | null;
+}
+
 export interface HoldingByAccountOut {
   account_id: number;
   account_name: string;
@@ -56,6 +66,7 @@ export interface ConsolidatedHoldingOut {
   unrealized_pnl: string | null;
   accounts: HoldingByAccountOut[];
   currency: string;
+  earnings: EarningsEnrichment | null;
 }
 
 export interface CashflowGroupOut {
@@ -212,6 +223,11 @@ export interface TickerTrade {
   trade_count: number;
   is_open: boolean;
   cost_basis_unreliable: boolean;
+  es_tracked: boolean;
+  es_next_earnings_date: string | null;
+  es_thesis_status: string | null;
+  es_has_brief: boolean;
+  es_latest_brief_iso_date: string | null;
 }
 
 export interface TradingActivity {
@@ -286,6 +302,7 @@ export interface DecisionOut {
   outcome_date: string | null;
   outcome_status: string | null;
   outcome_notes: string | null;
+  linked_brief_path: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -301,6 +318,7 @@ export interface DecisionIn {
   time_horizon_months?: number | null;
   confidence?: string | null;
   notes?: string | null;
+  linked_brief_path?: string | null;
 }
 
 export interface DecisionOutcomeIn {

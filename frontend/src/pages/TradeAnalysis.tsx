@@ -217,12 +217,13 @@ export function TradeAnalysis(): JSX.Element {
                     <Sh align="right" onClick={() => toggle("trade_count")}>
                       Trades{sortIndicator("trade_count")}
                     </Sh>
+                    <Sh onClick={() => undefined}>Earnings / thesis</Sh>
                   </tr>
                 </thead>
                 <tbody>
                   {sortedRows.length === 0 ? (
                     <tr>
-                      <td colSpan={11} className="px-4 py-6 text-center text-slate-500">
+                      <td colSpan={12} className="px-4 py-6 text-center text-slate-500">
                         No matching rows.
                       </td>
                     </tr>
@@ -281,6 +282,9 @@ export function TradeAnalysis(): JSX.Element {
                           <td className="px-3 py-1.5 text-right tabular-nums text-slate-600">
                             {t.trade_count}
                           </td>
+                          <td className="px-3 py-1.5">
+                            <EarningsThesisChips trade={t} />
+                          </td>
                         </tr>
                       );
                     })
@@ -295,6 +299,64 @@ export function TradeAnalysis(): JSX.Element {
           </>
         )}
       </Card>
+    </div>
+  );
+}
+
+function EarningsThesisChips({ trade }: { trade: TickerTrade }): JSX.Element {
+  const hasAny =
+    trade.es_tracked || trade.es_next_earnings_date || trade.es_has_brief;
+  if (!hasAny) return <span className="text-slate-400 text-[11px]">—</span>;
+  const dUntil = trade.es_next_earnings_date
+    ? Math.round(
+        (new Date(trade.es_next_earnings_date + "T00:00:00Z").getTime() -
+          new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z").getTime()) /
+          86_400_000,
+      )
+    : null;
+  const earningsCls =
+    dUntil === null
+      ? "bg-slate-100 text-slate-600"
+      : dUntil <= 7
+        ? "bg-rose-100 text-rose-800"
+        : dUntil <= 14
+          ? "bg-amber-100 text-amber-800"
+          : "bg-slate-100 text-slate-700";
+  const thesisCls =
+    trade.es_thesis_status === "breach"
+      ? "bg-rose-100 text-rose-800"
+      : trade.es_thesis_status === "ok"
+        ? "bg-emerald-100 text-emerald-800"
+        : "bg-slate-100 text-slate-600";
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      {trade.es_next_earnings_date ? (
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${earningsCls}`}
+          title={`Next earnings ${trade.es_next_earnings_date} (${dUntil}d)`}
+        >
+          {trade.es_next_earnings_date.slice(5)}
+        </span>
+      ) : null}
+      {trade.es_thesis_status ? (
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${thesisCls}`}
+          title={`thesis status: ${trade.es_thesis_status}`}
+        >
+          {trade.es_thesis_status}
+        </span>
+      ) : null}
+      {trade.es_has_brief ? (
+        <a
+          href={`/api/earnings-summary/brief/${encodeURIComponent(trade.ticker)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800 hover:bg-indigo-200"
+          title={`Open latest research brief (${trade.es_latest_brief_iso_date})`}
+        >
+          brief
+        </a>
+      ) : null}
     </div>
   );
 }

@@ -62,6 +62,7 @@ from portfolio_tracker.models import (
     InvestmentTransactionType,
     Security,
 )
+from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services.active_items import active_account_ids
 from sqlalchemy import func, and_
 
@@ -92,6 +93,12 @@ class TickerTrade(BaseModel):
     trade_count: int               # window-bounded, not lifetime
     is_open: bool                  # today_qty > 0
     cost_basis_unreliable: bool    # ACATS-in / pre-history shares detected
+    # Cross-project enrichment (None when earnings-summary unreachable):
+    es_tracked: bool = False
+    es_next_earnings_date: date | None = None
+    es_thesis_status: str | None = None
+    es_has_brief: bool = False
+    es_latest_brief_iso_date: str | None = None
 
 
 class TradingActivity(BaseModel):
@@ -313,6 +320,18 @@ def analyze_trades(
             )
         )
     tickers.sort(key=lambda t: -abs(t.pnl_dollars))
+
+    # ---- earnings-summary enrichment (no-op when unavailable) ----------
+    es_summary = earnings_summary_svc.summary_by_ticker([t.ticker for t in tickers])
+    for t in tickers:
+        es = es_summary.get(t.ticker.upper())
+        if es is None:
+            continue
+        t.es_tracked = es.tracked
+        t.es_next_earnings_date = es.next_earnings_date
+        t.es_thesis_status = es.thesis_status
+        t.es_has_brief = es.has_brief
+        t.es_latest_brief_iso_date = es.latest_brief_iso_date
 
     # ---- trading activity / turnover -----------------------------------
     activity = _trading_activity(session, accts, start_date, end_date, today_value)
