@@ -3,7 +3,8 @@ import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
 import { DecisionLogCard } from "@/components/DecisionLogCard";
-import { PerformanceChart } from "@/components/PerformanceChart";
+import { PositionAlphaChart } from "@/components/PositionAlphaChart";
+import { PositionAlphaTable } from "@/components/PositionAlphaTable";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
 
@@ -104,6 +105,14 @@ export function Dashboard(): JSX.Element {
         excludeIndexEtfs,
       }),
   });
+  const positionAlpha = useQuery({
+    queryKey: ["position-alpha", params.startDate, params.endDate],
+    queryFn: () =>
+      api.positionAlpha({
+        startDate: params.startDate,
+        endDate: params.endDate,
+      }),
+  });
   const holdings = useQuery({
     queryKey: ["holdings"],
     queryFn: () => api.latestHoldings(),
@@ -120,17 +129,15 @@ export function Dashboard(): JSX.Element {
     ? parseFloat(performance.data.net_external_cashflow_in)
     : null;
   const baseValue = performance.data ? parseFloat(performance.data.base_value) : null;
-  const lastPoint =
-    performance.data && performance.data.points.length > 0
-      ? performance.data.points[performance.data.points.length - 1]
-      : null;
-  const portfolioReturn = lastPoint
-    ? parseFloat(lastPoint.portfolio_return_pct)
+  const totalAlpha = positionAlpha.data
+    ? parseFloat(positionAlpha.data.total_alpha)
     : null;
-  const spyReturn =
-    lastPoint && lastPoint.spy_return_pct !== null
-      ? parseFloat(lastPoint.spy_return_pct)
-      : null;
+  const totalActualPl = positionAlpha.data
+    ? parseFloat(positionAlpha.data.total_actual_pl)
+    : null;
+  const totalSpyPl = positionAlpha.data
+    ? parseFloat(positionAlpha.data.total_spy_pl)
+    : null;
 
   return (
     <div className="space-y-6">
@@ -152,20 +159,20 @@ export function Dashboard(): JSX.Element {
           }
         />
         <Stat
-          label="Return vs SPY"
+          label="$ alpha vs SPY"
           value={
-            portfolioReturn !== null && spyReturn !== null
-              ? `${portfolioReturn >= 0 ? "+" : ""}${portfolioReturn.toFixed(1)}%  vs  ${spyReturn >= 0 ? "+" : ""}${spyReturn.toFixed(1)}%`
-              : portfolioReturn !== null
-                ? `${portfolioReturn >= 0 ? "+" : ""}${portfolioReturn.toFixed(1)}%`
-                : "—"
+            totalAlpha !== null
+              ? `${totalAlpha >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalAlpha)).toLocaleString()}`
+              : "—"
           }
           mono
         />
         <Stat
           label="Range"
           value={
-            performance.data
+            positionAlpha.data
+              ? `${positionAlpha.data.start_date} → ${positionAlpha.data.end_date}`
+              : performance.data
               ? `${performance.data.start_date} → ${performance.data.end_date}`
               : "—"
           }
@@ -262,15 +269,46 @@ export function Dashboard(): JSX.Element {
         </div>
 
         <div className="px-4 py-3">
-          {performance.isLoading ? (
+          {positionAlpha.isLoading ? (
             <div className="text-xs text-slate-500">Loading…</div>
-          ) : performance.isError ? (
-            <ErrorBanner>Failed to load performance series.</ErrorBanner>
-          ) : performance.data ? (
-            <PerformanceChart series={performance.data} />
+          ) : positionAlpha.isError ? (
+            <ErrorBanner>Failed to load position-alpha series.</ErrorBanner>
+          ) : positionAlpha.data ? (
+            <>
+              <PositionAlphaChart data={positionAlpha.data} />
+              <div className="mt-3 text-xs text-slate-500 leading-relaxed">
+                <strong>Method:</strong> each ticker held on{" "}
+                {positionAlpha.data.start_date} starts the window at{" "}
+                qty × that day's close. SPY counterfactual invests the same
+                starting capital in SPY at that day's SPY close, then
+                dollar-matches every in-window buy/sell. Alpha at end ={" "}
+                <strong>
+                  {totalAlpha !== null
+                    ? `${totalAlpha >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalAlpha)).toLocaleString()}`
+                    : "—"}
+                </strong>{" "}
+                ({totalActualPl !== null && totalSpyPl !== null
+                  ? `actual ${totalActualPl >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalActualPl)).toLocaleString()} vs SPY ${totalSpyPl >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalSpyPl)).toLocaleString()}`
+                  : "—"})
+              </div>
+            </>
           ) : null}
         </div>
       </Card>
+
+      {positionAlpha.data && positionAlpha.data.rows.length > 0 && (
+        <Card>
+          <header className="border-b border-slate-100 px-4 py-3">
+            <h2 className="text-sm font-semibold text-slate-900">
+              Per-position alpha vs SPY
+              <span className="ml-2 text-xs font-normal text-slate-500">
+                ranked best-to-worst by alpha (descending). Click a ticker for detail.
+              </span>
+            </h2>
+          </header>
+          <PositionAlphaTable data={positionAlpha.data} />
+        </Card>
+      )}
 
       <RiskMetricsCard
         startDate={params.startDate}

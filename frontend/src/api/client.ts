@@ -11,6 +11,7 @@ import type {
   PerformanceSeries,
   PolicyOut,
   PolicyWeightIn,
+  PositionAlphaResult,
   TradeAnalysisResult,
   TradeTimelineResult,
   TransactionOverrideIn,
@@ -178,6 +179,17 @@ export const api = {
     if (params?.limit) search.set("limit", String(params.limit));
     const qs = search.toString();
     return request(`/api/portfolio/transactions${qs ? `?${qs}` : ""}`);
+  },
+
+  positionAlpha: (params?: {
+    startDate?: string;
+    endDate?: string;
+  }): Promise<PositionAlphaResult> => {
+    const search = new URLSearchParams();
+    if (params?.startDate) search.set("start_date", params.startDate);
+    if (params?.endDate) search.set("end_date", params.endDate);
+    const qs = search.toString();
+    return request(`/api/portfolio/position-alpha${qs ? `?${qs}` : ""}`);
   },
 
   performance: (params?: {

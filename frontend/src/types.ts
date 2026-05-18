@@ -71,6 +71,38 @@ export interface ConsolidatedHoldingOut {
   has_unreliable_cost_basis: boolean;
 }
 
+export interface PositionAlphaRow {
+  ticker: string;
+  name: string | null;
+  value_at_start: string;
+  bought_in_window: string;
+  sold_in_window: string;
+  value_at_end: string;
+  actual_pl: string;
+  spy_counterfactual_pl: string;
+  alpha: string;
+  incomplete: boolean;
+}
+
+export interface PositionAlphaTimePoint {
+  date: string;
+  portfolio_value: string;
+  spy_counterfactual_value: string;
+  alpha: string;
+}
+
+export interface PositionAlphaResult {
+  start_date: string;
+  end_date: string;
+  rows: PositionAlphaRow[];
+  total_actual_pl: string;
+  total_spy_pl: string;
+  total_alpha: string;
+  series: PositionAlphaTimePoint[];
+  v_start: string;
+  v_end: string;
+}
+
 export interface CashflowGroupOut {
   type: string;
   subtype: string | null;
