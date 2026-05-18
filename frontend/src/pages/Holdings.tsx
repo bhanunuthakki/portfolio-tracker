@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api } from "@/api/client";
@@ -13,7 +13,11 @@ import {
   Td,
   Th,
 } from "@/components/ui";
-import type { ConsolidatedHoldingOut, CostBasisSource } from "@/types";
+import type {
+  ConsolidatedHoldingOut,
+  CostBasisSource,
+  HoldingByAccountOut,
+} from "@/types";
 
 const SOURCE_LABEL: Record<CostBasisSource, string> = {
   manual: "manual",
@@ -256,7 +260,7 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
       </tr>
       {open && (
         <tr className="bg-slate-50/60">
-          <td colSpan={9} className="px-4 py-3">
+          <td colSpan={9} className="px-4 py-3 cursor-default" onClick={(e) => e.stopPropagation()}>
             <table className="min-w-full text-xs">
               <thead className="text-slate-500 uppercase tracking-wide">
                 <tr>
@@ -265,71 +269,243 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
                   <th className="pb-1 text-right font-medium">Cost basis</th>
                   <th className="pb-1 text-right font-medium">Value</th>
                   <th className="pb-1 text-right font-medium">% of position</th>
+                  <th className="pb-1 text-right font-medium"></th>
                 </tr>
               </thead>
               <tbody>
-                {h.accounts.map((a) => {
-                  const aValue =
-                    a.institution_value !== null
-                      ? parseFloat(a.institution_value)
-                      : null;
-                  const aCost =
-                    a.cost_basis !== null ? parseFloat(a.cost_basis) : null;
-                  const pct =
-                    aValue !== null && value !== null && value > 0
-                      ? (aValue / value) * 100
-                      : null;
-                  return (
-                    <tr key={a.account_id}>
-                      <td className="py-1 text-slate-700">{a.account_name}</td>
-                      <td className="py-1 text-right tabular-nums">
-                        {parseFloat(a.quantity).toLocaleString(undefined, {
-                          maximumFractionDigits: 4,
-                        })}
-                      </td>
-                      <td className="py-1 text-right tabular-nums">
-                        <span className="inline-flex items-center gap-1">
-                          <span
-                            className={
-                              a.cost_basis_unreliable
-                                ? "text-slate-400 italic"
-                                : ""
-                            }
-                          >
-                            {fmtUSD(aCost)}
-                          </span>
-                          {a.cost_basis_source ? (
-                            <span
-                              className={`rounded px-1 py-0.5 text-[9px] uppercase tracking-wide ${SOURCE_CLASS[a.cost_basis_source]}`}
-                              title={`Source: ${SOURCE_LABEL[a.cost_basis_source]}. Not broker-reported.`}
-                            >
-                              {SOURCE_LABEL[a.cost_basis_source]}
-                            </span>
-                          ) : null}
-                          {a.cost_basis_unreliable ? (
-                            <span
-                              className="rounded bg-rose-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-800"
-                              title="Broker-reported cost basis looks implausibly low vs market value. Treat unrealized P&L for this row as unreliable until you set a manual override."
-                            >
-                              UNREL
-                            </span>
-                          ) : null}
-                        </span>
-                      </td>
-                      <td className="py-1 text-right tabular-nums">
-                        {fmtUSD(aValue)}
-                      </td>
-                      <td className="py-1 text-right tabular-nums text-slate-500">
-                        {pct !== null ? `${pct.toFixed(0)}%` : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {h.accounts.map((a) => (
+                  <AccountRow
+                    key={a.account_id}
+                    a={a}
+                    securityId={h.security_id}
+                    totalValue={value}
+                  />
+                ))}
               </tbody>
             </table>
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+function AccountRow({
+  a,
+  securityId,
+  totalValue,
+}: {
+  a: HoldingByAccountOut;
+  securityId: number;
+  totalValue: number | null;
+}): JSX.Element {
+  const [editing, setEditing] = useState(false);
+  const aValue = a.institution_value !== null ? parseFloat(a.institution_value) : null;
+  const aCost = a.cost_basis !== null ? parseFloat(a.cost_basis) : null;
+  const pct =
+    aValue !== null && totalValue !== null && totalValue > 0
+      ? (aValue / totalValue) * 100
+      : null;
+  const needsAttention = a.cost_basis_unreliable || aCost === null;
+
+  return (
+    <>
+      <tr>
+        <td className="py-1 text-slate-700">{a.account_name}</td>
+        <td className="py-1 text-right tabular-nums">
+          {parseFloat(a.quantity).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+        </td>
+        <td className="py-1 text-right tabular-nums">
+          <span className="inline-flex items-center gap-1">
+            <span className={a.cost_basis_unreliable ? "text-slate-400 italic" : ""}>
+              {fmtUSD(aCost)}
+            </span>
+            {a.cost_basis_source ? (
+              <span
+                className={`rounded px-1 py-0.5 text-[9px] uppercase tracking-wide ${SOURCE_CLASS[a.cost_basis_source]}`}
+                title={`Source: ${SOURCE_LABEL[a.cost_basis_source]}. Not broker-reported.`}
+              >
+                {SOURCE_LABEL[a.cost_basis_source]}
+              </span>
+            ) : null}
+            {a.cost_basis_unreliable ? (
+              <span
+                className="rounded bg-rose-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-800"
+                title="Broker-reported cost basis looks implausibly low vs market value."
+              >
+                UNREL
+              </span>
+            ) : null}
+          </span>
+        </td>
+        <td className="py-1 text-right tabular-nums">{fmtUSD(aValue)}</td>
+        <td className="py-1 text-right tabular-nums text-slate-500">
+          {pct !== null ? `${pct.toFixed(0)}%` : "—"}
+        </td>
+        <td className="py-1 text-right">
+          <button
+            type="button"
+            onClick={() => setEditing((e) => !e)}
+            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+              needsAttention
+                ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
+                : "text-slate-500 hover:bg-slate-200"
+            }`}
+            title="Set / override the cost basis for this account-position. Will be tagged 'manual'."
+          >
+            {editing ? "Cancel" : a.cost_basis_source === "manual" ? "Edit" : "Fix"}
+          </button>
+        </td>
+      </tr>
+      {editing && (
+        <tr>
+          <td colSpan={6} className="py-2">
+            <CostBasisEditor
+              accountId={a.account_id}
+              securityId={securityId}
+              accountName={a.account_name}
+              quantity={parseFloat(a.quantity)}
+              currentValue={aValue}
+              currentCost={aCost}
+              existingOverride={a.cost_basis_source === "manual" || a.cost_basis_source === "inferred_acats"}
+              onDone={() => setEditing(false)}
+            />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function CostBasisEditor({
+  accountId,
+  securityId,
+  accountName,
+  quantity,
+  currentValue,
+  currentCost,
+  existingOverride,
+  onDone,
+}: {
+  accountId: number;
+  securityId: number;
+  accountName: string;
+  quantity: number;
+  currentValue: number | null;
+  currentCost: number | null;
+  existingOverride: boolean;
+  onDone: () => void;
+}): JSX.Element {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState(
+    existingOverride && currentCost !== null ? currentCost.toFixed(2) : "",
+  );
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: (totalCost: number) =>
+      api.setCostBasisOverride({
+        account_id: accountId,
+        security_id: securityId,
+        total_cost_basis: totalCost,
+        notes: notes.trim() || null,
+      }),
+    onSuccess: () => {
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["data-quality"] });
+      onDone();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Save failed"),
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.deleteCostBasisOverride(accountId, securityId),
+    onSuccess: () => {
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["data-quality"] });
+      onDone();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "Delete failed"),
+  });
+
+  const onSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const n = parseFloat(value);
+    if (Number.isNaN(n) || n < 0) {
+      setError("Enter a non-negative dollar amount");
+      return;
+    }
+    save.mutate(n);
+  };
+
+  const perShare =
+    value && quantity > 0 && parseFloat(value) > 0
+      ? `≈ $${(parseFloat(value) / quantity).toFixed(2)}/share`
+      : "";
+
+  return (
+    <form
+      onSubmit={onSubmit}
+      className="rounded border border-slate-200 bg-white p-3 space-y-2"
+    >
+      <div className="text-xs text-slate-700">
+        Setting cost basis for <strong>{accountName}</strong> · {quantity.toFixed(4)} sh
+        {currentValue !== null && (
+          <> · current value <strong>${currentValue.toLocaleString(undefined, { maximumFractionDigits: 0 })}</strong></>
+        )}
+      </div>
+      <div className="flex flex-wrap items-end gap-2">
+        <label className="flex flex-col text-xs text-slate-600">
+          Total cost basis ($)
+          <input
+            type="number"
+            step="0.01"
+            min="0"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="e.g. 12500"
+            autoFocus
+            className="mt-1 w-36 rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
+          />
+        </label>
+        <label className="flex flex-col text-xs text-slate-600 flex-1 min-w-[160px]">
+          Note (optional)
+          <input
+            type="text"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="e.g. computed from 1099-B"
+            className="mt-1 rounded border border-slate-300 px-2 py-1 text-sm"
+          />
+        </label>
+        <button
+          type="submit"
+          disabled={save.isPending}
+          className="rounded bg-slate-900 px-3 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-50"
+        >
+          {save.isPending ? "Saving…" : "Save (manual)"}
+        </button>
+        {existingOverride && (
+          <button
+            type="button"
+            onClick={() => remove.mutate()}
+            disabled={remove.isPending}
+            className="rounded border border-red-200 px-2 py-1 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+            title="Remove the override, fall back to broker-reported cost basis"
+          >
+            Clear override
+          </button>
+        )}
+        {perShare && (
+          <span className="text-xs text-slate-500 self-center">{perShare}</span>
+        )}
+      </div>
+      {error && <div className="text-xs text-red-700">{error}</div>}
+    </form>
   );
 }
