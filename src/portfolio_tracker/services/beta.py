@@ -43,6 +43,7 @@ from portfolio_tracker.services.performance import (
     _daily_portfolio_value,
     _daily_subset_value,
 )
+from portfolio_tracker.services.position_alpha import compute_position_alpha
 
 # Daily moves above this are dropped — almost certainly reconstruction noise.
 _MAX_PLAUSIBLE_DAILY_RETURN = Decimal("0.30")
@@ -99,37 +100,35 @@ def compute_beta(
     portfolio. The σ vs benchmark-σ comparison then directly answers
     "did my picking provide a diversification / derisking benefit?"
 
-    `reserve_amount` subtracts a fixed dollar amount from V on every date
-    before computing daily returns. Use it to carve out an emergency cash
-    reserve so risk numbers reflect only the investable portion. Note:
-    daily-return signs don't change, but magnitudes amplify slightly
-    because the denominator (V[d-1]) shrinks; this lifts σ, Sharpe,
-    Sortino, and tracking error a bit relative to the full-portfolio view.
+    `reserve_amount` is currently a no-op — see note at bottom. SGOV is
+    already excluded as a cash-equivalent in the position-alpha V series,
+    so subtracting another flat amount doesn't change daily returns.
+
+    **Series source**: portfolio daily V comes from `compute_position_alpha`
+    (positions only, no cash, no cash_adj smoothing, no walk-back-derived
+    cashflow attribution). This makes the regression alpha consistent with
+    the dollar alpha shown elsewhere on the dashboard — earlier versions
+    of this service used the legacy walk-back-reconstructed total V which
+    introduced cashflow-attribution noise that distorted daily returns
+    by 5-15 pp/year (see PERFORMANCE_AUDIT.md F6, now obsoleted).
     """
-    daily_value = _daily_portfolio_value(session, start_date, end_date)
-    daily_cashflow = _daily_external_cashflows(session, start_date, end_date)
-
-    if exclude_index_etfs:
-        index_sids = _broad_index_security_ids(session)
-        if index_sids:
-            daily_index_value = _daily_subset_value(
-                session, start_date, end_date, index_sids
-            )
-            daily_value = {
-                d: daily_value[d] - daily_index_value.get(d, Decimal(0))
-                for d in daily_value
-            }
-            internal_flows = _daily_internal_index_cashflows(
-                session, start_date, end_date, index_sids
-            )
-            for d, c in internal_flows.items():
-                daily_cashflow[d] = daily_cashflow.get(d, Decimal(0)) + c
-
-    if reserve_amount > 0:
-        # Subtract the same flat amount from V on every date so daily-return
-        # denominators shrink. Numerators (V[d] - V[d-1] - C[d]) are
-        # unchanged because the reserve is constant across days.
-        daily_value = {d: v - reserve_amount for d, v in daily_value.items()}
+    # Position-alpha builds positions-only V series, walks transactions
+    # forward, applies prices daily. This is the same series the dashboard's
+    # main chart renders.
+    pa_result = compute_position_alpha(
+        session, start_date, end_date,
+        exclude_broad_index=exclude_index_etfs,
+    )
+    daily_value: dict[date, Decimal] = {
+        p.date: Decimal(p.portfolio_value) for p in pa_result.series
+    }
+    # On a buy day, position V rises by the buy $ (new shares added at
+    # today's price). To isolate market-driven returns, subtract that
+    # trade cashflow from the daily delta. Position-alpha tracks this
+    # per day in `position_cashflow` (buys − sells).
+    daily_cashflow: dict[date, Decimal] = {
+        p.date: Decimal(p.position_cashflow) for p in pa_result.series
+    }
 
     portfolio_returns = _daily_returns(daily_value, daily_cashflow)
     benchmark_returns = _benchmark_daily_returns_for(
