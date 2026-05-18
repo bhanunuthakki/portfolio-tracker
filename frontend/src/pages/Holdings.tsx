@@ -219,6 +219,14 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
                 {headlineSource === "manual" ? "MAN" : "INF"}
               </span>
             ) : null}
+            {h.has_unreliable_cost_basis ? (
+              <span
+                className="rounded bg-rose-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-800"
+                title="Broker-reported cost basis looks implausibly low vs market value for one or more accounts. Treat unrealized P&L on this row as unreliable. Click to see which account, then set an override."
+              >
+                UNREL
+              </span>
+            ) : null}
           </span>
         </Td>
         <Td
@@ -229,7 +237,15 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
         </Td>
         <Td
           align="right"
-          className={["tabular-nums", pnlClass(unrealized)].join(" ")}
+          className={[
+            "tabular-nums",
+            h.has_unreliable_cost_basis ? "text-slate-400 italic" : pnlClass(unrealized),
+          ].join(" ")}
+          title={
+            h.has_unreliable_cost_basis
+              ? "Unreliable — one or more accounts have implausible cost basis"
+              : undefined
+          }
         >
           {fmtSignedUSD(unrealized)}
         </Td>
@@ -273,13 +289,29 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
                       </td>
                       <td className="py-1 text-right tabular-nums">
                         <span className="inline-flex items-center gap-1">
-                          {fmtUSD(aCost)}
+                          <span
+                            className={
+                              a.cost_basis_unreliable
+                                ? "text-slate-400 italic"
+                                : ""
+                            }
+                          >
+                            {fmtUSD(aCost)}
+                          </span>
                           {a.cost_basis_source ? (
                             <span
                               className={`rounded px-1 py-0.5 text-[9px] uppercase tracking-wide ${SOURCE_CLASS[a.cost_basis_source]}`}
                               title={`Source: ${SOURCE_LABEL[a.cost_basis_source]}. Not broker-reported.`}
                             >
                               {SOURCE_LABEL[a.cost_basis_source]}
+                            </span>
+                          ) : null}
+                          {a.cost_basis_unreliable ? (
+                            <span
+                              className="rounded bg-rose-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-800"
+                              title="Broker-reported cost basis looks implausibly low vs market value. Treat unrealized P&L for this row as unreliable until you set a manual override."
+                            >
+                              UNREL
                             </span>
                           ) : null}
                         </span>

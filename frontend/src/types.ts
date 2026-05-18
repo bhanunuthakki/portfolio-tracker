@@ -52,6 +52,7 @@ export interface HoldingByAccountOut {
   institution_value: string | null;
   cost_basis: string | null;
   cost_basis_source: CostBasisSource | null;
+  cost_basis_unreliable: boolean;
 }
 
 export interface ConsolidatedHoldingOut {
@@ -67,6 +68,7 @@ export interface ConsolidatedHoldingOut {
   accounts: HoldingByAccountOut[];
   currency: string;
   earnings: EarningsEnrichment | null;
+  has_unreliable_cost_basis: boolean;
 }
 
 export interface CashflowGroupOut {
