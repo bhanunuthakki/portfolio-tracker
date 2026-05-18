@@ -156,6 +156,34 @@ def _latest_holding_rows(
     return [(h, a, s) for h, a, s in rows]
 
 
+# Below this dollar size we don't bother flagging — a $50 position with a
+# $1 reported cost basis isn't worth surfacing as a data-quality issue.
+_UNRELIABLE_MIN_VALUE = Decimal("1000")
+# Reported cost basis must be at least this fraction of market value to be
+# considered plausible. Tuned against the observed pattern of broker rows
+# returning $15–$100 cost for positions worth thousands.
+_UNRELIABLE_COST_RATIO = Decimal("0.05")
+
+
+def _is_cost_basis_unreliable(
+    cost_basis: Decimal | None, institution_value: Decimal | None
+) -> bool:
+    """Heuristic: broker-reported cost basis is implausibly low vs market value.
+
+    Catches the typical broken pattern (e.g. $15 cost for $13,000 of NU) that
+    Plaid/SnapTrade emit for ACATS-in positions or buys outside the retention
+    window. Only flags positions worth at least $1k so trivial junk doesn't
+    add noise.
+    """
+    if cost_basis is None or institution_value is None:
+        return False
+    if institution_value < _UNRELIABLE_MIN_VALUE:
+        return False
+    if cost_basis <= 0:
+        return True
+    return (cost_basis / institution_value) < _UNRELIABLE_COST_RATIO
+
+
 def _consolidate_holdings(
     snapshot_date: date,
     rows: list[tuple[HoldingSnapshot, Account, Security]],
@@ -181,6 +209,7 @@ def _consolidate_holdings(
         per_account: list[HoldingByAccountOut] = []
         any_value: bool = False
         any_cost: bool = False
+        any_unreliable: bool = False
         total_value = Decimal(0)
         total_cost = Decimal(0)
         currency = "USD"
@@ -195,9 +224,15 @@ def _consolidate_holdings(
             if override_amount is not None:
                 effective_cost = override_amount
                 cost_basis_source: str | None = override_source
+                row_unreliable = False  # override is the truth, never unreliable
             else:
                 effective_cost = h.cost_basis
                 cost_basis_source = None
+                row_unreliable = _is_cost_basis_unreliable(
+                    effective_cost, h.institution_value
+                )
+            if row_unreliable:
+                any_unreliable = True
             per_account.append(
                 HoldingByAccountOut(
                     account_id=a.account_id,
@@ -206,6 +241,7 @@ def _consolidate_holdings(
                     institution_value=h.institution_value,
                     cost_basis=effective_cost,
                     cost_basis_source=cost_basis_source,
+                    cost_basis_unreliable=row_unreliable,
                 )
             )
             currency = h.currency
@@ -236,6 +272,7 @@ def _consolidate_holdings(
                 unrealized_pnl=unrealized,
                 accounts=per_account,
                 currency=currency,
+                has_unreliable_cost_basis=any_unreliable,
             )
         )
     out.sort(key=lambda h: -(float(h.total_value) if h.total_value is not None else 0))
