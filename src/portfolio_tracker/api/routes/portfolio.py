@@ -349,23 +349,36 @@ def position_alpha(
     session: Annotated[Session, Depends(get_session)],
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
+    exclude_broad_index: bool = Query(
+        default=False,
+        description=(
+            "If true, drop VTI/VOO/SPY/IVV/RSP rows from the per-ticker view "
+            "and the aggregate. Use to isolate active-pick alpha from passive-"
+            "index allocation."
+        ),
+    ),
 ) -> position_alpha_service.PositionAlphaResult:
-    """Per-ticker dollar alpha vs SPY for the chosen window.
+    """Per-ticker dollar alpha vs SPY/QQQ/POLICY for the chosen window.
 
     Methodology — start of window is a fresh balance sheet. Each ticker's
-    starting capital is `qty_at_start × price_at_start`. The SPY
-    counterfactual invests that starting capital in SPY at window_start
-    price, then dollar-matches every in-window buy/sell. Alpha is the
-    difference in ending values.
+    starting capital is `qty_at_start × price_at_start`. Each benchmark
+    counterfactual invests that starting capital in the benchmark at
+    window_start price, then dollar-matches every in-window buy/sell.
+    Alpha is the difference in ending values.
 
-    Returns both the per-ticker breakdown AND a daily time series so the
-    dashboard can chart `V_portfolio` vs `V_SPY_counterfactual`.
+    SGOV / cash-equivalents are always skipped (no meaningful 'alpha' on
+    cash). Set `exclude_broad_index=true` to also drop broad-market ETFs.
+
+    Returns both the per-ticker breakdown AND a daily time series across
+    SPY, QQQ, and POLICY counterfactuals.
     """
     if end_date is None:
         end_date = date.today()
     if start_date is None:
         start_date = end_date - timedelta(days=365)
-    return position_alpha_service.compute_position_alpha(session, start_date, end_date)
+    return position_alpha_service.compute_position_alpha(
+        session, start_date, end_date, exclude_broad_index=exclude_broad_index,
+    )
 
 
 @router.get("/performance", response_model=PerformanceSeries)
