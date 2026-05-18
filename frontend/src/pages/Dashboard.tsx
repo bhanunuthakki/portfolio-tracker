@@ -26,60 +26,70 @@ const PRESETS: { key: Exclude<RangePreset, "CUSTOM">; label: string }[] = [
 // against an equivalent-sized index allocation.
 const CASH_RESERVE_AMOUNT = 30000;
 
-function isoDaysAgo(days: number): string {
-  const d = new Date();
+function isoDaysBefore(anchorISO: string, days: number): string {
+  const d = new Date(anchorISO + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
 }
 
-function isoYTD(): string {
-  const d = new Date();
-  return `${d.getUTCFullYear()}-01-01`;
+function isoYTDFor(anchorISO: string): string {
+  return `${anchorISO.slice(0, 4)}-01-01`;
 }
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function presetToDates(preset: Exclude<RangePreset, "CUSTOM">): {
+function presetToDates(
+  preset: Exclude<RangePreset, "CUSTOM">,
+  endAnchor: string,
+): {
   startDate?: string;
+  endDate?: string;
   includeBackfill: boolean;
 } {
+  const endDate = endAnchor === todayISO() ? undefined : endAnchor;
   switch (preset) {
     case "1M":
-      return { startDate: isoDaysAgo(30), includeBackfill: true };
+      return { startDate: isoDaysBefore(endAnchor, 30), endDate, includeBackfill: true };
     case "3M":
-      return { startDate: isoDaysAgo(90), includeBackfill: true };
+      return { startDate: isoDaysBefore(endAnchor, 90), endDate, includeBackfill: true };
     case "6M":
-      return { startDate: isoDaysAgo(180), includeBackfill: true };
+      return { startDate: isoDaysBefore(endAnchor, 180), endDate, includeBackfill: true };
     case "YTD":
-      return { startDate: isoYTD(), includeBackfill: true };
+      return { startDate: isoYTDFor(endAnchor), endDate, includeBackfill: true };
     case "1Y":
-      return { startDate: isoDaysAgo(365), includeBackfill: true };
+      return { startDate: isoDaysBefore(endAnchor, 365), endDate, includeBackfill: true };
     case "2Y":
-      return { startDate: isoDaysAgo(730), includeBackfill: true };
+      return { startDate: isoDaysBefore(endAnchor, 730), endDate, includeBackfill: true };
     case "MAX":
-      return { includeBackfill: true };
+      return { endDate, includeBackfill: true };
   }
 }
 
 export function Dashboard(): JSX.Element {
   const [preset, setPreset] = useState<RangePreset>("1Y");
-  const [customStart, setCustomStart] = useState<string>(isoDaysAgo(365));
-  const [customEnd, setCustomEnd] = useState<string>(todayISO());
+  // End-date anchor — defaults to today but the user can set it to any
+  // past date to view the dashboard "as of" that date. All presets
+  // (1M / 3M / etc.) compute their start date relative to this anchor.
+  const [endAnchor, setEndAnchor] = useState<string>(todayISO());
+  const [customStart, setCustomStart] = useState<string>(
+    isoDaysBefore(todayISO(), 365),
+  );
   const [excludeReserve, setExcludeReserve] = useState<boolean>(false);
   const [excludeIndexEtfs, setExcludeIndexEtfs] = useState<boolean>(false);
+  const endIsToday = endAnchor === todayISO();
 
   const params = useMemo(() => {
     if (preset === "CUSTOM") {
       return {
         startDate: customStart,
-        endDate: customEnd,
+        endDate: endAnchor,
         includeBackfill: true,
       };
     }
-    return presetToDates(preset);
-  }, [preset, customStart, customEnd]);
+    return presetToDates(preset, endAnchor);
+  }, [preset, customStart, endAnchor]);
 
   const reserveAmount = excludeReserve ? CASH_RESERVE_AMOUNT : 0;
 
@@ -214,31 +224,42 @@ export function Dashboard(): JSX.Element {
           </div>
         </header>
 
-        {preset === "CUSTOM" && (
-          <div className="flex flex-wrap items-end gap-3 px-4 py-3 border-b border-slate-100 bg-slate-50/60">
+        <div className="flex flex-wrap items-end gap-3 px-4 py-2.5 border-b border-slate-100 bg-slate-50/60">
+          {preset === "CUSTOM" && (
             <label className="flex flex-col text-xs text-slate-600">
               Start date
               <input
                 type="date"
                 value={customStart}
                 onChange={(e) => setCustomStart(e.target.value)}
-                max={customEnd}
+                max={endAnchor}
                 className="mt-1 rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
               />
             </label>
-            <label className="flex flex-col text-xs text-slate-600">
-              End date
-              <input
-                type="date"
-                value={customEnd}
-                onChange={(e) => setCustomEnd(e.target.value)}
-                min={customStart}
-                max={todayISO()}
-                className="mt-1 rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
-              />
-            </label>
-          </div>
-        )}
+          )}
+          <label className="flex flex-col text-xs text-slate-600">
+            End date {!endIsToday && <span className="text-amber-700 font-medium">(historical)</span>}
+            <input
+              type="date"
+              value={endAnchor}
+              onChange={(e) => setEndAnchor(e.target.value || todayISO())}
+              max={todayISO()}
+              min={preset === "CUSTOM" ? customStart : undefined}
+              className="mt-1 rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
+              title="All presets compute relative to this date. Pick a past date to view the dashboard as of that date."
+            />
+          </label>
+          {!endIsToday && (
+            <button
+              type="button"
+              onClick={() => setEndAnchor(todayISO())}
+              className="rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+              title="Reset end date to today"
+            >
+              ↺ Today
+            </button>
+          )}
+        </div>
 
         <div className="px-4 py-3">
           {performance.isLoading ? (
