@@ -92,6 +92,12 @@ class HoldingByAccountOut(BaseModel):
     #   'inferred_1099'   — reserved
     # Surfaced so the UI can badge inferred / manual rows distinctly.
     cost_basis_source: str | None = None
+    # True when broker-reported cost basis looks implausibly low vs market
+    # value (e.g. $15 reported for a $13,000 position). Indicates the broker
+    # didn't transmit a full cost figure — common for ACATS-in positions or
+    # buys older than Plaid's 24-month retention. Never set when an override
+    # is in place (the override IS the truth in that case).
+    cost_basis_unreliable: bool = False
 
 
 class EarningsEnrichment(BaseModel):
@@ -130,6 +136,10 @@ class ConsolidatedHoldingOut(BaseModel):
     weighted_avg_cost_per_share: Decimal | None
     unrealized_pnl: Decimal | None
     accounts: list[HoldingByAccountOut]
+    # True iff any contributing account has cost_basis_unreliable=True. Lets
+    # the UI dim the consolidated P&L cell with a single boolean rather than
+    # walking the accounts list.
+    has_unreliable_cost_basis: bool = False
     currency: str
     # Cross-project enrichment from earnings-summary, if available.
     earnings: EarningsEnrichment | None = None
