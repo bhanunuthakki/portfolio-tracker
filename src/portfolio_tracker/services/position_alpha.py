@@ -83,12 +83,18 @@ class PositionAlphaTimePoint(BaseModel):
     `portfolio_value` is the aggregate position dollar value at day d.
     The benchmark `*_counterfactual_value` fields apply the same starting-
     capital + dollar-matched-cashflow methodology to each benchmark.
+
+    `position_cashflow` is the net $ that moved INTO active positions on
+    day d (buys minus sells). Used by the risk-metrics regression to
+    subtract trade-driven V changes from daily returns so the regression
+    captures only market-driven moves.
     """
     date: date
     portfolio_value: Decimal
     spy_counterfactual_value: Decimal
     qqq_counterfactual_value: Decimal
     policy_counterfactual_value: Decimal
+    position_cashflow: Decimal = Decimal(0)
 
 
 class PositionAlphaResult(BaseModel):
@@ -518,7 +524,40 @@ def _compute_alpha_series(
     out: list[PositionAlphaTimePoint] = []
     cur = start_date
     while cur <= end_date:
-        # V_portfolio: sum across tickers of qty[t] × price[t][cur]
+        # Apply transactions FIRST so V reflects end-of-day positions.
+        # The corresponding cashflow uses today's close price so that
+        # daily_return = (V[d] - V[d-1] - cashflow[d]) / V[d-1] correctly
+        # isolates market-driven moves from trade-driven qty changes.
+        today_cashflow = Decimal(0)
+        for tx in txs_by_date.get(cur, []):
+            t = sid_to_ticker.get(tx.security_id)
+            if t is None:
+                continue
+            qty_delta = _forward_quantity_delta(tx)
+            if qty_delta is not None and qty_delta != 0:
+                qty[t] += qty_delta
+                px = _last_known_price(prices.get(t, {}), cur)
+                if px is not None:
+                    today_cashflow += qty_delta * px
+            if tx.amount is None:
+                continue
+            amt = abs(Decimal(tx.amount))
+            if amt == 0:
+                continue
+            sign = 1 if tx.type == InvestmentTransactionType.BUY.value else -1 if tx.type == InvestmentTransactionType.SELL.value else 0
+            if sign == 0:
+                continue
+            tx_spy_px = _last_known_price(spy_closes, cur)
+            if tx_spy_px and tx_spy_px > 0:
+                spy_shares_per_ticker[t] += sign * amt / tx_spy_px
+            if qqq_closes:
+                tx_qqq_px = _last_known_price(qqq_closes, cur)
+                if tx_qqq_px and tx_qqq_px > 0:
+                    qqq_shares_per_ticker[t] += sign * amt / tx_qqq_px
+            if policy_weights and policy_closes_per_ticker:
+                policy_lots_per_ticker[t].append((cur, sign * amt))
+
+        # V_portfolio: end-of-day positions × today's close
         v_port = Decimal(0)
         for t in tk_set:
             q = qty[t]
@@ -559,33 +598,8 @@ def _compute_alpha_series(
             spy_counterfactual_value=v_spy.quantize(Decimal("0.01")),
             qqq_counterfactual_value=v_qqq.quantize(Decimal("0.01")),
             policy_counterfactual_value=v_policy.quantize(Decimal("0.01")),
+            position_cashflow=today_cashflow.quantize(Decimal("0.01")),
         ))
-
-        # Apply transactions on this date
-        for tx in txs_by_date.get(cur, []):
-            t = sid_to_ticker.get(tx.security_id)
-            if t is None:
-                continue
-            qty_delta = _forward_quantity_delta(tx)
-            if qty_delta is not None:
-                qty[t] += qty_delta
-            if tx.amount is None:
-                continue
-            amt = abs(Decimal(tx.amount))
-            if amt == 0:
-                continue
-            sign = 1 if tx.type == InvestmentTransactionType.BUY.value else -1 if tx.type == InvestmentTransactionType.SELL.value else 0
-            if sign == 0:
-                continue
-            tx_spy_px = _last_known_price(spy_closes, cur)
-            if tx_spy_px and tx_spy_px > 0:
-                spy_shares_per_ticker[t] += sign * amt / tx_spy_px
-            if qqq_closes:
-                tx_qqq_px = _last_known_price(qqq_closes, cur)
-                if tx_qqq_px and tx_qqq_px > 0:
-                    qqq_shares_per_ticker[t] += sign * amt / tx_qqq_px
-            if policy_weights and policy_closes_per_ticker:
-                policy_lots_per_ticker[t].append((cur, sign * amt))
 
         cur += timedelta(days=1)
 
