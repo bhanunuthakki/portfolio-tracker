@@ -33,6 +33,7 @@ from portfolio_tracker.schemas import (
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
+from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
 from portfolio_tracker.services import trade_timeline as trade_timeline_service
 from portfolio_tracker.services.active_items import active_account_ids
@@ -341,6 +342,30 @@ def transactions(
         )
         for t, a, s in rows
     ]
+
+
+@router.get("/position-alpha", response_model=position_alpha_service.PositionAlphaResult)
+def position_alpha(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> position_alpha_service.PositionAlphaResult:
+    """Per-ticker dollar alpha vs SPY for the chosen window.
+
+    Methodology — start of window is a fresh balance sheet. Each ticker's
+    starting capital is `qty_at_start × price_at_start`. The SPY
+    counterfactual invests that starting capital in SPY at window_start
+    price, then dollar-matches every in-window buy/sell. Alpha is the
+    difference in ending values.
+
+    Returns both the per-ticker breakdown AND a daily time series so the
+    dashboard can chart `V_portfolio` vs `V_SPY_counterfactual`.
+    """
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    return position_alpha_service.compute_position_alpha(session, start_date, end_date)
 
 
 @router.get("/performance", response_model=PerformanceSeries)
