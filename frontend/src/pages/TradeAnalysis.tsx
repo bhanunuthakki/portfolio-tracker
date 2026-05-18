@@ -276,7 +276,7 @@ export function TradeAnalysis(): JSX.Element {
                           </td>
                           <td className={`px-3 py-1.5 text-right tabular-nums ${pnlClass(t.pnl_pct)}`}>
                             {t.pnl_pct !== null
-                              ? `${(t.pnl_pct * 100).toFixed(1)}%`
+                              ? `${t.pnl_pct.toFixed(1)}%`
                               : "—"}
                           </td>
                           <td className="px-3 py-1.5 text-right tabular-nums text-slate-600">

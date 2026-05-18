@@ -249,6 +249,11 @@ def analyze_trades(
     today_value: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     effective_cost: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     effective_cost_known: dict[str, bool] = defaultdict(lambda: False)
+    # Ticker has at least one broker-only account whose cost basis looks
+    # implausibly low vs market value (same heuristic as Holdings UNREL).
+    # When set, the cost-basis-derived P&L is contaminated by that
+    # account's bad number and the row should be marked unreliable.
+    ticker_has_broker_unreliable: dict[str, bool] = defaultdict(lambda: False)
     for ticker, acct_id, sec_id, qty, val, cb in today_rows:
         today_qty[ticker] += Decimal(qty or 0)
         if val is not None:
@@ -259,6 +264,8 @@ def analyze_trades(
         if effective is not None:
             effective_cost[ticker] += Decimal(effective)
             effective_cost_known[ticker] = True
+        if override is None and _is_account_cost_unreliable(cb, val):
+            ticker_has_broker_unreliable[ticker] = True
 
     # ---- compose ticker rows -------------------------------------------
     tickers: list[TickerTrade] = []
@@ -268,16 +275,27 @@ def analyze_trades(
             continue
         mv = today_value.get(ticker, Decimal(0))
         qty_today = today_qty.get(ticker, Decimal(0))
-        # P&L methodology:
-        #   * Currently-held positions: use Holdings-style math
-        #     (today_value - effective_cost_basis). This matches the
-        #     Holdings page exactly when ACATS overrides are present.
-        #   * Closed positions (qty=0 today): fall back to lifetime
-        #     `sold - bought` (realized cashflow).
-        #   * If the position is open but we have no effective cost
-        #     basis (no snapshot, no override), fall back to bought/sold
-        #     math too.
-        if qty_today > 0 and effective_cost_known.get(ticker):
+        share_count_gap = _detect_cost_basis_gap(
+            bought_qty=b["bought_qty"],
+            sold_qty=b["sold_qty"],
+            today_qty=qty_today,
+        )
+        broker_unreliable = ticker_has_broker_unreliable.get(ticker, False)
+        # P&L methodology — prefer cashflow when buy transactions explain
+        # every share we hold/sold. Cashflow math is `mv + sold - bought`
+        # which is correct regardless of what the broker reports as cost
+        # basis — critical because brokers routinely emit junk values like
+        # $15 cost for $12k positions (see Holdings UNREL flag).
+        #
+        #   * Buys account for all shares → cashflow math (exact)
+        #   * Shares appeared from outside our buy history (ACATS-in)
+        #     AND we have an effective cost basis (override or broker)
+        #     → cost-basis math (Holdings-style)
+        #   * Otherwise (gap + no cost data) → cashflow math, mark unreliable
+        if not share_count_gap:
+            pnl = mv + b["sold"] - b["bought"]
+            denom = b["bought"]
+        elif effective_cost_known.get(ticker):
             pnl = mv - effective_cost.get(ticker, Decimal(0))
             denom = effective_cost.get(ticker, Decimal(0))
         else:
@@ -286,21 +304,19 @@ def analyze_trades(
         pnl_pct = (
             float(pnl / denom * 100) if denom > 0 else None
         )
-        # The cost_basis_unreliable flag previously fired any time
-        # today_qty exceeded bought_qty (the classic ACATS-in detector:
-        # shares appeared without buy transactions). Once an override has
-        # filled in the cost basis — manual entry, or inferred_acats from
-        # the inference script — the row is reliable again. Suppress the
-        # warning in that case so the UI stops nagging on rows we've fixed.
-        has_basis_now = qty_today > 0 and effective_cost_known.get(ticker)
+        # Ticker is unreliable when:
+        #   * share-count math implies missing buys AND no override to
+        #     fall back on, OR
+        #   * we DO have cost basis but at least one contributing account
+        #     reports an implausibly low broker cost (broker_unreliable).
+        # The second case is partial contamination — SoFi might have a
+        # clean inferred-ACATS override but BrokerageLink reports $48 cost
+        # on a $12k position, dragging the combined effective_cost down.
+        has_override_basis = qty_today > 0 and effective_cost_known.get(ticker)
+        cost_basis_branch_used = share_count_gap and has_override_basis
         unreliable = (
-            False
-            if has_basis_now
-            else _detect_cost_basis_gap(
-                bought_qty=b["bought_qty"],
-                sold_qty=b["sold_qty"],
-                today_qty=today_qty.get(ticker, Decimal(0)),
-            )
+            (share_count_gap and not has_override_basis)
+            or (cost_basis_branch_used and broker_unreliable)
         )
         tickers.append(
             TickerTrade(
@@ -344,6 +360,28 @@ def analyze_trades(
         tickers=tickers,
         notes=notes,
     )
+
+
+# Mirror of portfolio.py's _is_cost_basis_unreliable so the trade-analysis
+# row can propagate the same per-account heuristic to the ticker-level
+# `cost_basis_unreliable` flag. Duplicated rather than imported to keep the
+# trade-analysis service standalone for tests; both should evolve together.
+_UNRELIABLE_MIN_VALUE = Decimal("1000")
+_UNRELIABLE_COST_RATIO = Decimal("0.05")
+
+
+def _is_account_cost_unreliable(
+    cost_basis: Decimal | None, institution_value: Decimal | None
+) -> bool:
+    """True iff broker-reported cost basis is implausibly low vs market value
+    on a non-trivial position. See portfolio._is_cost_basis_unreliable."""
+    if institution_value is None or institution_value < _UNRELIABLE_MIN_VALUE:
+        return False
+    if cost_basis is None:
+        return True
+    if cost_basis <= 0:
+        return True
+    return (Decimal(cost_basis) / Decimal(institution_value)) < _UNRELIABLE_COST_RATIO
 
 
 def _detect_cost_basis_gap(
