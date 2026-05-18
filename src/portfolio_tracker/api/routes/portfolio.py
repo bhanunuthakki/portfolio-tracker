@@ -170,15 +170,19 @@ def _is_cost_basis_unreliable(
 ) -> bool:
     """Heuristic: broker-reported cost basis is implausibly low vs market value.
 
-    Catches the typical broken pattern (e.g. $15 cost for $13,000 of NU) that
-    Plaid/SnapTrade emit for ACATS-in positions or buys outside the retention
-    window. Only flags positions worth at least $1k so trivial junk doesn't
+    Catches three broken patterns Plaid/SnapTrade emit for ACATS-in or
+    outside-retention positions:
+      * Cost basis NULL on a non-trivial position (broker omitted it entirely)
+      * Cost basis $0 or negative
+      * Cost basis < 5% of market value
+
+    Only fires when the position is worth at least $1k so trivial junk doesn't
     add noise.
     """
-    if cost_basis is None or institution_value is None:
+    if institution_value is None or institution_value < _UNRELIABLE_MIN_VALUE:
         return False
-    if institution_value < _UNRELIABLE_MIN_VALUE:
-        return False
+    if cost_basis is None:
+        return True
     if cost_basis <= 0:
         return True
     return (cost_basis / institution_value) < _UNRELIABLE_COST_RATIO
