@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { api } from "@/api/client";
 import { DecisionLogCard } from "@/components/DecisionLogCard";
 import { PositionAlphaChart } from "@/components/PositionAlphaChart";
+import type { BenchmarkKey } from "@/components/PositionAlphaChart";
 import { PositionAlphaTable } from "@/components/PositionAlphaTable";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
 import { Card, ErrorBanner, Stat } from "@/components/ui";
@@ -79,6 +80,17 @@ export function Dashboard(): JSX.Element {
   );
   const [excludeReserve, setExcludeReserve] = useState<boolean>(false);
   const [excludeIndexEtfs, setExcludeIndexEtfs] = useState<boolean>(false);
+  const [visibleBenchmarks, setVisibleBenchmarks] = useState<Set<BenchmarkKey>>(
+    () => new Set<BenchmarkKey>(["spy", "policy"]),
+  );
+  const toggleBenchmark = (b: BenchmarkKey): void => {
+    setVisibleBenchmarks((prev) => {
+      const next = new Set(prev);
+      if (next.has(b)) next.delete(b);
+      else next.add(b);
+      return next;
+    });
+  };
   const endIsToday = endAnchor === todayISO();
 
   const params = useMemo(() => {
@@ -106,11 +118,17 @@ export function Dashboard(): JSX.Element {
       }),
   });
   const positionAlpha = useQuery({
-    queryKey: ["position-alpha", params.startDate, params.endDate],
+    queryKey: [
+      "position-alpha",
+      params.startDate,
+      params.endDate,
+      excludeIndexEtfs,
+    ],
     queryFn: () =>
       api.positionAlpha({
         startDate: params.startDate,
         endDate: params.endDate,
+        excludeBroadIndex: excludeIndexEtfs,
       }),
   });
   const holdings = useQuery({
@@ -204,14 +222,14 @@ export function Dashboard(): JSX.Element {
               onClick={() => setExcludeReserve(!excludeReserve)}
               activeColor="emerald"
               label="Excl. $30k SGOV reserve"
-              tooltip="Treat $30k of cash as untouchable emergency reserves; carve from V_start, every daily V, and the synthetic-benchmark base before computing returns."
+              tooltip="Carves $30k off the legacy performance + Risk Metrics calculations. For position-alpha, SGOV is already excluded as a cash equivalent — so this toggle is effectively a no-op for the main chart but still affects the Risk Metrics card below."
             />
             <ToggleChip
               active={excludeIndexEtfs}
               onClick={() => setExcludeIndexEtfs(!excludeIndexEtfs)}
               activeColor="indigo"
               label="Excl. broad-index ETFs"
-              tooltip="Strip VTI/VOO/SPY/IVV/RSP from V and add their buy/sell flows to the cashflow series. Isolates active stock-picking alpha."
+              tooltip="Strip VTI/VOO/SPY/IVV/RSP from V (position-alpha drops these rows from the table; Risk Metrics treats their flows as internal cashflow). Isolates active stock-picking alpha."
             />
           </div>
           <div className="flex flex-wrap items-center gap-1 shrink-0">
@@ -266,6 +284,39 @@ export function Dashboard(): JSX.Element {
               ↺ Today
             </button>
           )}
+          <div className="ml-auto flex flex-wrap items-end gap-1.5">
+            <div className="flex flex-col text-xs text-slate-600">
+              <div className="mb-1">Benchmark lines</div>
+              <div className="flex gap-1">
+                {([
+                  { k: "spy", label: "SPY", color: "#2563eb" },
+                  { k: "qqq", label: "QQQ", color: "#9333ea" },
+                  { k: "policy", label: "Policy", color: "#0d9488" },
+                ] as const).map((b) => {
+                  const active = visibleBenchmarks.has(b.k);
+                  const disabled = b.k === "policy" && positionAlpha.data && !positionAlpha.data.has_policy;
+                  return (
+                    <button
+                      key={b.k}
+                      type="button"
+                      disabled={!!disabled}
+                      onClick={() => toggleBenchmark(b.k)}
+                      title={disabled ? "No policy weights configured — set them on the Accounts page." : `Toggle ${b.label} counterfactual line`}
+                      className={[
+                        "rounded px-2 py-1 text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
+                        active
+                          ? "text-white"
+                          : "border border-slate-300 text-slate-600 hover:bg-slate-100",
+                      ].join(" ")}
+                      style={active ? { backgroundColor: b.color } : undefined}
+                    >
+                      {active ? "✓ " : ""}{b.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </div>
 
         <div className="px-4 py-3">
@@ -275,21 +326,41 @@ export function Dashboard(): JSX.Element {
             <ErrorBanner>Failed to load position-alpha series.</ErrorBanner>
           ) : positionAlpha.data ? (
             <>
-              <PositionAlphaChart data={positionAlpha.data} />
+              <PositionAlphaChart
+                data={positionAlpha.data}
+                visibleBenchmarks={visibleBenchmarks}
+              />
               <div className="mt-3 text-xs text-slate-500 leading-relaxed">
-                <strong>Method:</strong> each ticker held on{" "}
+                <strong>Method:</strong> each position held on{" "}
                 {positionAlpha.data.start_date} starts the window at{" "}
-                qty × that day's close. SPY counterfactual invests the same
-                starting capital in SPY at that day's SPY close, then
-                dollar-matches every in-window buy/sell. Alpha at end ={" "}
+                qty × that day's close. Each benchmark counterfactual invests
+                the same starting capital in the benchmark at that day's close,
+                then dollar-matches every in-window buy/sell. Alpha = actual P&amp;L − benchmark P&amp;L.{" "}
                 <strong>
-                  {totalAlpha !== null
-                    ? `${totalAlpha >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalAlpha)).toLocaleString()}`
+                  Actual {totalActualPl !== null
+                    ? `${totalActualPl >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalActualPl)).toLocaleString()}`
                     : "—"}
-                </strong>{" "}
-                ({totalActualPl !== null && totalSpyPl !== null
-                  ? `actual ${totalActualPl >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalActualPl)).toLocaleString()} vs SPY ${totalSpyPl >= 0 ? "+" : "−"}$${Math.round(Math.abs(totalSpyPl)).toLocaleString()}`
-                  : "—"})
+                </strong>
+                {positionAlpha.data && (
+                  <>
+                    {" "}
+                    · vs SPY {parseFloat(positionAlpha.data.total_alpha) >= 0 ? "+" : "−"}$
+                    {Math.round(Math.abs(parseFloat(positionAlpha.data.total_alpha))).toLocaleString()}
+                    {" "}· vs QQQ {parseFloat(positionAlpha.data.total_alpha_vs_qqq) >= 0 ? "+" : "−"}$
+                    {Math.round(Math.abs(parseFloat(positionAlpha.data.total_alpha_vs_qqq))).toLocaleString()}
+                    {positionAlpha.data.has_policy && (
+                      <>
+                        {" "}· vs Policy {parseFloat(positionAlpha.data.total_alpha_vs_policy) >= 0 ? "+" : "−"}$
+                        {Math.round(Math.abs(parseFloat(positionAlpha.data.total_alpha_vs_policy))).toLocaleString()}
+                      </>
+                    )}
+                  </>
+                )}
+                {excludeIndexEtfs && (
+                  <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800">
+                    excluding broad-index ETFs
+                  </span>
+                )}
               </div>
             </>
           ) : null}

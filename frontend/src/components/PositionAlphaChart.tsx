@@ -12,10 +12,14 @@ import {
 
 import type { PositionAlphaResult } from "@/types";
 
+export type BenchmarkKey = "spy" | "qqq" | "policy";
+
 interface ChartRow {
   date: string;
   portfolio: number;
   spy: number;
+  qqq: number;
+  policy: number;
 }
 
 const USD = (v: number, signed = false): string => {
@@ -27,7 +31,13 @@ const USD = (v: number, signed = false): string => {
   return `${sign}$${abs.toFixed(0)}`;
 };
 
-export function PositionAlphaChart({ data }: { data: PositionAlphaResult }): JSX.Element {
+export function PositionAlphaChart({
+  data,
+  visibleBenchmarks,
+}: {
+  data: PositionAlphaResult;
+  visibleBenchmarks: Set<BenchmarkKey>;
+}): JSX.Element {
   if (data.series.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
@@ -40,13 +50,18 @@ export function PositionAlphaChart({ data }: { data: PositionAlphaResult }): JSX
     date: p.date,
     portfolio: parseFloat(p.portfolio_value),
     spy: parseFloat(p.spy_counterfactual_value),
+    qqq: parseFloat(p.qqq_counterfactual_value),
+    policy: parseFloat(p.policy_counterfactual_value),
   }));
 
-  // Find the y-axis range so both lines fit
-  const allVals = rows.flatMap((r) => [r.portfolio, r.spy]);
-  const yMin = Math.min(...allVals);
-  const yMax = Math.max(...allVals);
-  const pad = (yMax - yMin) * 0.05;
+  const valuesToConsider: number[] = rows.map((r) => r.portfolio);
+  if (visibleBenchmarks.has("spy")) valuesToConsider.push(...rows.map((r) => r.spy));
+  if (visibleBenchmarks.has("qqq")) valuesToConsider.push(...rows.map((r) => r.qqq));
+  if (visibleBenchmarks.has("policy") && data.has_policy)
+    valuesToConsider.push(...rows.map((r) => r.policy));
+  const yMin = Math.min(...valuesToConsider);
+  const yMax = Math.max(...valuesToConsider);
+  const pad = (yMax - yMin) * 0.05 || 1;
 
   return (
     <div className="h-80">
@@ -61,10 +76,7 @@ export function PositionAlphaChart({ data }: { data: PositionAlphaResult }): JSX
             width={64}
           />
           <Tooltip
-            formatter={(value: number, name: string) => [
-              USD(value),
-              name,
-            ]}
+            formatter={(value: number, name: string) => [USD(value), name]}
             labelStyle={{ fontSize: 12 }}
             contentStyle={{ fontSize: 12 }}
           />
@@ -83,22 +95,45 @@ export function PositionAlphaChart({ data }: { data: PositionAlphaResult }): JSX
           <Line
             type="monotone"
             dataKey="portfolio"
-            name="Active positions $"
+            name="Portfolio $"
             stroke="#0f172a"
             strokeWidth={2}
             dot={false}
             isAnimationActive={false}
           />
-          <Line
-            type="monotone"
-            dataKey="spy"
-            name="SPY counterfactual $"
-            stroke="#2563eb"
-            strokeWidth={1.75}
-            dot={false}
-            isAnimationActive={false}
-            strokeDasharray="0"
-          />
+          {visibleBenchmarks.has("spy") && (
+            <Line
+              type="monotone"
+              dataKey="spy"
+              name="SPY $"
+              stroke="#2563eb"
+              strokeWidth={1.5}
+              dot={false}
+              isAnimationActive={false}
+            />
+          )}
+          {visibleBenchmarks.has("qqq") && (
+            <Line
+              type="monotone"
+              dataKey="qqq"
+              name="QQQ $"
+              stroke="#9333ea"
+              strokeWidth={1.5}
+              dot={false}
+              isAnimationActive={false}
+            />
+          )}
+          {visibleBenchmarks.has("policy") && data.has_policy && (
+            <Line
+              type="monotone"
+              dataKey="policy"
+              name="Policy $"
+              stroke="#0d9488"
+              strokeWidth={1.5}
+              dot={false}
+              isAnimationActive={false}
+            />
+          )}
         </LineChart>
       </ResponsiveContainer>
     </div>
