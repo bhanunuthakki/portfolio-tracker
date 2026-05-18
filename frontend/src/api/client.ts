@@ -184,10 +184,12 @@ export const api = {
   positionAlpha: (params?: {
     startDate?: string;
     endDate?: string;
+    excludeBroadIndex?: boolean;
   }): Promise<PositionAlphaResult> => {
     const search = new URLSearchParams();
     if (params?.startDate) search.set("start_date", params.startDate);
     if (params?.endDate) search.set("end_date", params.endDate);
+    if (params?.excludeBroadIndex) search.set("exclude_broad_index", "true");
     const qs = search.toString();
     return request(`/api/portfolio/position-alpha${qs ? `?${qs}` : ""}`);
   },

@@ -36,6 +36,7 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
+    PolicyWeight,
     Price,
     Security,
 )
@@ -48,6 +49,14 @@ _CASH_EQUIV_TICKERS: frozenset[str] = frozenset(
     {"SGOV", "FDRXX", "SHV", "SPAXX", "CUR:USD", "VMFXX"}
 )
 
+# Broad-market US-equity ETFs — same set used by the performance service.
+# When `exclude_broad_index=True` the alpha view skips these positions and
+# does NOT include them as cashflows (they're a passive allocation that
+# tracks the index by definition; nothing to alpha-evaluate).
+_BROAD_INDEX_TICKERS: frozenset[str] = frozenset(
+    {"VTI", "VOO", "SPY", "IVV", "RSP"}
+)
+
 
 class PositionAlphaRow(BaseModel):
     ticker: str
@@ -58,7 +67,11 @@ class PositionAlphaRow(BaseModel):
     value_at_end: Decimal         # qty_end × price_end
     actual_pl: Decimal            # V_end + sold − bought − V_start
     spy_counterfactual_pl: Decimal
-    alpha: Decimal                # actual_pl − spy_counterfactual_pl
+    qqq_counterfactual_pl: Decimal
+    policy_counterfactual_pl: Decimal
+    alpha: Decimal                # actual_pl − spy_counterfactual_pl (primary)
+    alpha_vs_qqq: Decimal
+    alpha_vs_policy: Decimal
     # Diagnostic — if walk-back couldn't determine qty_start (no price data,
     # no transactions), this fires and the row is approximate.
     incomplete: bool
@@ -67,15 +80,15 @@ class PositionAlphaRow(BaseModel):
 class PositionAlphaTimePoint(BaseModel):
     """One day on the dashboard chart.
 
-    `portfolio_value` and `spy_counterfactual_value` are the dollar trajectories
-    starting at V_start (the value at window_start of all positions traded in
-    window). The CHART plots `portfolio_value` and `spy_counterfactual_value`
-    as two lines, with the gap = `alpha`.
+    `portfolio_value` is the aggregate position dollar value at day d.
+    The benchmark `*_counterfactual_value` fields apply the same starting-
+    capital + dollar-matched-cashflow methodology to each benchmark.
     """
     date: date
-    portfolio_value: Decimal           # sum of ticker_qty[d] × price[d]
-    spy_counterfactual_value: Decimal  # sum of per-ticker SPY counterfactual
-    alpha: Decimal                     # portfolio_value − spy_counterfactual_value
+    portfolio_value: Decimal
+    spy_counterfactual_value: Decimal
+    qqq_counterfactual_value: Decimal
+    policy_counterfactual_value: Decimal
 
 
 class PositionAlphaResult(BaseModel):
@@ -84,24 +97,42 @@ class PositionAlphaResult(BaseModel):
     rows: list[PositionAlphaRow]
     total_actual_pl: Decimal
     total_spy_pl: Decimal
-    total_alpha: Decimal
+    total_qqq_pl: Decimal
+    total_policy_pl: Decimal
+    total_alpha: Decimal              # vs SPY (primary)
+    total_alpha_vs_qqq: Decimal
+    total_alpha_vs_policy: Decimal
     series: list[PositionAlphaTimePoint] = []
     v_start: Decimal = Decimal(0)
     v_end: Decimal = Decimal(0)
+    has_policy: bool = False
 
 
 def compute_position_alpha(
     session: Session,
     start_date: date,
     end_date: date,
+    exclude_broad_index: bool = False,
 ) -> PositionAlphaResult:
-    """Build the per-ticker windowed alpha breakdown for [start_date, end_date]."""
+    """Build the per-ticker windowed alpha breakdown for [start_date, end_date].
+
+    `exclude_broad_index` drops VTI/VOO/SPY/IVV/RSP from the per-ticker rows
+    (they're passive index allocation and 'alpha vs SPY' on them is ~zero
+    by construction). The remaining rows give a focused view of active picks.
+
+    The $30k SGOV reserve carve-out is implicitly handled: SGOV is in
+    `_CASH_EQUIV_TICKERS` and always skipped. There's no separate reserve
+    parameter — the position-alpha methodology measures positions only,
+    so cash carve-outs don't shift the comparison.
+    """
     accts = active_account_ids(session)
     if not accts:
         return PositionAlphaResult(
             start_date=start_date, end_date=end_date, rows=[],
             total_actual_pl=Decimal(0), total_spy_pl=Decimal(0),
-            total_alpha=Decimal(0),
+            total_qqq_pl=Decimal(0), total_policy_pl=Decimal(0),
+            total_alpha=Decimal(0), total_alpha_vs_qqq=Decimal(0),
+            total_alpha_vs_policy=Decimal(0),
         )
 
     # 1. Quantities per ticker at start_date and end_date (walk-back if needed)
@@ -137,6 +168,8 @@ def compute_position_alpha(
         t_up = ticker.upper()
         if t_up in _CASH_EQUIV_TICKERS:
             continue
+        if exclude_broad_index and t_up in _BROAD_INDEX_TICKERS:
+            continue
         b = by_ticker[t_up]
         if b["name"] is None:
             b["name"] = name
@@ -151,10 +184,14 @@ def compute_position_alpha(
     for t_up, qty in qty_at_start.items():
         if t_up in _CASH_EQUIV_TICKERS:
             continue
+        if exclude_broad_index and t_up in _BROAD_INDEX_TICKERS:
+            continue
         if qty != 0 and t_up not in by_ticker:
             by_ticker[t_up] = {"name": None, "buys": [], "sells": [], "sid": None}
     for t_up, qty in qty_at_end.items():
         if t_up in _CASH_EQUIV_TICKERS:
+            continue
+        if exclude_broad_index and t_up in _BROAD_INDEX_TICKERS:
             continue
         if qty != 0 and t_up not in by_ticker:
             by_ticker[t_up] = {"name": None, "buys": [], "sells": [], "sid": None}
@@ -164,22 +201,37 @@ def compute_position_alpha(
     prices_start = _price_per_ticker_at_date(session, all_tickers, start_date)
     prices_end = _price_per_ticker_at_date(session, all_tickers, end_date)
 
-    # 4. SPY closes
-    spy_closes = _spy_closes_with_lookback(session, start_date, end_date)
+    # 4. Benchmark closes (SPY, QQQ, and policy basket)
+    spy_closes = _benchmark_closes_with_lookback(session, "SPY", start_date, end_date)
+    qqq_closes = _benchmark_closes_with_lookback(session, "QQQ", start_date, end_date)
+    policy_weights = _load_policy_weights(session)
+    has_policy = bool(policy_weights)
+    policy_closes_per_ticker: dict[str, dict[date, Decimal]] = {}
+    if has_policy:
+        for ticker in policy_weights:
+            policy_closes_per_ticker[ticker] = _benchmark_closes_with_lookback(
+                session, ticker, start_date, end_date
+            )
+
     spy_start = _last_known_price(spy_closes, start_date)
     spy_end = _last_known_price(spy_closes, end_date)
+    qqq_start = _last_known_price(qqq_closes, start_date)
+    qqq_end = _last_known_price(qqq_closes, end_date)
     if spy_start is None or spy_end is None or spy_start == 0:
-        # No SPY anchor — return empty result
         return PositionAlphaResult(
             start_date=start_date, end_date=end_date, rows=[],
             total_actual_pl=Decimal(0), total_spy_pl=Decimal(0),
-            total_alpha=Decimal(0),
+            total_qqq_pl=Decimal(0), total_policy_pl=Decimal(0),
+            total_alpha=Decimal(0), total_alpha_vs_qqq=Decimal(0),
+            total_alpha_vs_policy=Decimal(0), has_policy=has_policy,
         )
 
-    # 5. Compute per-ticker alpha
+    # 5. Compute per-ticker alpha (against SPY, QQQ, POLICY)
     rows: list[PositionAlphaRow] = []
     total_actual = Decimal(0)
     total_spy = Decimal(0)
+    total_qqq = Decimal(0)
+    total_policy = Decimal(0)
 
     for t_up, b in by_ticker.items():
         q_start = qty_at_start.get(t_up, Decimal(0))
@@ -191,55 +243,71 @@ def compute_position_alpha(
 
         bought_sum = sum((a for _, a in b["buys"]), Decimal(0))
         sold_sum = sum((a for _, a in b["sells"]), Decimal(0))
-
-        # Skip rows with nothing happening and no holding either side
         if v_start == 0 and v_end == 0 and bought_sum == 0 and sold_sum == 0:
             continue
 
         actual_pl = v_end + sold_sum - bought_sum - v_start
 
         # SPY counterfactual
-        spy_shares = (v_start / Decimal(str(spy_start))) if v_start != 0 else Decimal(0)
-        for d, a in b["buys"]:
-            px = _last_known_price(spy_closes, d)
-            if px and px > 0:
-                spy_shares += a / Decimal(str(px))
-        for d, a in b["sells"]:
-            px = _last_known_price(spy_closes, d)
-            if px and px > 0:
-                spy_shares -= a / Decimal(str(px))
-        spy_end_value = spy_shares * Decimal(str(spy_end))
-        spy_pl = spy_end_value + sold_sum - bought_sum - v_start
+        spy_pl = _counterfactual_pl(
+            v_start, b["buys"], b["sells"], spy_closes,
+            Decimal(str(spy_start)), Decimal(str(spy_end)),
+            bought_sum, sold_sum,
+        )
+        # QQQ counterfactual (NaN-safe — fall back to 0 if no QQQ data)
+        qqq_pl = Decimal(0)
+        if qqq_start is not None and qqq_end is not None and qqq_start > 0:
+            qqq_pl = _counterfactual_pl(
+                v_start, b["buys"], b["sells"], qqq_closes,
+                Decimal(str(qqq_start)), Decimal(str(qqq_end)),
+                bought_sum, sold_sum,
+            )
+        # POLICY counterfactual: weighted sum of per-component counterfactuals
+        policy_pl = Decimal(0)
+        if has_policy:
+            policy_pl = _policy_counterfactual_pl(
+                v_start, b["buys"], b["sells"], policy_weights,
+                policy_closes_per_ticker, start_date, end_date,
+                bought_sum, sold_sum,
+            )
+
         alpha = actual_pl - spy_pl
+        alpha_qqq = actual_pl - qqq_pl
+        alpha_policy = actual_pl - policy_pl
 
         incomplete = (q_start != 0 and p_start is None) or (q_end != 0 and p_end is None)
 
         rows.append(PositionAlphaRow(
-            ticker=t_up,
-            name=b["name"],
+            ticker=t_up, name=b["name"],
             value_at_start=v_start.quantize(Decimal("0.01")),
             bought_in_window=bought_sum.quantize(Decimal("0.01")),
             sold_in_window=sold_sum.quantize(Decimal("0.01")),
             value_at_end=v_end.quantize(Decimal("0.01")),
             actual_pl=actual_pl.quantize(Decimal("0.01")),
             spy_counterfactual_pl=spy_pl.quantize(Decimal("0.01")),
+            qqq_counterfactual_pl=qqq_pl.quantize(Decimal("0.01")),
+            policy_counterfactual_pl=policy_pl.quantize(Decimal("0.01")),
             alpha=alpha.quantize(Decimal("0.01")),
+            alpha_vs_qqq=alpha_qqq.quantize(Decimal("0.01")),
+            alpha_vs_policy=alpha_policy.quantize(Decimal("0.01")),
             incomplete=incomplete,
         ))
         total_actual += actual_pl
         total_spy += spy_pl
+        total_qqq += qqq_pl
+        total_policy += policy_pl
 
     rows.sort(key=lambda r: r.alpha)
 
-    # Aggregate V_start and V_end (sum of position values, NOT including cash)
     agg_v_start = sum((r.value_at_start for r in rows), Decimal(0))
     agg_v_end = sum((r.value_at_end for r in rows), Decimal(0))
 
-    # Build the time series for the dashboard chart
     series = _compute_alpha_series(
         session, start_date, end_date, accts,
-        list(by_ticker.keys()), qty_at_start, prices_start, spy_closes,
-        Decimal(str(spy_start)),
+        list(by_ticker.keys()), qty_at_start, prices_start,
+        spy_closes, Decimal(str(spy_start)),
+        qqq_closes, Decimal(str(qqq_start)) if qqq_start else None,
+        policy_weights, policy_closes_per_ticker,
     )
 
     return PositionAlphaResult(
@@ -248,11 +316,111 @@ def compute_position_alpha(
         rows=rows,
         total_actual_pl=total_actual.quantize(Decimal("0.01")),
         total_spy_pl=total_spy.quantize(Decimal("0.01")),
+        total_qqq_pl=total_qqq.quantize(Decimal("0.01")),
+        total_policy_pl=total_policy.quantize(Decimal("0.01")),
         total_alpha=(total_actual - total_spy).quantize(Decimal("0.01")),
+        total_alpha_vs_qqq=(total_actual - total_qqq).quantize(Decimal("0.01")),
+        total_alpha_vs_policy=(total_actual - total_policy).quantize(Decimal("0.01")),
         series=series,
         v_start=agg_v_start.quantize(Decimal("0.01")),
         v_end=agg_v_end.quantize(Decimal("0.01")),
+        has_policy=has_policy,
     )
+
+
+def _counterfactual_pl(
+    v_start: Decimal,
+    buys: list[tuple[date, Decimal]],
+    sells: list[tuple[date, Decimal]],
+    closes: dict[date, Decimal],
+    start_price: Decimal,
+    end_price: Decimal,
+    bought_sum: Decimal,
+    sold_sum: Decimal,
+) -> Decimal:
+    """Run the dollar-matched-cashflow counterfactual against one benchmark series."""
+    if start_price is None or start_price == 0 or end_price is None:
+        return Decimal(0)
+    shares = (v_start / start_price) if v_start != 0 else Decimal(0)
+    for d, a in buys:
+        px = _last_known_price(closes, d)
+        if px and px > 0:
+            shares += a / px
+    for d, a in sells:
+        px = _last_known_price(closes, d)
+        if px and px > 0:
+            shares -= a / px
+    end_value = shares * end_price
+    return end_value + sold_sum - bought_sum - v_start
+
+
+def _policy_counterfactual_pl(
+    v_start: Decimal,
+    buys: list[tuple[date, Decimal]],
+    sells: list[tuple[date, Decimal]],
+    weights: dict[str, Decimal],
+    closes_per_ticker: dict[str, dict[date, Decimal]],
+    start_date: date,
+    end_date: date,
+    bought_sum: Decimal,
+    sold_sum: Decimal,
+) -> Decimal:
+    """Weighted-basket counterfactual: split each $ across policy tickers.
+
+    Missing-data handling: components with no price on a given date are
+    skipped, with remaining weights renormalized to sum to 1.
+    """
+    end_value = Decimal(0)
+    # V_start lot, split across policy tickers
+    end_value += _basket_value_at(
+        v_start, weights, closes_per_ticker, start_date, end_date,
+    )
+    # Each buy: add $ to basket on buy date
+    for d, a in buys:
+        end_value += _basket_value_at(a, weights, closes_per_ticker, d, end_date)
+    # Each sell: remove $ from basket on sell date (basket "sells" same $)
+    for d, a in sells:
+        end_value -= _basket_value_at(a, weights, closes_per_ticker, d, end_date)
+    return end_value + sold_sum - bought_sum - v_start
+
+
+def _basket_value_at(
+    capital: Decimal,
+    weights: dict[str, Decimal],
+    closes_per_ticker: dict[str, dict[date, Decimal]],
+    purchase_date: date,
+    eval_date: date,
+) -> Decimal:
+    """How much would `capital` invested in the policy basket on
+    `purchase_date` be worth on `eval_date`?
+
+    Renormalizes weights against priceable tickers so total capital lands.
+    """
+    if capital == 0:
+        return Decimal(0)
+    priceable: list[tuple[str, Decimal, Decimal, Decimal]] = []  # ticker, weight, p_buy, p_eval
+    total_w = Decimal(0)
+    for ticker, w in weights.items():
+        series = closes_per_ticker.get(ticker, {})
+        p_buy = _last_known_price(series, purchase_date)
+        p_eval = _last_known_price(series, eval_date)
+        if p_buy is None or p_buy == 0 or p_eval is None:
+            continue
+        priceable.append((ticker, w, p_buy, p_eval))
+        total_w += w
+    if not priceable or total_w == 0:
+        return Decimal(0)
+    value = Decimal(0)
+    for ticker, w, p_buy, p_eval in priceable:
+        renormed_w = w / total_w
+        shares = (capital * renormed_w) / p_buy
+        value += shares * p_eval
+    return value
+
+
+def _load_policy_weights(session: Session) -> dict[str, Decimal]:
+    rows = session.execute(select(PolicyWeight)).scalars().all()
+    return {r.ticker: Decimal(r.weight_bps) / Decimal(10000) for r in rows if r.weight_bps > 0}
 
 
 def _compute_alpha_series(
@@ -265,13 +433,16 @@ def _compute_alpha_series(
     prices_at_start: dict[str, Decimal],
     spy_closes: dict[date, Decimal],
     spy_start: Decimal,
+    qqq_closes: dict[date, Decimal] | None = None,
+    qqq_start: Decimal | None = None,
+    policy_weights: dict[str, Decimal] | None = None,
+    policy_closes_per_ticker: dict[str, dict[date, Decimal]] | None = None,
 ) -> list[PositionAlphaTimePoint]:
-    """Build the daily aggregate V and V_SPY series for the chart.
+    """Build the daily aggregate V and benchmark V series for the chart.
 
-    Walks transactions forward from start_date, applying each one to both
-    the per-ticker qty (for V_portfolio) and the per-ticker SPY-shares
-    accumulator (for V_SPY_counterfactual). For each day in [start, end],
-    emits the aggregate V values.
+    Walks transactions forward, maintaining per-ticker qty (for V_portfolio)
+    and per-ticker benchmark-shares accumulators (one per benchmark) using
+    dollar-matched conversions at each trade's date.
     """
     if not tickers or not spy_closes:
         return []
@@ -305,12 +476,24 @@ def _compute_alpha_series(
     # Initialize state at start_date
     qty: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     spy_shares_per_ticker: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    qqq_shares_per_ticker: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    # Policy basket value tracking: per-ticker accumulated $ committed at each
+    # date, stored as (date, $_at_that_date) tuples per position. Then on each
+    # eval day we ask "what's $X invested in the policy basket on date d worth
+    # today?" via _basket_value_at.
+    policy_lots_per_ticker: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
     for t in tk_set:
         q = qty_at_start.get(t, Decimal(0))
         qty[t] = q
         p = prices_at_start.get(t)
-        if q != 0 and p is not None and spy_start > 0:
-            spy_shares_per_ticker[t] = (q * p) / spy_start
+        if q != 0 and p is not None:
+            v_start_t = q * p
+            if spy_start > 0:
+                spy_shares_per_ticker[t] = v_start_t / spy_start
+            if qqq_closes and qqq_start and qqq_start > 0:
+                qqq_shares_per_ticker[t] = v_start_t / qqq_start
+            if policy_weights and policy_closes_per_ticker:
+                policy_lots_per_ticker[t].append((start_date, v_start_t))
 
     # Pull historical prices for all tickers in window
     sids = list(sid_to_ticker.keys())
@@ -335,8 +518,7 @@ def _compute_alpha_series(
     out: list[PositionAlphaTimePoint] = []
     cur = start_date
     while cur <= end_date:
-        # Snapshot the V values BEFORE applying today's transactions
-        # (this matches the convention that end-of-prior-day positions ÷ today's close)
+        # V_portfolio: sum across tickers of qty[t] × price[t][cur]
         v_port = Decimal(0)
         for t in tk_set:
             q = qty[t]
@@ -346,17 +528,37 @@ def _compute_alpha_series(
             if px is not None:
                 v_port += q * px
 
+        # V_SPY counterfactual
         spy_px = _last_known_price(spy_closes, cur)
         v_spy = Decimal(0)
         if spy_px is not None and spy_px > 0:
-            total_spy_shares = sum((s for s in spy_shares_per_ticker.values()), Decimal(0))
-            v_spy = total_spy_shares * Decimal(str(spy_px))
+            total_spy = sum((s for s in spy_shares_per_ticker.values()), Decimal(0))
+            v_spy = total_spy * spy_px
+
+        # V_QQQ counterfactual
+        v_qqq = Decimal(0)
+        if qqq_closes:
+            qqq_px = _last_known_price(qqq_closes, cur)
+            if qqq_px is not None and qqq_px > 0:
+                total_qqq = sum((s for s in qqq_shares_per_ticker.values()), Decimal(0))
+                v_qqq = total_qqq * qqq_px
+
+        # V_POLICY counterfactual — evaluate each $ lot at today's basket value
+        v_policy = Decimal(0)
+        if policy_weights and policy_closes_per_ticker:
+            for ticker_lots in policy_lots_per_ticker.values():
+                for lot_date, lot_amt in ticker_lots:
+                    v_policy += _basket_value_at(
+                        lot_amt, policy_weights, policy_closes_per_ticker,
+                        lot_date, cur,
+                    )
 
         out.append(PositionAlphaTimePoint(
             date=cur,
             portfolio_value=v_port.quantize(Decimal("0.01")),
             spy_counterfactual_value=v_spy.quantize(Decimal("0.01")),
-            alpha=(v_port - v_spy).quantize(Decimal("0.01")),
+            qqq_counterfactual_value=v_qqq.quantize(Decimal("0.01")),
+            policy_counterfactual_value=v_policy.quantize(Decimal("0.01")),
         ))
 
         # Apply transactions on this date
@@ -367,15 +569,23 @@ def _compute_alpha_series(
             qty_delta = _forward_quantity_delta(tx)
             if qty_delta is not None:
                 qty[t] += qty_delta
-            # SPY counterfactual: dollar-match the trade
-            if tx.amount is not None:
-                amt = abs(Decimal(tx.amount))
-                tx_spy_px = _last_known_price(spy_closes, cur)
-                if tx_spy_px and tx_spy_px > 0 and amt > 0:
-                    if tx.type == InvestmentTransactionType.BUY.value:
-                        spy_shares_per_ticker[t] += amt / Decimal(str(tx_spy_px))
-                    elif tx.type == InvestmentTransactionType.SELL.value:
-                        spy_shares_per_ticker[t] -= amt / Decimal(str(tx_spy_px))
+            if tx.amount is None:
+                continue
+            amt = abs(Decimal(tx.amount))
+            if amt == 0:
+                continue
+            sign = 1 if tx.type == InvestmentTransactionType.BUY.value else -1 if tx.type == InvestmentTransactionType.SELL.value else 0
+            if sign == 0:
+                continue
+            tx_spy_px = _last_known_price(spy_closes, cur)
+            if tx_spy_px and tx_spy_px > 0:
+                spy_shares_per_ticker[t] += sign * amt / tx_spy_px
+            if qqq_closes:
+                tx_qqq_px = _last_known_price(qqq_closes, cur)
+                if tx_qqq_px and tx_qqq_px > 0:
+                    qqq_shares_per_ticker[t] += sign * amt / tx_qqq_px
+            if policy_weights and policy_closes_per_ticker:
+                policy_lots_per_ticker[t].append((cur, sign * amt))
 
         cur += timedelta(days=1)
 
@@ -572,12 +782,14 @@ def _price_per_ticker_at_date(
     return out
 
 
-def _spy_closes_with_lookback(
-    session: Session, start_date: date, end_date: date
+def _benchmark_closes_with_lookback(
+    session: Session, symbol: str, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
+    """Closes for one benchmark symbol, plus a 14-day forward/backward window
+    so non-trading start/end dates fall back to the most recent close."""
     rows = session.execute(
         select(Benchmark.date, Benchmark.close)
-        .where(Benchmark.symbol == "SPY")
+        .where(Benchmark.symbol == symbol)
         .where(Benchmark.date >= start_date - timedelta(days=14))
         .where(Benchmark.date <= end_date + timedelta(days=14))
     ).all()

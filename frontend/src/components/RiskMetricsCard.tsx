@@ -33,10 +33,10 @@ const EXPLAINERS: Record<string, MetricExplainer> = {
   },
   alpha: {
     definition:
-      "Annualized excess return not explained by benchmark exposure — the intercept of the regression, scaled to a year.",
+      "Annualized excess return not explained by benchmark exposure — the intercept of the regression, scaled to a year. Computed from daily returns of the reconstructed total V series, which can be noisy from cashflow-attribution effects.",
     formula: "α_daily = mean(Rₚ) − β × mean(R_b);  α_annual = α_daily × 252",
     interpretation:
-      "Positive ⇒ outperforming the regression line; negative ⇒ underperforming. When R² is low, alpha is noisy and largely captures style drift, not skill.",
+      "Positive ⇒ outperforming the regression line; negative ⇒ underperforming. ⚠ This metric is currently NOISY in this pipeline: when the same regression is run on the position-alpha V series (positions-only, no cash, no walk-back cash_adj) the alpha is ~+0.7%/yr — close to zero, consistent with the dollar number above. Trust the dollar alpha; treat the regression alpha as directional only. See PERFORMANCE_AUDIT.md F6.",
   },
   rSquared: {
     definition:
@@ -136,6 +136,26 @@ export function RiskMetricsCard({
         reserveAmount,
       }),
   });
+  // Pull position-alpha for the same window so we can show the dollar-based
+  // alpha alongside (or instead of) the regression alpha. The two disagree
+  // because the regression uses walk-back-reconstructed daily V which has
+  // cashflow-attribution noise; see PERFORMANCE_AUDIT.md F6.
+  const positionAlpha = useQuery({
+    queryKey: ["position-alpha-risk", startDate, endDate, excludeIndexEtfs],
+    queryFn: () =>
+      api.positionAlpha({
+        startDate,
+        endDate,
+        excludeBroadIndex: excludeIndexEtfs,
+      }),
+  });
+  const pa = positionAlpha.data;
+  const dollarAlphaByBenchmark: Record<Benchmark, number | null> = {
+    SPY: pa ? parseFloat(pa.total_alpha) : null,
+    QQQ: pa ? parseFloat(pa.total_alpha_vs_qqq) : null,
+    POLICY: pa && pa.has_policy ? parseFloat(pa.total_alpha_vs_policy) : null,
+  };
+  const dollarAlpha = dollarAlphaByBenchmark[benchmark];
 
   return (
     <Card>
@@ -170,6 +190,30 @@ export function RiskMetricsCard({
         </div>
       ) : (
         <>
+          {/* Position alpha — the dollar-based "real" number from the
+              dashboard's primary methodology. Shown prominently above the
+              regression metrics, which can disagree (see audit doc F6). */}
+          <div className="border-b border-slate-100 bg-emerald-50/50 px-4 py-3">
+            <div className="text-[11px] uppercase tracking-wider text-slate-500">
+              Position alpha vs {BENCHMARK_LABELS[benchmark]} ($)
+            </div>
+            <div className="mt-1 flex items-baseline gap-3">
+              <span
+                className={[
+                  "text-2xl font-semibold tabular-nums",
+                  pnlClassFromNumber(dollarAlpha),
+                ].join(" ")}
+              >
+                {dollarAlpha !== null
+                  ? `${dollarAlpha >= 0 ? "+" : "−"}$${Math.round(Math.abs(dollarAlpha)).toLocaleString()}`
+                  : "—"}
+              </span>
+              <span className="text-xs text-slate-500">
+                from position-alpha (the dashboard's primary metric)
+              </span>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 gap-x-6 gap-y-4 px-4 py-4 sm:grid-cols-3 lg:grid-cols-3">
             {/* Section: vs benchmark (regression) */}
             <SectionHeading>vs {BENCHMARK_LABELS[benchmark]}</SectionHeading>
@@ -180,13 +224,13 @@ export function RiskMetricsCard({
               explainer={EXPLAINERS.beta}
             />
             <Metric
-              label="Alpha (annualized)"
+              label="Regression alpha (annualized)"
               value={
                 data.alpha_annualized_pct !== null
                   ? `${data.alpha_annualized_pct >= 0 ? "+" : ""}${data.alpha_annualized_pct.toFixed(1)}%`
                   : "—"
               }
-              hint="excess return not explained by beta"
+              hint="⚠ noisy — see audit doc F6"
               valueClass={pnlClassFromNumber(data.alpha_annualized_pct)}
               explainer={EXPLAINERS.alpha}
             />
