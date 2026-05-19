@@ -368,16 +368,22 @@ export function Dashboard(): JSX.Element {
       </Card>
 
       {positionAlpha.data && positionAlpha.data.rows.length > 0 && (
-        <Card>
-          <header className="border-b border-slate-100 px-4 py-3">
-            <h2 className="text-sm font-semibold text-slate-900">
-              Per-position alpha vs SPY
-              <span className="ml-2 text-xs font-normal text-slate-500">
-                ranked best-to-worst by alpha (descending). Click a ticker for detail.
-              </span>
-            </h2>
-          </header>
-          <PositionAlphaTable data={positionAlpha.data} />
+        <Card className="overflow-hidden">
+          <details>
+            <summary className="cursor-pointer border-b border-slate-100 px-4 py-3 hover:bg-slate-50 list-none [&::-webkit-details-marker]:hidden">
+              <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                <span className="text-slate-400 text-xs">▸</span>
+                Per-position alpha vs SPY
+                <span className="text-xs font-normal text-slate-500">
+                  ({positionAlpha.data.rows.length} positions · click to expand)
+                </span>
+              </h2>
+            </summary>
+            <PositionAlphaTable
+              data={positionAlpha.data}
+              holdings={holdings.data ?? []}
+            />
+          </details>
         </Card>
       )}
 

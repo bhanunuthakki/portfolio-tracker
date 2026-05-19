@@ -1,4 +1,8 @@
-import type { PositionAlphaResult, PositionAlphaRow } from "@/types";
+import type {
+  ConsolidatedHoldingOut,
+  PositionAlphaResult,
+  PositionAlphaRow,
+} from "@/types";
 
 const fmtUSD = (v: number, signed = false): string => {
   const sign = signed && v > 0 ? "+" : "";
@@ -13,13 +17,29 @@ const fmtMinus = (v: number): string => {
 const colorCls = (v: number): string =>
   v > 0 ? "text-emerald-700" : v < 0 ? "text-rose-700" : "text-slate-500";
 
-export function PositionAlphaTable({ data }: { data: PositionAlphaResult }): JSX.Element {
+export function PositionAlphaTable({
+  data,
+  holdings = [],
+}: {
+  data: PositionAlphaResult;
+  holdings?: ConsolidatedHoldingOut[];
+}): JSX.Element {
   const rows = [...data.rows].sort(
     (a, b) => parseFloat(a.alpha) - parseFloat(b.alpha),
   );
   const totalActual = parseFloat(data.total_actual_pl);
   const totalSpy = parseFloat(data.total_spy_pl);
   const totalAlpha = parseFloat(data.total_alpha);
+
+  // Map ticker -> reliability info from current holdings. A ticker is
+  // 'unreliable' when at least one contributing account has implausibly
+  // low broker-reported cost basis (the UNREL flag from Holdings).
+  const unreliableByTicker = new Map<string, boolean>();
+  for (const h of holdings) {
+    if (h.ticker) {
+      unreliableByTicker.set(h.ticker.toUpperCase(), h.has_unreliable_cost_basis);
+    }
+  }
 
   return (
     <div className="overflow-x-auto">
@@ -51,6 +71,14 @@ export function PositionAlphaTable({ data }: { data: PositionAlphaResult }): JSX
                       title="Missing price data for window start or end — alpha approximate"
                     >
                       ⚠
+                    </span>
+                  )}
+                  {unreliableByTicker.get(r.ticker) && (
+                    <span
+                      className="ml-1 rounded bg-rose-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-800"
+                      title="At least one account has implausible broker-reported cost basis for this ticker. Cost-basis-derived numbers may be off; alpha is still meaningful since position-alpha uses qty × price, not cost basis. See Holdings drill-down to set a manual override."
+                    >
+                      UNREL
                     </span>
                   )}
                 </td>
