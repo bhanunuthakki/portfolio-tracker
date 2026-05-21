@@ -49,6 +49,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
+    CostBasisOverride,
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
@@ -506,11 +507,25 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
 def _aggregate_positions(
     session: Session, accts: frozenset[int], today: date
 ) -> dict[str, _PositionState]:
-    """Roll up the latest snapshot + lifetime tx history per ticker."""
+    """Roll up the latest snapshot + lifetime tx history per ticker.
+
+    Cost basis is merged with `cost_basis_overrides`: where the user has
+    set a manual override (or an `inferred_acats` row exists) the
+    override wins over the broker-reported snapshot value. Same policy
+    Holdings + Trade Analysis + Trade Timeline use — keeps drawdown and
+    multiples-detachment tips computed against the same cost basis the
+    UI shows elsewhere.
+    """
+    overrides: dict[tuple[int, int], Decimal] = {
+        (o.account_id, o.security_id): Decimal(o.total_cost_basis)
+        for o in session.execute(select(CostBasisOverride)).scalars().all()
+    }
     snap_rows = session.execute(
         select(
             Security.ticker,
             Security.name,
+            HoldingSnapshot.account_id,
+            HoldingSnapshot.security_id,
             HoldingSnapshot.quantity,
             HoldingSnapshot.institution_value,
             HoldingSnapshot.cost_basis,
@@ -523,7 +538,7 @@ def _aggregate_positions(
     ).all()
 
     by_ticker: dict[str, _PositionState] = {}
-    for ticker, name, qty, val, cb in snap_rows:
+    for ticker, name, account_id, security_id, qty, val, cb in snap_rows:
         if not ticker:
             continue
         t = ticker.upper()
@@ -544,7 +559,13 @@ def _aggregate_positions(
         p.qty += Decimal(qty or 0)
         if val is not None:
             p.value += Decimal(val)
-        if cb is not None:
+        # Override wins over broker-reported cost basis. Without this,
+        # ACATS-in positions with $0 broker cost inflate drawdown +
+        # multiples-detachment tips.
+        override = overrides.get((account_id, security_id))
+        if override is not None:
+            p.cost_basis_total += override
+        elif cb is not None:
             p.cost_basis_total += Decimal(cb)
 
     # Lifetime buy/sell aggregates + first_buy / last_action

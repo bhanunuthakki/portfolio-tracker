@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.models import (
     Account,
     Benchmark,
+    CostBasisOverride,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -271,6 +272,17 @@ def _open_position_rows(
         .where(HoldingSnapshot.quantity > 0)
     )
 
+    # Cost-basis overrides keyed on (account_id, security_id) — same merge
+    # policy as `portfolio.py` and `trade_analysis.py`. Override wins over
+    # the broker-reported `snap.cost_basis`. Without this, ACATS-in
+    # positions (where the receiving broker reports $0 cost) inflate alpha
+    # spuriously on the timeline. See data_quality finding
+    # `override_disagrees_with_broker` for visibility into divergence.
+    overrides: dict[tuple[int, int], Decimal] = {
+        (o.account_id, o.security_id): Decimal(o.total_cost_basis)
+        for o in session.execute(select(CostBasisOverride)).scalars().all()
+    }
+
     # Aggregate by ticker (collapse across accounts).
     by_ticker: dict[str, dict] = defaultdict(
         lambda: {"qty": Decimal("0"), "value": Decimal("0"), "cost": Decimal("0"), "name": None}
@@ -284,7 +296,11 @@ def _open_position_rows(
             agg["value"] += snap.institution_value
         elif snap.market_value is not None:
             agg["value"] += snap.market_value
-        if snap.cost_basis is not None:
+        # Per-account cost basis: override wins over broker-reported.
+        override = overrides.get((snap.account_id, snap.security_id))
+        if override is not None:
+            agg["cost"] += override
+        elif snap.cost_basis is not None:
             agg["cost"] += snap.cost_basis
         agg["name"] = agg["name"] or sec.name
 
