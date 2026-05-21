@@ -22,13 +22,16 @@ interface ChartRow {
   policy: number;
 }
 
+// Whole-dollar display per project convention (no decimal points on
+// dollar amounts). Chart-axis abbreviations round to whole-thousands
+// and whole-millions — precision lost at the M boundary is acceptable
+// for axis labels; hover tooltips can show the full integer if needed.
 const USD = (v: number, signed = false): string => {
   const sign = signed ? (v >= 0 ? "+" : "−") : "";
   const abs = Math.abs(v);
-  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
-  if (abs >= 10_000) return `${sign}$${(abs / 1_000).toFixed(0)}k`;
-  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}k`;
-  return `${sign}$${abs.toFixed(0)}`;
+  if (abs >= 1_000_000) return `${sign}$${Math.round(abs / 1_000_000)}M`;
+  if (abs >= 1_000) return `${sign}$${Math.round(abs / 1_000)}k`;
+  return `${sign}$${Math.round(abs)}`;
 };
 
 export function PositionAlphaChart({

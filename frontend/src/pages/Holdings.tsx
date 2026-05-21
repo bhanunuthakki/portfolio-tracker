@@ -210,7 +210,7 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
           })}
         </Td>
         <Td align="right" className="tabular-nums">
-          {avgCost !== null ? `$${avgCost.toFixed(2)}` : "—"}
+          {avgCost !== null ? `$${Math.round(avgCost).toLocaleString()}` : "—"}
         </Td>
         <Td align="right" className="tabular-nums">
           <span className="inline-flex items-center gap-1">
@@ -398,7 +398,9 @@ function CostBasisEditor({
 }): JSX.Element {
   const queryClient = useQueryClient();
   const [value, setValue] = useState(
-    existingOverride && currentCost !== null ? currentCost.toFixed(2) : "",
+    existingOverride && currentCost !== null
+      ? String(Math.round(currentCost))
+      : "",
   );
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -445,7 +447,7 @@ function CostBasisEditor({
 
   const perShare =
     value && quantity > 0 && parseFloat(value) > 0
-      ? `≈ $${(parseFloat(value) / quantity).toFixed(2)}/share`
+      ? `≈ $${Math.round(parseFloat(value) / quantity).toLocaleString()}/share`
       : "";
 
   return (

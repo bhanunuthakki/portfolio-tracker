@@ -1,8 +1,32 @@
+import { InfoButton } from "@/components/ui";
 import type {
   ConsolidatedHoldingOut,
   PositionAlphaResult,
   PositionAlphaRow,
 } from "@/types";
+
+const POSITION_ALPHA_EXPLAINER = {
+  definition:
+    "Per-ticker dollar alpha vs SPY for the chosen window. We anchor V_start to qty × price on the window start date, then dollar-match every in-window buy/sell against the SPY counterfactual. Pre-window cost basis is ignored — only what you controlled at the window start matters.",
+  formula:
+    "alpha = (V_end + sold − bought) − (V_end_spy + sold − bought) = V_end − V_end_spy",
+  interpretation:
+    "Positive alpha = the position outperformed an equivalent SPY allocation that received the same per-trade $ flows on the same days. Rows sum to the total at the bottom. Switch to QQQ/Policy on the Dashboard's chart to compare different benchmarks.",
+};
+
+const V_START_EXPLAINER = {
+  definition:
+    "Aggregate dollar value of positions on the window-start date — qty × that day's close, summed across tickers. Cash and SGOV are excluded.",
+  interpretation:
+    "This is the starting capital the SPY/QQQ/Policy counterfactuals are anchored to. Re-baselined whenever you change the date range.",
+};
+
+const COUNTERFACTUAL_EXPLAINER = {
+  definition:
+    "What V_start would have grown to if invested in the benchmark on the start date, then dollar-matched every in-window buy and sell at that day's benchmark close.",
+  interpretation:
+    "If you bought $5,000 of NVDA on March 1, the SPY counterfactual gets $5,000-worth of SPY shares added on March 1. Sells subtract. This isolates your stock-picking skill from contribution timing.",
+};
 
 const fmtUSD = (v: number, signed = false): string => {
   const sign = signed && v > 0 ? "+" : "";
@@ -47,13 +71,34 @@ export function PositionAlphaTable({
         <thead className="bg-slate-50 text-slate-600">
           <tr>
             <th className="px-3 py-2 text-left font-medium">Ticker</th>
-            <th className="px-3 py-2 text-right font-medium">V start</th>
+            <th className="px-3 py-2 text-right font-medium">
+              <span className="inline-flex items-center justify-end gap-1">
+                V start
+                <InfoButton label="V start" explainer={V_START_EXPLAINER} />
+              </span>
+            </th>
             <th className="px-3 py-2 text-right font-medium">Bought</th>
             <th className="px-3 py-2 text-right font-medium">Sold</th>
             <th className="px-3 py-2 text-right font-medium">V end</th>
             <th className="px-3 py-2 text-right font-medium">Actual P&amp;L</th>
-            <th className="px-3 py-2 text-right font-medium">SPY counterfactual</th>
-            <th className="px-3 py-2 text-right font-medium">Alpha</th>
+            <th className="px-3 py-2 text-right font-medium">
+              <span className="inline-flex items-center justify-end gap-1">
+                SPY counterfactual
+                <InfoButton
+                  label="SPY counterfactual"
+                  explainer={COUNTERFACTUAL_EXPLAINER}
+                />
+              </span>
+            </th>
+            <th className="px-3 py-2 text-right font-medium">
+              <span className="inline-flex items-center justify-end gap-1">
+                Alpha
+                <InfoButton
+                  label="Position alpha"
+                  explainer={POSITION_ALPHA_EXPLAINER}
+                />
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
@@ -131,6 +176,18 @@ export function PositionAlphaTable({
           </tr>
         </tfoot>
       </table>
+      <div className="border-t border-slate-100 bg-slate-50 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
+        <strong>SPY counterfactual</strong> = your V_start invested in SPY on the
+        start date, plus dollar-matched buys/sells at each event's SPY close.
+        <strong className="ml-1.5">Alpha</strong> = Actual P&amp;L − SPY P&amp;L.
+        Positive ⇒ your position beat an equivalent SPY allocation with the
+        same trade timing.{" "}
+        <span className="text-amber-700">⚠</span> = missing price data;{" "}
+        <span className="rounded bg-rose-100 px-1 text-[9px] font-semibold uppercase text-rose-800">UNREL</span>{" "}
+        = broker cost basis is junk on at least one account (alpha is still
+        valid; lifetime P&amp;L on the Trade Analysis page is the affected
+        number).
+      </div>
     </div>
   );
 }

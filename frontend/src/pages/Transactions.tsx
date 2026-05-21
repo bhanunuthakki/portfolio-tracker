@@ -421,10 +421,7 @@ function TxRow({
         })}
       </td>
       <td className="px-3 py-1.5 text-right tabular-nums text-slate-700">
-        ${parseFloat(tx.amount).toLocaleString(undefined, {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}
+        ${Math.round(parseFloat(tx.amount)).toLocaleString()}
       </td>
       <td className="px-3 py-1.5">
         <ClassificationCell

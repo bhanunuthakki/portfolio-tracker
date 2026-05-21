@@ -10,6 +10,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from portfolio_tracker.api.routes import (
+    cio_advisor,
+    coaching,
     decision_support,
     earnings_summary,
     overrides,
@@ -38,6 +40,8 @@ def create_app() -> FastAPI:
     app.include_router(policy.router)
     app.include_router(decision_support.router)
     app.include_router(earnings_summary.router)
+    app.include_router(coaching.router)
+    app.include_router(cio_advisor.router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:

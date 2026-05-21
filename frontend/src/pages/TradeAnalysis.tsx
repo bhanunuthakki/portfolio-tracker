@@ -2,12 +2,27 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
+import { CoachingPanel } from "@/components/CoachingPanel";
 import {
   filterBySearch,
   useTableSort,
 } from "@/components/useTableSort";
-import { Card, fmtUSD, pnlClass } from "@/components/ui";
+import {
+  Card,
+  InfoButton,
+  WarningBanner,
+  fmtUSD,
+  pnlClass,
+} from "@/components/ui";
 import type { TickerTrade } from "@/types";
+
+const PNL_METHODOLOGY = {
+  definition:
+    "Lifetime P&L per ticker = market value today + cumulative cash from sells − cumulative cash to buys. Computed across ALL transactions (not the window). The date range filters the activity counters and trade count, not the P&L total.",
+  formula: "P&L = today_value + sold − bought",
+  interpretation:
+    "Position-alpha on the Dashboard uses a windowed methodology and is unaffected by pre-history. The two views answer different questions: this page is 'what did I net on this name?'; the Dashboard is 'did I beat the index, dollar-for-dollar?'",
+};
 
 /**
  * Standalone Trade Analysis page with sortable columns + search filter.
@@ -109,17 +124,38 @@ export function TradeAnalysis(): JSX.Element {
     return { wins, losses, open, pnlSum };
   }, [searchFiltered]);
 
+  const unreliableCount = useMemo(
+    () => sortedRows.filter((t) => t.cost_basis_unreliable).length,
+    [sortedRows],
+  );
+
   return (
     <div className="space-y-4">
       <header>
-        <h1 className="text-lg font-semibold text-slate-900">
+        <h1 className="inline-flex items-center gap-1.5 text-lg font-semibold text-slate-900">
           Trade analysis
+          <InfoButton label="P&L methodology" explainer={PNL_METHODOLOGY} />
         </h1>
         <p className="mt-0.5 text-sm text-slate-500">
           Per-ticker buy/sell summary. Click any header to sort; type to
-          filter by ticker, name, or date.
+          filter by ticker, name, or date. <strong>P&amp;L is lifetime,
+          not windowed</strong> — for window-bounded alpha vs SPY/QQQ/Policy,
+          use the Dashboard's per-position table.
         </p>
       </header>
+
+      <CoachingPanel />
+
+      {unreliableCount > 0 && (
+        <WarningBanner title={`⚠ ${unreliableCount} ${unreliableCount === 1 ? "row has" : "rows have"} unreliable cost basis`}>
+          Rows marked <span className="text-amber-700">⚠</span> have ACATS-in
+          transfers or pre-history shares with no recorded buy. Cost basis is
+          undercounted, so lifetime P&amp;L is overstated. Fix: enter a manual
+          override on the Holdings page (drill into the account, click "Override
+          cost basis"). The Dashboard's position-alpha view is unaffected — it
+          uses qty × price, not cost basis.
+        </WarningBanner>
+      )}
 
       <Card>
         <div className="flex flex-col gap-2 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">

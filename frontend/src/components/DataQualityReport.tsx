@@ -109,7 +109,69 @@ function FindingOverride({ finding }: { finding: DataQualityFindingOut }): JSX.E
   if (finding.category === "untickered_security") {
     return <TickerOverrideForm finding={finding} />;
   }
+  if (finding.category === "override_disagrees_with_broker") {
+    return <OverrideDisagreementResolver finding={finding} />;
+  }
   return <></>;
+}
+
+/**
+ * Inline "pick one" action for an override-vs-broker disagreement.
+ *
+ * Two paths: keep the override (dismiss the finding implicitly by
+ * acknowledging it — no DB write, the finding just stops firing once
+ * broker drift falls back inside tolerance OR the user accepts the
+ * disagreement and stops looking at it) or delete the override so the
+ * broker's value takes over going forward.
+ *
+ * We don't currently persist an "acknowledged" flag — the disagreement
+ * is a recurring nag until either side moves. Add a `dismissed_at`
+ * column to `cost_basis_overrides` if the noise becomes a problem.
+ */
+function OverrideDisagreementResolver({
+  finding,
+}: {
+  finding: DataQualityFindingOut;
+}): JSX.Element {
+  const queryClient = useQueryClient();
+  const accountId = parseInt(finding.context.account_id ?? "0", 10);
+  const securityId = parseInt(finding.context.security_id ?? "0", 10);
+  const ticker = finding.context.ticker ?? "?";
+  const brokerValue = finding.context.broker_value ?? "?";
+
+  const remove = useMutation({
+    mutationFn: () => api.deleteCostBasisOverride(accountId, securityId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["data-quality"] });
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
+    },
+  });
+
+  if (!accountId || !securityId) return <></>;
+
+  const confirmAndDelete = () => {
+    const ok = window.confirm(
+      `Delete the override on ${ticker}? Broker value $${parseFloat(brokerValue).toLocaleString()} will replace it everywhere.`,
+    );
+    if (ok) remove.mutate();
+  };
+
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <button
+        type="button"
+        onClick={confirmAndDelete}
+        disabled={remove.isPending}
+        className="rounded-md border border-rose-300 bg-white px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+      >
+        {remove.isPending ? "Deleting…" : "Trust broker (delete override)"}
+      </button>
+      <span className="text-[11px] text-slate-500">
+        — or do nothing to keep the override.
+      </span>
+    </div>
+  );
 }
 
 function CostBasisOverrideForm({
@@ -158,7 +220,7 @@ function CostBasisOverrideForm({
 
   const perShareHint =
     value && quantity > 0 && parseFloat(value) > 0
-      ? `≈ $${(parseFloat(value) / quantity).toFixed(2)}/share`
+      ? `≈ $${Math.round(parseFloat(value) / quantity).toLocaleString()}/share`
       : "";
 
   return (
@@ -174,11 +236,10 @@ function CostBasisOverrideForm({
         {currentPrice > 0 && (
           <>
             {" "}
-            Quick estimate: {quantity.toFixed(2)} shares × current $
-            {currentPrice.toFixed(2)} = $
-            {(quantity * currentPrice).toLocaleString(undefined, {
-              maximumFractionDigits: 0,
-            })}{" "}
+            Quick estimate: {quantity.toLocaleString(undefined, {
+              maximumFractionDigits: 4,
+            })} shares × current ${Math.round(currentPrice).toLocaleString()} = $
+            {Math.round(quantity * currentPrice).toLocaleString()}{" "}
             — but use your actual purchase price, not today's.
           </>
         )}
