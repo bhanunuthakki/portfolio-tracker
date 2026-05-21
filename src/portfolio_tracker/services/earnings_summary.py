@@ -53,17 +53,24 @@ def summary_by_ticker(tickers: list[str]) -> dict[str, TickerSummary]:
     (not tracked, no earnings date, etc.) are returned with sensible
     None fields rather than omitted — caller can render uniformly.
 
-    Empty dict when the companion DB isn't available.
+    Empty dict when the companion DB isn't available OR when the schema
+    has drifted (some queries can fail individually if earnings-summary
+    is mid-migration or has renamed tables). Each sub-query is wrapped
+    independently so a missing `expected_earnings` table doesn't kill
+    the `tracked_companies` lookup, and vice versa.
     """
     if not tickers:
         return {}
     if not is_available():
         return {}
-    conn = _connect_readonly()
     try:
-        tracked = _tracked_companies(conn)
-        next_earnings = _next_earnings(conn, tickers)
-        thesis = _thesis_state(conn, tickers)
+        conn = _connect_readonly()
+    except sqlite3.OperationalError:
+        return {}
+    try:
+        tracked = _safe(_tracked_companies, conn, default={})
+        next_earnings = _safe(_next_earnings, conn, tickers, default={})
+        thesis = _safe(_thesis_state, conn, tickers, default={})
     finally:
         conn.close()
 
@@ -232,6 +239,18 @@ def _latest_brief_iso_date(output_dir: Path, ticker: str) -> str | None:
 def _safe_ticker(s: str) -> bool:
     # Strict ASCII ticker — prevents path-traversal via crafted ticker.
     return bool(s) and all(c.isalnum() or c in "._-" for c in s) and ".." not in s
+
+
+def _safe(fn, *args, default):
+    """Run an earnings-summary sub-query and return `default` if the
+    companion DB throws an OperationalError (typically a missing or
+    renamed table). Lets callers degrade per-query instead of all-or-
+    nothing — e.g., thesis lookups still work even when the
+    `expected_earnings` table is missing."""
+    try:
+        return fn(*args)
+    except sqlite3.OperationalError:
+        return default
 
 
 def _is_iso_date(s: str) -> bool:
