@@ -56,6 +56,7 @@ from portfolio_tracker.models import (
     TradeDecision,
 )
 from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 
 # Numeric rubric — keep aligned with CIO_CONTEXT.md "Numeric bar" table.
 # These are the deterministic thresholds the engine evaluates; the
@@ -199,6 +200,19 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
     portfolio_total = sum((p.value for p in positions.values()), Decimal(0))
     last_decisions_by_ticker = _last_decisions_by_ticker(session)
     last_trim_or_sell_by_ticker = _last_trim_or_sell_by_ticker(session)
+    # Cross-project: the user maintains research theses in the companion
+    # `earnings-summary` project. A position with a thesis there should
+    # NOT trigger "has no thesis on file" — that's a false positive that
+    # ignores their actual work. Empty dict if the companion isn't set up
+    # or its DB is in a weird state; coaching degrades to "decision log
+    # only" gracefully.
+    es_thesis_by_ticker = {
+        t: s
+        for t, s in earnings_summary_svc.summary_by_ticker(
+            list(positions.keys())
+        ).items()
+        if s.thesis_status is not None or s.thesis_summary is not None
+    }
 
     evaluated = 0
     for ticker, p in positions.items():
@@ -325,7 +339,16 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                     )
 
         # ---- Thesis stale -------------------------------------------------
-        if last_decision is None:
+        # A position has a thesis on file if EITHER (a) there's a
+        # decision-log entry in the portfolio-tracker DB, OR (b) the
+        # companion earnings-summary project tracks the ticker with a
+        # non-empty thesis_state / thesis_summary. We treat both as
+        # equally valid — the user splits their pre-trade pulse-checks
+        # (decision log) from their long-form research (earnings-summary
+        # briefs), and the coaching engine shouldn't nag about thesis
+        # absence when the work just lives elsewhere.
+        es_summary = es_thesis_by_ticker.get(ticker)
+        if last_decision is None and es_summary is None:
             tips.append(
                 CoachingTip(
                     category="thesis_stale",
@@ -334,20 +357,22 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                     name=p.name,
                     headline=f"{ticker} has no thesis on file",
                     detail=(
-                        f"Currently held position (${_int(p.value)}) with no "
-                        "decision-log entry. Without a written thesis you "
-                        "can't audit invalidation triggers when the position "
-                        "moves against you."
+                        f"Currently held position (${_int(p.value)}) with "
+                        "no decision-log entry and no earnings-summary "
+                        "thesis. Without a written thesis you can't audit "
+                        "invalidation triggers when the position moves "
+                        "against you."
                     ),
                     suggested_action=(
                         "Open the decision log card on the Dashboard and "
-                        "write a 1-paragraph thesis + invalidation triggers. "
-                        "The act of writing is the feature."
+                        "write a 1-paragraph thesis + invalidation triggers, "
+                        "OR start a research brief in earnings-summary for "
+                        "this ticker."
                     ),
                     context={"value": _int(p.value)},
                 )
             )
-        else:
+        elif last_decision is not None:
             stale_days = (today - last_decision).days
             if stale_days > THESIS_STALE_DAYS:
                 tips.append(
@@ -376,6 +401,10 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                         },
                     )
                 )
+        # When `last_decision is None` but the earnings-summary thesis
+        # exists, no tip fires — the work is recorded, just not in the
+        # decision log. Future enhancement: surface earnings-summary
+        # thesis age too once that table has reliable timestamps.
 
         # ---- Multiples detachment (no trim since position 2x'd) -----------
         if p.bought_total > 0:
