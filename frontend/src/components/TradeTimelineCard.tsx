@@ -270,10 +270,16 @@ function TimelineTableRow({ row }: { row: TimelineRow }): JSX.Element {
     : row.broker
       ? `${row.broker} ${row.tax_year}`
       : `1099 ${row.tax_year ?? ""}`;
-  const heldText =
-    row.holding_days >= 365
-      ? `${(row.holding_days / 365).toFixed(1)}y`
-      : `${row.holding_days}d`;
+  const fmtDays = (days: number): string =>
+    days >= 365 ? `${(days / 365).toFixed(1)}y` : `${days}d`;
+  const heldText = fmtDays(row.holding_days);
+  // Show dollar-weighted avg below "since first buy" for open positions
+  // when the two diverge (otherwise it's just visual noise). Tells the
+  // user how long their CAPITAL has actually been deployed, not just
+  // how long the position has existed.
+  const showWeighted =
+    isOpen &&
+    Math.abs(row.weighted_avg_holding_days - row.holding_days) > 15;
   return (
     <tr className="border-t border-slate-100 hover:bg-slate-50">
       <Td>{row.disposed_date}</Td>
@@ -306,6 +312,14 @@ function TimelineTableRow({ row }: { row: TimelineRow }): JSX.Element {
           {heldText}
           {row.acquired_approx ? "*" : ""}
         </span>
+        {showWeighted && (
+          <div
+            className="text-[10px] text-slate-500"
+            title="Dollar-weighted average holding days across all buys. SPY counterfactual uses this matched-flow timing, not the first-buy date."
+          >
+            $-wt {fmtDays(row.weighted_avg_holding_days)}
+          </div>
+        )}
       </Td>
       <Td align="right">{fmtUSD(cost)}</Td>
       <Td align="right" className={pnlClass(realized)}>
