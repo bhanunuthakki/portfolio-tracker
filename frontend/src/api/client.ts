@@ -1,6 +1,12 @@
 import type {
   BetaResult,
   CashflowAuditOut,
+  ChatSessionCreateIn,
+  ChatSessionOut,
+  ChatTurnIn,
+  ChatTurnOut,
+  ChatTurnPostResponse,
+  CoachingResult,
   ConsolidatedHoldingOut,
   DataQualityReportOut,
   ExchangePublicTokenOut,
@@ -8,6 +14,8 @@ import type {
   InvestmentTransactionOut,
   ItemOut,
   LinkTokenOut,
+  MonthlyBriefOut,
+  MonthlyBriefSummary,
   PerformanceSeries,
   PolicyOut,
   PolicyWeightIn,
@@ -315,5 +323,41 @@ export const api = {
       search.set("only_held", String(params.onlyHeld));
     const qs = search.toString();
     return request(`/api/earnings/upcoming${qs ? `?${qs}` : ""}`);
+  },
+
+  coachingTips: (): Promise<CoachingResult> => request("/api/coaching/tips"),
+
+  // CIO advisor (LLM-powered chat + monthly brief)
+
+  cioListSessions: (): Promise<ChatSessionOut[]> =>
+    request("/api/cio-advisor/sessions"),
+
+  cioCreateSession: (payload: ChatSessionCreateIn): Promise<ChatSessionOut> =>
+    request("/api/cio-advisor/sessions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  cioDeleteSession: (sessionId: number): Promise<void> =>
+    request(`/api/cio-advisor/sessions/${sessionId}`, { method: "DELETE" }),
+
+  cioListTurns: (sessionId: number): Promise<ChatTurnOut[]> =>
+    request(`/api/cio-advisor/sessions/${sessionId}/turns`),
+
+  cioSendTurn: (sessionId: number, payload: ChatTurnIn): Promise<ChatTurnPostResponse> =>
+    request(`/api/cio-advisor/sessions/${sessionId}/turns`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+
+  cioListBriefs: (): Promise<MonthlyBriefSummary[]> =>
+    request("/api/cio-advisor/briefs"),
+
+  cioGetBrief: (briefId: number): Promise<MonthlyBriefOut> =>
+    request(`/api/cio-advisor/briefs/${briefId}`),
+
+  cioGenerateBrief: (periodYyyymm?: string): Promise<MonthlyBriefOut> => {
+    const qs = periodYyyymm ? `?period_yyyymm=${encodeURIComponent(periodYyyymm)}` : "";
+    return request(`/api/cio-advisor/briefs/generate${qs}`, { method: "POST" });
   },
 };

@@ -52,6 +52,15 @@ STALE_ITEM = "stale_item"
 SPARSE_FORWARD_SNAPSHOTS = "sparse_forward_snapshots"
 OVERLAPPING_BROKER_CONNECTIONS = "overlapping_broker_connections"
 MISSING_POLICY_BENCHMARK = "missing_policy_benchmark"
+OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
+
+# Tolerance for "broker disagrees with override" comparisons. Brokers
+# round and may differ by rounding noise from the user's stated total —
+# below this fraction we treat the broker's value as effectively the
+# same. 2% is wide enough to ignore typical rounding + small dividend
+# reinvestment drift, narrow enough to catch real divergence ($1k on a
+# $50k position).
+_OVERRIDE_DRIFT_TOLERANCE: Decimal = Decimal("0.02")
 
 
 def build_report(session: Session) -> DataQualityReportOut:
@@ -64,6 +73,7 @@ def build_report(session: Session) -> DataQualityReportOut:
     findings.extend(_find_sparse_forward_snapshots(session))
     findings.extend(_find_overlapping_broker_connections(session))
     findings.extend(_find_missing_policy_benchmarks(session))
+    findings.extend(_find_overrides_disagreeing_with_broker(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -117,7 +127,7 @@ def _find_missing_cost_basis(session: Session) -> list[DataQualityFindingOut]:
             float(h.institution_price) if h.institution_price is not None else None
         )
         price_hint = (
-            f" Current price ≈ ${current_price:.2f}/share."
+            f" Current price ≈ ${current_price:,.0f}/share."
             if current_price is not None
             else ""
         )
@@ -547,3 +557,133 @@ def _find_missing_policy_benchmarks(
             context={"missing_tickers": ",".join(missing)},
         )
     ]
+
+
+def _find_overrides_disagreeing_with_broker(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Fires when a CostBasisOverride exists AND the broker now reports a
+    plausible cost basis on the same (account, security) that disagrees
+    with the user's override.
+
+    Common trigger: SoFi via Plaid used to omit cost basis entirely, so
+    the user entered an override. Months later Plaid backfills cost basis
+    on SoFi's side; the override silently keeps winning even though the
+    broker now has its own value. This finding surfaces the disagreement
+    so the user can pick: trust the broker (delete the override), or
+    keep the override (acknowledge and ignore).
+
+    We compare against the most recent `holdings_snapshots.cost_basis`
+    for the (account, security). Broker values of zero or NULL are
+    treated as "broker doesn't have it" and skipped — the override is
+    still the only source of truth in that case. The drift tolerance
+    accounts for broker rounding + small in-period reinvestment that the
+    user's static override wouldn't reflect.
+
+    Severity is `info` rather than `warning`: a disagreement isn't a
+    bug, just a decision point. The user may well prefer their override
+    (e.g., they enriched ACATS-in cost with carryover from another
+    broker). The finding's recommended_action is to reconcile, not to
+    delete.
+    """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
+
+    overrides = session.execute(select(CostBasisOverride)).scalars().all()
+    if not overrides:
+        return []
+
+    latest_date = session.execute(
+        select(func.max(HoldingSnapshot.snapshot_date))
+        .where(HoldingSnapshot.account_id.in_(accts))
+    ).scalar_one_or_none()
+    if latest_date is None:
+        return []
+
+    # Build a fast lookup: (account_id, security_id) -> (broker_cb, qty, value, ticker, account_name, security_name)
+    snap_rows = session.execute(
+        select(
+            HoldingSnapshot.account_id,
+            HoldingSnapshot.security_id,
+            HoldingSnapshot.cost_basis,
+            HoldingSnapshot.quantity,
+            HoldingSnapshot.institution_value,
+            Security.ticker,
+            Security.name,
+            Account.name,
+        )
+        .join(Security, Security.security_id == HoldingSnapshot.security_id)
+        .join(Account, Account.account_id == HoldingSnapshot.account_id)
+        .where(HoldingSnapshot.snapshot_date == latest_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
+    ).all()
+    by_key = {
+        (row[0], row[1]): row[2:]
+        for row in snap_rows
+    }
+
+    findings: list[DataQualityFindingOut] = []
+    for ov in overrides:
+        row = by_key.get((ov.account_id, ov.security_id))
+        if row is None:
+            # Override exists but position no longer held — not a quality
+            # issue, just a stale override. Skip silently.
+            continue
+        broker_cb, qty, value, ticker, security_name, account_name = row
+        if broker_cb is None:
+            continue  # broker still doesn't have it; override is the only source
+        broker_cb_dec = Decimal(broker_cb)
+        if broker_cb_dec <= 0:
+            continue  # $0 or negative is broker's "I don't have this" signal
+        override_dec = Decimal(ov.total_cost_basis)
+        if override_dec <= 0:
+            continue  # safety; should never happen
+        # Fractional drift against the larger value — symmetric.
+        denom = max(override_dec, broker_cb_dec)
+        drift = abs(broker_cb_dec - override_dec) / denom
+        if drift <= _OVERRIDE_DRIFT_TOLERANCE:
+            continue
+        ticker_label = ticker or "unknown"
+        findings.append(
+            DataQualityFindingOut(
+                category=OVERRIDE_DISAGREES_WITH_BROKER,
+                severity=INFO,
+                title=(
+                    f"{ticker_label} in {account_name}: override and broker disagree"
+                ),
+                detail=(
+                    f"Your override says ${float(override_dec):,.0f} total "
+                    f"cost basis, but the broker now reports "
+                    f"${float(broker_cb_dec):,.0f} "
+                    f"(drift {float(drift) * 100:.1f}%). "
+                    f"Source: {ov.source}. "
+                    f"Position currently {float(qty or 0):,.4f} sh worth "
+                    f"${float(value or 0):,.0f}. "
+                    f"The override is still being used everywhere; "
+                    f"this is just a heads-up."
+                ),
+                recommended_action=(
+                    "Reconcile: if the broker is now correct (e.g., SoFi "
+                    "finally backfilled Plaid cost basis), delete the "
+                    "override at /api/overrides/cost-basis/{account_id}/"
+                    "{security_id}. If your override is the right number "
+                    "(ACATS carryover, manual reconciliation), no action "
+                    "needed — note the broker disagrees so future re-syncs "
+                    "don't surprise you."
+                ),
+                context={
+                    "ticker": ticker_label,
+                    "account_id": str(ov.account_id),
+                    "account_name": account_name,
+                    "security_id": str(ov.security_id),
+                    "security_name": security_name or "",
+                    "override_value": str(override_dec),
+                    "broker_value": str(broker_cb_dec),
+                    "drift_pct": f"{float(drift) * 100:.2f}",
+                    "override_source": ov.source,
+                    "override_endpoint": "/api/overrides/cost-basis",
+                },
+            )
+        )
+    return findings

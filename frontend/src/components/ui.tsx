@@ -21,6 +21,7 @@
  *   loss:    red-700
  */
 
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 // ---- containers ---------------------------------------------------------
@@ -194,13 +195,16 @@ export function Td({
   children,
   align,
   className,
+  title,
 }: {
   children: ReactNode;
   align?: "left" | "right";
   className?: string;
+  title?: string;
 }): JSX.Element {
   return (
     <td
+      title={title}
       className={[
         "px-4 py-2 text-sm text-slate-700",
         align === "right" ? "text-right" : "text-left",
@@ -238,6 +242,141 @@ export function InfoBanner({ children }: { children: ReactNode }): JSX.Element {
   );
 }
 
+export function WarningBanner({
+  title,
+  children,
+}: {
+  title?: string;
+  children: ReactNode;
+}): JSX.Element {
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+      {title && <div className="font-medium">{title}</div>}
+      <div className={title ? "mt-1 text-xs leading-relaxed" : ""}>{children}</div>
+    </div>
+  );
+}
+
+// ---- methodology disclosure --------------------------------------------
+
+export interface MethodologyExplainer {
+  definition: string;
+  formula?: string;
+  interpretation?: string;
+}
+
+/**
+ * Click-toggle `(?)` popover for surfacing definitions inline. Hover is
+ * deliberately NOT used — multi-paragraph methodology text doesn't fit
+ * native tooltips, and hover is inaccessible on touch. Closes on outside
+ * click or Escape.
+ *
+ * Use this for any value that has a methodology behind it that the user
+ * should be able to read without leaving the page. Pair with a label so
+ * the icon never floats alone.
+ */
+export function InfoButton({
+  label,
+  explainer,
+}: {
+  label: string;
+  explainer: MethodologyExplainer;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(event.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative inline-flex">
+      <button
+        type="button"
+        aria-label={`What is ${label}?`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-slate-300 text-[9px] font-bold normal-case text-slate-500 hover:border-slate-500 hover:text-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-slate-700"
+      >
+        ?
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label={`${label} explainer`}
+          className="absolute left-0 top-full z-20 mt-1.5 w-80 max-w-[calc(100vw-2rem)] rounded-md border border-slate-200 bg-white p-3 text-left text-xs normal-case tracking-normal text-slate-700 shadow-lg"
+        >
+          <div className="text-sm font-semibold text-slate-900">{label}</div>
+          <p className="mt-1.5 leading-relaxed">{explainer.definition}</p>
+          {explainer.formula && (
+            <div className="mt-2.5">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500">
+                Formula
+              </div>
+              <div className="mt-1 rounded bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-800">
+                {explainer.formula}
+              </div>
+            </div>
+          )}
+          {explainer.interpretation && (
+            <div className="mt-2.5">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500">
+                Reading it
+              </div>
+              <p className="mt-1 leading-relaxed">{explainer.interpretation}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Collapsible "Methodology" disclosure block. Use beneath a chart or
+ * table to make the bookkeeping behind a number readable without bloating
+ * the default view. Defaults closed.
+ */
+export function MethodologyNote({
+  title,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  children: ReactNode;
+  defaultOpen?: boolean;
+}): JSX.Element {
+  return (
+    <details
+      open={defaultOpen}
+      className="group rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2 text-xs text-slate-600"
+    >
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-700">
+        <span className="text-slate-400 transition-transform group-open:rotate-90">▸</span>
+        {title}
+      </summary>
+      <div className="mt-2 leading-relaxed">{children}</div>
+    </details>
+  );
+}
+
 // ---- helpers ------------------------------------------------------------
 
 /** Tailwind class for positive/negative tabular numbers. */
@@ -248,7 +387,15 @@ export function pnlClass(value: number | null): string {
   return "";
 }
 
-/** "$1,234" — rounded, US formatting. */
+/**
+ * "$1,234" — rounded, US formatting.
+ *
+ * Project convention: dollar amounts have NO decimal points. The
+ * `fractionDigits` argument defaults to 0 and callers should NOT pass
+ * a non-zero value for dollar displays. (Per-share prices, EPS, and
+ * percentages aren't covered by this rule — those use their own
+ * formatters where decimals are still acceptable.)
+ */
 export function fmtUSD(value: number | null, fractionDigits: number = 0): string {
   if (value === null) return "—";
   return `$${value.toLocaleString(undefined, {
@@ -257,7 +404,12 @@ export function fmtUSD(value: number | null, fractionDigits: number = 0): string
   })}`;
 }
 
-/** "+$1,234" / "-$1,234" / "—". Sign always precedes `$`. */
+/**
+ * "+$1,234" / "-$1,234" / "—". Sign always precedes `$`.
+ *
+ * Always whole-dollar — same convention as `fmtUSD`. No knob to add
+ * decimals here on purpose.
+ */
 export function fmtSignedUSD(value: number | null): string {
   if (value === null) return "—";
   const sign = value >= 0 ? "+" : "-";

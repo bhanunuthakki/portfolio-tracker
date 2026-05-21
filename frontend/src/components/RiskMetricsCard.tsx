@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 import { api } from "@/api/client";
-import { Card } from "@/components/ui";
+import { Card, InfoButton } from "@/components/ui";
+import type { MethodologyExplainer } from "@/components/ui";
 
 type Benchmark = "SPY" | "QQQ" | "POLICY";
 
@@ -12,11 +13,7 @@ const BENCHMARK_LABELS: Record<Benchmark, string> = {
   POLICY: "Policy",
 };
 
-interface MetricExplainer {
-  definition: string;
-  formula?: string;
-  interpretation?: string;
-}
+type MetricExplainer = MethodologyExplainer;
 
 /**
  * Definitions, formulas, and reading guides for each metric. Click the (?)
@@ -321,7 +318,7 @@ export function RiskMetricsCard({
   );
 }
 
-function SectionHeading({ children }: { children: string }): JSX.Element {
+function SectionHeading({ children }: { children: React.ReactNode }): JSX.Element {
   return (
     <div className="col-span-full pt-1 text-[11px] uppercase tracking-wider text-slate-500 border-b border-slate-100 pb-1.5">
       {children}
@@ -347,7 +344,7 @@ function Metric({
       {label && (
         <div className="flex items-center gap-1 text-[11px] uppercase tracking-wider text-slate-500">
           <span>{label}</span>
-          {explainer && <MetricInfoButton label={label} explainer={explainer} />}
+          {explainer && <InfoButton label={label} explainer={explainer} />}
         </div>
       )}
       <div
@@ -359,90 +356,6 @@ function Metric({
         {value}
       </div>
       {hint && <div className="mt-0.5 text-xs text-slate-500">{hint}</div>}
-    </div>
-  );
-}
-
-/**
- * Click-toggle popover with the metric's definition, formula, and reading
- * guide. Closes on outside click or Escape.
- *
- * Implementation notes: native <button> handles Enter/Space activation; the
- * only manually wired keyboard behavior is Escape-to-close, which isn't
- * focus-management — it's a single global listener while open. Hover is
- * deliberately NOT used to toggle: formulas and interpretation paragraphs
- * are too long for transient tooltips, and hover is inaccessible on touch.
- */
-function MetricInfoButton({
-  label,
-  explainer,
-}: {
-  label: string;
-  explainer: MetricExplainer;
-}): JSX.Element {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (
-        containerRef.current &&
-        !containerRef.current.contains(event.target as Node)
-      ) {
-        setOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  return (
-    <div ref={containerRef} className="relative inline-flex">
-      <button
-        type="button"
-        aria-label={`What is ${label}?`}
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-slate-300 text-[9px] font-bold normal-case text-slate-500 hover:border-slate-500 hover:text-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-slate-700"
-      >
-        ?
-      </button>
-      {open && (
-        <div
-          role="dialog"
-          aria-label={`${label} explainer`}
-          className="absolute left-0 top-full z-20 mt-1.5 w-72 max-w-[calc(100vw-2rem)] rounded-md border border-slate-200 bg-white p-3 text-left text-xs normal-case tracking-normal text-slate-700 shadow-lg"
-        >
-          <div className="text-sm font-semibold text-slate-900">{label}</div>
-          <p className="mt-1.5 leading-relaxed">{explainer.definition}</p>
-          {explainer.formula && (
-            <div className="mt-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Formula
-              </div>
-              <div className="mt-1 rounded bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-800">
-                {explainer.formula}
-              </div>
-            </div>
-          )}
-          {explainer.interpretation && (
-            <div className="mt-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Reading it
-              </div>
-              <p className="mt-1 leading-relaxed">{explainer.interpretation}</p>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

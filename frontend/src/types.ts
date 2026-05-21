@@ -80,7 +80,11 @@ export interface PositionAlphaRow {
   value_at_end: string;
   actual_pl: string;
   spy_counterfactual_pl: string;
+  qqq_counterfactual_pl: string;
+  policy_counterfactual_pl: string;
   alpha: string;
+  alpha_vs_qqq: string;
+  alpha_vs_policy: string;
   incomplete: boolean;
 }
 
@@ -88,7 +92,9 @@ export interface PositionAlphaTimePoint {
   date: string;
   portfolio_value: string;
   spy_counterfactual_value: string;
-  alpha: string;
+  qqq_counterfactual_value: string;
+  policy_counterfactual_value: string;
+  position_cashflow: string;
 }
 
 export interface PositionAlphaResult {
@@ -97,10 +103,48 @@ export interface PositionAlphaResult {
   rows: PositionAlphaRow[];
   total_actual_pl: string;
   total_spy_pl: string;
+  total_qqq_pl: string;
+  total_policy_pl: string;
   total_alpha: string;
+  total_alpha_vs_qqq: string;
+  total_alpha_vs_policy: string;
   series: PositionAlphaTimePoint[];
   v_start: string;
   v_end: string;
+  has_policy: boolean;
+}
+
+export interface CoachingTip {
+  category:
+    | "irr_below_bar"
+    | "concentration_human_capital"
+    | "thesis_stale"
+    | "multiples_detachment"
+    | "drawdown_audit"
+    | "concentration_limit";
+  severity: "info" | "warning" | "high";
+  ticker: string;
+  name: string | null;
+  headline: string;
+  detail: string;
+  suggested_action: string;
+  context: Record<string, string>;
+}
+
+export interface CoachingResult {
+  generated_at: string;
+  rubric_summary: string;
+  tips: CoachingTip[];
+  positions_evaluated: number;
+  rubric: {
+    irr_floor_pct: number;
+    min_hold_years_for_irr_check: number;
+    concentration_max_pct: number;
+    thesis_stale_days: number;
+    multiples_detachment_factor: number;
+    drawdown_audit_pct: number;
+    drawdown_audit_window_days: number;
+  };
 }
 
 export interface CashflowGroupOut {
@@ -401,4 +445,47 @@ export interface EarningsRow {
   days_until: number;
   held_qty: string | null;
   held_value: string | null;
+}
+
+// CIO advisor (LLM-powered chat + monthly brief)
+
+export interface ChatSessionOut {
+  session_id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_context_refresh_at: string | null;
+  turn_count: number;
+}
+
+export interface ChatTurnOut {
+  turn_id: number;
+  session_id: number;
+  role: "user" | "assistant" | "system";
+  content: string;
+  model_used: string | null;
+  created_at: string;
+}
+
+export interface ChatSessionCreateIn {
+  title?: string | null;
+}
+
+export interface ChatTurnIn {
+  content: string;
+}
+
+export interface ChatTurnPostResponse extends ChatTurnOut {
+  paired_turn_id: number;
+}
+
+export interface MonthlyBriefSummary {
+  brief_id: number;
+  period_yyyymm: string;
+  model_used: string | null;
+  generated_at: string;
+}
+
+export interface MonthlyBriefOut extends MonthlyBriefSummary {
+  html: string;
 }

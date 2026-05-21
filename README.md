@@ -57,6 +57,14 @@ your aggregator(s) and yfinance.
 - **Trade tags** — curated vocabulary (`panic_sold`, `held_too_long`,
   `thesis_validated`, etc.) attached to per-ticker holding windows for
   pattern mining.
+- **CIO coaching panel** (`/api/coaching/tips`) — deterministic
+  red-flag tips against the rubric in
+  [`CIO_CONTEXT.md`](CIO_CONTEXT.md): IRR below the 10–12% bar on
+  3+ year holds, concentration against human-capital buckets
+  (Big-Tech/Ads, Startup/VC), stale theses, multiples-detachment trim
+  candidates, drawdowns without thesis audits. Edit `CIO_CONTEXT.md`
+  to retrain the agent; numeric thresholds live in
+  `services/coaching.py`.
 - **Earnings calendar** — yfinance pull, color-banded by proximity, only
   for held tickers.
 
