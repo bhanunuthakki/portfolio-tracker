@@ -47,6 +47,26 @@ from portfolio_tracker.services.active_items import active_account_ids
 _VARIOUS_PROXY_DAYS: int = 180  # treat "Various" as ~6mo before disposed
 _SPY_SYMBOL: str = "SPY"
 
+# Tickers where "alpha vs SPY" is meaningless and would mislead.
+#
+# Two reasons a ticker lands here:
+#   1. The asset IS essentially SPY (VTI/VOO/SPY/IVV/RSP). Alpha vs
+#      itself is tautologically ~0; any non-zero number is data noise
+#      (synthetic-buy date mismatch on ACATS-in shares, tracking error,
+#      etc.) and would confuse the reader more than inform them.
+#   2. The asset is a cash equivalent (SGOV, money-market sweep). Its
+#      whole point is NOT moving with SPY; the comparison is a category
+#      error.
+#
+# Same set position_alpha.py uses to filter from per-position alpha
+# rows (kept in sync intentionally).
+_NON_ALPHA_TICKERS: frozenset[str] = frozenset(
+    {
+        "VTI", "VOO", "SPY", "IVV", "RSP",  # SPY-equivalents
+        "SGOV", "FDRXX", "SHV", "SPAXX", "VMFXX", "CUR:USD",  # Cash equiv
+    }
+)
+
 
 class TimelineRow(BaseModel):
     # Identity
@@ -498,16 +518,66 @@ def _matched_flow_open_position(
             sold_via_txns += amt
             spy_shares -= amt / spy_price_dec
 
+    # For SPY-equivalents and cash equivalents, alpha vs SPY is
+    # tautological / category-error. Return weighted-holding-days from
+    # the txn loop above but skip the SPY counterfactual calc — caller
+    # renders "—" instead of a misleading number.
+    if ticker.upper() in _NON_ALPHA_TICKERS:
+        weighted_holding_days = 0
+        weighted_entry_date: date | None = None
+        if weighted_denom > 0:
+            avg_days = int(round(float(weighted_numer / weighted_denom)))
+            weighted_holding_days = avg_days
+            weighted_entry_date = today - timedelta(days=avg_days)
+        return _MatchedFlowResult(
+            spy_counterfactual_pl=None,
+            alpha_pl=None,
+            weighted_entry_date=weighted_entry_date,
+            weighted_holding_days=weighted_holding_days,
+            bought_via_txns=bought_via_txns,
+            sold_via_txns=sold_via_txns,
+            used_synthetic_buy=False,
+        )
+
+    # Synthetic ACATS-in handling. The original first-txn-date anchor
+    # systematically understated the SPY counterfactual for shares
+    # transferred in from another broker, because those shares were
+    # bought BEFORE the txn log starts. The earliest *snapshot* date for
+    # this ticker is a closer lower bound: we know the user held the
+    # position by that date, even if we don't know when they actually
+    # bought. For genuine ACATS-in, this anchor sits months/years before
+    # the first txn and gives the synthetic SPY share count enough room
+    # to capture the appreciation. For positions whose history is fully
+    # in the txn log, snapshot date ≈ first txn date, so this is a
+    # silent improvement on the previous behavior.
+    earliest_snapshot_date = session.execute(
+        select(func.min(HoldingSnapshot.snapshot_date))
+        .join(Security, Security.security_id == HoldingSnapshot.security_id)
+        .where(HoldingSnapshot.account_id.in_(account_ids))
+        .where(func.upper(Security.ticker) == ticker.upper())
+        .where(HoldingSnapshot.quantity > 0)
+    ).scalar_one_or_none()
+
     net_txn_deployed = bought_via_txns - sold_via_txns
     used_synthetic_buy = False
-    # If overrides indicate more capital deployed than our txn log
-    # captures (classic ACATS-in case where shares arrived without a
-    # buy txn), fold the delta in at the earliest known activity date.
-    # Falls back to first_buy_fallback (= 1y ago in the original code)
-    # when there's no activity at all.
-    if effective_cost > net_txn_deployed:
-        delta = effective_cost - net_txn_deployed
-        synth_date = earliest_activity or first_buy_fallback
+    # Only fire synthetic when `effective_cost > bought_via_txns` —
+    # which captures genuine ACATS-in (more capital paid than buys we
+    # have records for). If the user actively traded a position and the
+    # remaining cost basis happens to be smaller than net_deployed
+    # because they sold some at a profit, that's NOT ACATS-in and
+    # shouldn't trigger a synthetic buy.
+    if effective_cost > bought_via_txns:
+        delta = effective_cost - max(net_txn_deployed, Decimal(0))
+        # Pick the earliest of: snapshot first-seen, txn first-seen,
+        # caller's fallback. Earlier = more time for SPY to appreciate
+        # in the counterfactual = closer to reality for ACATS-in shares
+        # the user actually held for a long time.
+        candidates = [
+            d
+            for d in (earliest_snapshot_date, earliest_activity, first_buy_fallback)
+            if d is not None
+        ]
+        synth_date = min(candidates) if candidates else None
         if synth_date is not None:
             synth_spy_price = spy.price_on(synth_date)
             if synth_spy_price and synth_spy_price > 0:
