@@ -21,6 +21,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -634,3 +635,100 @@ class TaxFormRetirementDistribution(Base):
     distribution_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
     payer: Mapped[str | None] = mapped_column(String(128), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# CIO advisor — chat threads + monthly briefs (LLM-generated)
+# ---------------------------------------------------------------------------
+
+
+class ChatSession(Base):
+    """A conversation thread with the CIO advisor.
+
+    Sessions are per-conversation; a "facts snapshot" is captured on the
+    first turn (portfolio holdings, decision log, deterministic coaching
+    flags) and re-attached when the session goes stale (> 24h) or the
+    user types `/refresh`. The snapshot itself isn't stored; it's
+    re-computed from current state when needed and prepended to the
+    Claude prompt.
+
+    `last_context_refresh_at` lets the advisor service decide whether the
+    next turn needs a fresh facts block. Cheaper than re-bundling on
+    every turn while keeping conversations from going completely stale.
+    """
+
+    __tablename__ = "chat_sessions"
+
+    session_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    # NULL until the first turn lands. Updated whenever a fresh facts
+    # block gets prepended to a turn.
+    last_context_refresh_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ChatTurn(Base):
+    """A single user message or assistant response in a chat session.
+
+    Roles: 'user' for user messages, 'assistant' for Claude responses.
+    'system' rows are reserved for the facts-block prefix attached to the
+    first turn of a session (or on refresh); they're stored so the UI
+    can show "context refreshed at HH:MM" but are filtered out of the
+    visible transcript.
+
+    `model_used` is the Claude model name (e.g. claude-sonnet-4-6) so
+    we can grep the journal for which model wrote a particular answer.
+    """
+
+    __tablename__ = "chat_turns"
+    __table_args__ = (
+        Index("ix_chat_turns_session", "session_id", "turn_id"),
+    )
+
+    turn_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_sessions.session_id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    model_used: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class MonthlyBrief(Base):
+    """An LLM-generated monthly portfolio review (HTML).
+
+    One row per `YYYY-MM` period. Regeneration overwrites the existing
+    row for that period (per the design spec). The HTML is the full
+    rendered document — backend scaffold around the LLM-produced section
+    content.
+
+    `model_used` lets us see which model wrote a given month's brief;
+    if we upgrade to Opus 5 later we can re-run only the briefs that
+    were Sonnet-generated.
+    """
+
+    __tablename__ = "monthly_briefs"
+    __table_args__ = (
+        UniqueConstraint("period_yyyymm", name="uq_monthly_briefs_period"),
+    )
+
+    brief_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    period_yyyymm: Mapped[str] = mapped_column(String(7), nullable=False)
+    html: Mapped[str] = mapped_column(Text, nullable=False)
+    model_used: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

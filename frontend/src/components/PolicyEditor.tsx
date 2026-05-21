@@ -9,7 +9,6 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "@/components/ui";
-import type { PolicyWeightOut } from "@/types";
 
 interface Row {
   ticker: string;

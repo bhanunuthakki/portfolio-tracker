@@ -2,12 +2,23 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
+import { CIOChatCard } from "@/components/CIOChatCard";
 import { DecisionLogCard } from "@/components/DecisionLogCard";
+import { LatestBriefCard } from "@/components/LatestBriefCard";
 import { PositionAlphaChart } from "@/components/PositionAlphaChart";
 import type { BenchmarkKey } from "@/components/PositionAlphaChart";
 import { PositionAlphaTable } from "@/components/PositionAlphaTable";
 import { RiskMetricsCard } from "@/components/RiskMetricsCard";
-import { Card, ErrorBanner, Stat } from "@/components/ui";
+import { Card, ErrorBanner, InfoButton, Stat } from "@/components/ui";
+
+const PERFORMANCE_METHODOLOGY = {
+  definition:
+    "We use position-alpha (not Modified Dietz). Each ticker held on the window-start date anchors at qty × that day's close. The SPY/QQQ/Policy lines start with the same capital and dollar-match every in-window buy/sell at each event's benchmark close.",
+  formula:
+    "alpha = (V_end + sold − bought) − (V_end_bench + sold − bought) = V_end − V_end_bench",
+  interpretation:
+    "Dollars beat percentages here — contributions don't distort the comparison. Cash and SGOV are excluded by design (they're not active positions). Toggle 'Excl. broad-index ETFs' to view only active stock picks. Full methodology + known faults in PERFORMANCE_AUDIT.md in the repo.",
+};
 
 type RangePreset = "1M" | "3M" | "6M" | "YTD" | "1Y" | "2Y" | "MAX" | "CUSTOM";
 
@@ -153,9 +164,6 @@ export function Dashboard(): JSX.Element {
   const totalActualPl = positionAlpha.data
     ? parseFloat(positionAlpha.data.total_actual_pl)
     : null;
-  const totalSpyPl = positionAlpha.data
-    ? parseFloat(positionAlpha.data.total_spy_pl)
-    : null;
 
   return (
     <div className="space-y-6">
@@ -208,10 +216,14 @@ export function Dashboard(): JSX.Element {
 
       <Card>
         <header className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-          <h2 className="text-sm font-semibold text-slate-900 shrink-0">
+          <h2 className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-900 shrink-0">
             Performance vs benchmarks
+            <InfoButton
+              label="Performance methodology (position-alpha)"
+              explainer={PERFORMANCE_METHODOLOGY}
+            />
             {(excludeReserve || excludeIndexEtfs) && (
-              <span className="ml-2 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800 align-middle">
+              <span className="ml-1 rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-800 align-middle">
                 {excludeIndexEtfs ? "active picks only" : "ex-reserve"}
               </span>
             )}
@@ -390,10 +402,13 @@ export function Dashboard(): JSX.Element {
       <RiskMetricsCard
         startDate={params.startDate}
         endDate={params.endDate}
-        includeBackfill={params.includeBackfill}
         excludeIndexEtfs={excludeIndexEtfs}
         reserveAmount={reserveAmount}
       />
+
+      <CIOChatCard />
+
+      <LatestBriefCard />
 
       <DecisionLogCard />
     </div>

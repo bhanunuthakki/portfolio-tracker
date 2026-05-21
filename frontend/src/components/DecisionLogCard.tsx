@@ -6,10 +6,18 @@ import {
   Card,
   DangerLink,
   ErrorBanner,
+  InfoButton,
   PrimaryButton,
   SecondaryButton,
 } from "@/components/ui";
 import type { DecisionIn, DecisionOut } from "@/types";
+
+const DECISION_LOG_EXPLAINER = {
+  definition:
+    "A pre-trade journal: write the thesis BEFORE clicking buy/sell; attach the outcome later. The friction is the point — low-conviction ideas die at the form.",
+  interpretation:
+    "Action taxonomy: buy = new position; add = scale up existing; trim = scale down without exiting; sell = full exit; hold = explicit no-trade audit (recurring quarterly review). Confidence (low/medium/high) feeds future pattern mining. Invalidation triggers MUST be specific facts (KPI thresholds, margin breaks) — never 'stock fell'.",
+};
 
 /**
  * Pre-trade decision log.
@@ -37,8 +45,12 @@ export function DecisionLogCard(): JSX.Element {
     <Card>
       <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
         <div>
-          <h2 className="text-sm font-semibold text-slate-900">
+          <h2 className="inline-flex items-center gap-1.5 text-sm font-semibold text-slate-900">
             Pre-trade decision log
+            <InfoButton
+              label="Decision log methodology"
+              explainer={DECISION_LOG_EXPLAINER}
+            />
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
             Write the thesis BEFORE the trade. The friction is the feature.
