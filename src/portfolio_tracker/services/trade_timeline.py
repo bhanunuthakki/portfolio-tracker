@@ -56,10 +56,16 @@ class TimelineRow(BaseModel):
     description: str                    # display name (incl. option strings)
 
     # Dates
-    acquired_date: date | None          # actual or proxy
+    acquired_date: date | None          # first buy or 1099 acquired date
     disposed_date: date                 # disposal or today (for open)
     acquired_approx: bool               # True if Various/proxy
-    holding_days: int
+    holding_days: int                   # days from acquired_date to disposed
+    # Open positions: dollar-weighted-average days held across all buys
+    # (Σ buy_dollars × days_held_for_those_dollars / Σ buy_dollars).
+    # Closed-lot rows have no meaningful weighted average; we set it equal
+    # to `holding_days` for those rows so downstream code can always read
+    # this field without a fallback.
+    weighted_avg_holding_days: int
 
     # Money (all Decimal, JSON-serialized as strings)
     quantity: Decimal | None
@@ -69,9 +75,15 @@ class TimelineRow(BaseModel):
     return_pct: float | None            # gain / cost_basis (None if cost=0)
 
     # SPY counterfactual
-    spy_start_price: Decimal | None
+    # For closed lots: cost × (SPY_end/SPY_start - 1) — single entry point.
+    # For open positions: matched-flow — each buy deploys at THAT day's SPY
+    # close, each sell redeems at THAT day's SPY close. ACATS-in cost
+    # (override beyond observed buys) deploys at first observed activity
+    # date. This avoids overstating the SPY counterfactual when capital
+    # was deployed in tranches over years.
+    spy_start_price: Decimal | None     # for open positions: first buy date proxy
     spy_end_price: Decimal | None
-    spy_return_pct: float | None
+    spy_return_pct: float | None        # SPY's own return over the window
     spy_counterfactual_dollars: Decimal | None
     alpha_dollars: Decimal | None       # gain - spy_counterfactual
 
@@ -218,6 +230,8 @@ def _closed_lot_rows(
                 disposed_date=lot.disposed_date,
                 acquired_approx=acquired_approx,
                 holding_days=holding_days,
+                # 1099-B lots are single-entry; weighted avg = total hold.
+                weighted_avg_holding_days=holding_days,
                 quantity=lot.quantity,
                 proceeds=lot.proceeds or Decimal("0"),
                 cost_basis=cost_basis,
@@ -312,6 +326,8 @@ def _open_position_rows(
 
     today = date.today()
     out: list[TimelineRow] = []
+    accts_frozen = frozenset(active_accts)
+    spy_end = spy.price_on(today)
     for ticker, agg in by_ticker.items():
         if agg["qty"] == 0 or agg["value"] == 0:
             continue
@@ -331,17 +347,25 @@ def _open_position_rows(
         first_buy = first_buys.get(ticker) or (today - timedelta(days=365))
         holding_days = (today - first_buy).days
 
-        spy_start = spy.price_on(first_buy)
-        spy_end = spy.price_on(today)
-        spy_return_pct: float | None = None
-        spy_counterfactual: Decimal | None = None
-        alpha: Decimal | None = None
-        if spy_start and spy_end and spy_start > 0 and cost > 0:
-            spy_return_pct = float(spy_end / spy_start) - 1.0
-            spy_counterfactual = cost * (
-                Decimal(str(spy_end)) / Decimal(str(spy_start)) - Decimal("1")
-            )
-            alpha = unrealized - spy_counterfactual
+        # Matched-flow SPY counterfactual — fixes the prior "single entry
+        # point at first-buy date" bug that overstated SPY return on
+        # positions accumulated in tranches.
+        mf = _matched_flow_open_position(
+            session=session,
+            account_ids=accts_frozen,
+            ticker=ticker,
+            effective_cost=cost,
+            current_value=value,
+            spy=spy,
+            today=today,
+            first_buy_fallback=first_buy,
+        )
+        spy_start = spy.price_on(first_buy)  # informational only
+        spy_return_pct: float | None = (
+            float(spy_end / spy_start) - 1.0
+            if spy_start and spy_end and spy_start > 0
+            else None
+        )
 
         out.append(
             TimelineRow(
@@ -351,8 +375,9 @@ def _open_position_rows(
                 description=agg["name"] or ticker,
                 acquired_date=first_buy,
                 disposed_date=today,
-                acquired_approx=ticker not in first_buys,
+                acquired_approx=ticker not in first_buys or mf.used_synthetic_buy,
                 holding_days=holding_days,
+                weighted_avg_holding_days=mf.weighted_holding_days,
                 quantity=agg["qty"],
                 proceeds=value,
                 cost_basis=cost,
@@ -361,8 +386,8 @@ def _open_position_rows(
                 spy_start_price=spy_start,
                 spy_end_price=spy_end,
                 spy_return_pct=spy_return_pct,
-                spy_counterfactual_dollars=spy_counterfactual,
-                alpha_dollars=alpha,
+                spy_counterfactual_dollars=mf.spy_counterfactual_pl,
+                alpha_dollars=mf.alpha_pl,
                 source="broker",
                 broker=None,
                 tax_year=None,
@@ -370,6 +395,161 @@ def _open_position_rows(
             )
         )
     return out
+
+
+@dataclass
+class _MatchedFlowResult:
+    """Output of `_matched_flow_open_position`. All money in dollars.
+
+    `spy_counterfactual_pl` is the SPY P&L if the same cash flows had
+    been invested in SPY (V_end_spy minus deployed capital). `alpha_pl`
+    is the position's realized P&L minus that — positive means the
+    position outperformed an equivalent SPY allocation with the same
+    buy/sell timing. `weighted_entry_date` and `weighted_holding_days`
+    summarize when capital was actually deployed (dollar-weighted),
+    fixing the old "first buy date" overstatement of SPY counterfactual.
+    """
+    spy_counterfactual_pl: Decimal | None
+    alpha_pl: Decimal | None
+    weighted_entry_date: date | None
+    weighted_holding_days: int
+    # Inputs we recovered along the way — exposed so the caller can
+    # populate the row's display fields without re-querying.
+    bought_via_txns: Decimal
+    sold_via_txns: Decimal
+    used_synthetic_buy: bool  # True if effective_cost > net_txn_deployed
+
+
+def _matched_flow_open_position(
+    session: Session,
+    account_ids: frozenset[int],
+    ticker: str,
+    effective_cost: Decimal,
+    current_value: Decimal,
+    spy: _SpyLookup,
+    today: date,
+    first_buy_fallback: date | None,
+) -> _MatchedFlowResult:
+    """Compute matched-flow SPY counterfactual + alpha for a currently
+    open position.
+
+    Methodology mirrors `services/position_alpha.py` (the canonical
+    matched-flow calculator on the Dashboard) but applied lifetime-to-
+    date for a single ticker:
+
+      * For each historical BUY: deploy `buy_$` into SPY at THAT day's
+        SPY close. SPY share count goes up by `buy_$ / spy_close[d]`.
+      * For each historical SELL: redeem `sell_$` from SPY at THAT
+        day's SPY close. SPY share count goes down by `sell_$ / spy_close[d]`.
+      * V_end_spy = remaining_spy_shares × spy_close[today].
+      * spy_counterfactual_pl = V_end_spy − effective_cost.
+      * alpha = (current_value − effective_cost) − spy_counterfactual_pl
+        = current_value − V_end_spy − (effective_cost - effective_cost)
+        = current_value − (V_end_spy + (effective_cost − net_deployed)).
+        Simplified when ACATS-in synthetic buy fills the gap: alpha is
+        the standard `realized_gain − spy_counterfactual_pl`.
+
+    **ACATS-in handling.** When `effective_cost > bought - sold` (e.g.
+    inferred_acats override on transferred-in shares we have no buy
+    record for), the missing capital gets a single synthetic SPY buy at
+    the position's first observed activity date for the delta. That's
+    an approximation — we don't know the actual ACATS source-broker
+    purchase dates — but it's directionally correct and surfaced via
+    `used_synthetic_buy=True` so the row can be flagged.
+
+    Returns the components; caller assembles the TimelineRow.
+    """
+    tx_rows = session.execute(
+        select(
+            InvestmentTransaction.date,
+            InvestmentTransaction.type,
+            InvestmentTransaction.amount,
+        )
+        .join(Security, Security.security_id == InvestmentTransaction.security_id)
+        .where(InvestmentTransaction.account_id.in_(account_ids))
+        .where(func.upper(Security.ticker) == ticker.upper())
+        .where(InvestmentTransaction.type.in_(["buy", "sell"]))
+        .order_by(InvestmentTransaction.date)
+    ).all()
+
+    spy_shares = Decimal(0)
+    bought_via_txns = Decimal(0)
+    sold_via_txns = Decimal(0)
+    weighted_numer = Decimal(0)
+    weighted_denom = Decimal(0)
+    earliest_activity: date | None = None
+    for tx_date, tx_type, amount in tx_rows:
+        if amount is None:
+            continue
+        if earliest_activity is None or tx_date < earliest_activity:
+            earliest_activity = tx_date
+        spy_price = spy.price_on(tx_date)
+        if not spy_price or spy_price <= 0:
+            continue
+        spy_price_dec = Decimal(str(spy_price))
+        amt = abs(Decimal(amount))
+        if tx_type == "buy":
+            bought_via_txns += amt
+            spy_shares += amt / spy_price_dec
+            days_held = max((today - tx_date).days, 0)
+            weighted_numer += amt * Decimal(days_held)
+            weighted_denom += amt
+        else:  # sell
+            sold_via_txns += amt
+            spy_shares -= amt / spy_price_dec
+
+    net_txn_deployed = bought_via_txns - sold_via_txns
+    used_synthetic_buy = False
+    # If overrides indicate more capital deployed than our txn log
+    # captures (classic ACATS-in case where shares arrived without a
+    # buy txn), fold the delta in at the earliest known activity date.
+    # Falls back to first_buy_fallback (= 1y ago in the original code)
+    # when there's no activity at all.
+    if effective_cost > net_txn_deployed:
+        delta = effective_cost - net_txn_deployed
+        synth_date = earliest_activity or first_buy_fallback
+        if synth_date is not None:
+            synth_spy_price = spy.price_on(synth_date)
+            if synth_spy_price and synth_spy_price > 0:
+                spy_shares += delta / Decimal(str(synth_spy_price))
+                days_held = max((today - synth_date).days, 0)
+                weighted_numer += delta * Decimal(days_held)
+                weighted_denom += delta
+                used_synthetic_buy = True
+
+    spy_end_price = spy.price_on(today)
+    if not spy_end_price or spy_end_price <= 0 or effective_cost <= 0:
+        return _MatchedFlowResult(
+            spy_counterfactual_pl=None,
+            alpha_pl=None,
+            weighted_entry_date=None,
+            weighted_holding_days=0,
+            bought_via_txns=bought_via_txns,
+            sold_via_txns=sold_via_txns,
+            used_synthetic_buy=used_synthetic_buy,
+        )
+
+    v_end_spy = spy_shares * Decimal(str(spy_end_price))
+    spy_counterfactual_pl = v_end_spy - effective_cost
+    realized_gain = current_value - effective_cost
+    alpha_pl = realized_gain - spy_counterfactual_pl
+
+    weighted_holding_days = 0
+    weighted_entry_date: date | None = None
+    if weighted_denom > 0:
+        avg_days = int(round(float(weighted_numer / weighted_denom)))
+        weighted_holding_days = avg_days
+        weighted_entry_date = today - timedelta(days=avg_days)
+
+    return _MatchedFlowResult(
+        spy_counterfactual_pl=spy_counterfactual_pl,
+        alpha_pl=alpha_pl,
+        weighted_entry_date=weighted_entry_date,
+        weighted_holding_days=weighted_holding_days,
+        bought_via_txns=bought_via_txns,
+        sold_via_txns=sold_via_txns,
+        used_synthetic_buy=used_synthetic_buy,
+    )
 
 
 def _first_buy_per_ticker(

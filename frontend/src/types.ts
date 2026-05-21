@@ -335,6 +335,9 @@ export interface TimelineRow {
   disposed_date: string;
   acquired_approx: boolean;
   holding_days: number;
+  // Open rows: dollar-weighted-average days held across all buys.
+  // Closed rows: equal to holding_days (single-lot data has no weighting).
+  weighted_avg_holding_days: number;
   quantity: string | null;
   proceeds: string;
   cost_basis: string;
