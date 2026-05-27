@@ -402,6 +402,7 @@ function CostBasisEditor({
       ? String(Math.round(currentCost))
       : "",
   );
+  const [acquiredAt, setAcquiredAt] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -412,11 +413,13 @@ function CostBasisEditor({
         security_id: securityId,
         total_cost_basis: totalCost,
         notes: notes.trim() || null,
+        acquired_at: acquiredAt.trim() || null,
       }),
     onSuccess: () => {
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
       queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["trade-timeline"] });
       queryClient.invalidateQueries({ queryKey: ["data-quality"] });
       onDone();
     },
@@ -473,6 +476,19 @@ function CostBasisEditor({
             placeholder="e.g. 12500"
             autoFocus
             className="mt-1 w-36 rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
+          />
+        </label>
+        <label
+          className="flex flex-col text-xs text-slate-600"
+          title="Date the shares were originally acquired (e.g., ACATS source-broker purchase date). Used as the SPY counterfactual anchor in Trade Timeline + Position Alpha. Leave blank for unknown."
+        >
+          Acquired on (optional)
+          <input
+            type="date"
+            value={acquiredAt}
+            onChange={(e) => setAcquiredAt(e.target.value)}
+            placeholder="blank = unknown (uses earliest snapshot date as proxy)"
+            className="mt-1 w-40 rounded border border-slate-300 px-2 py-1 text-sm tabular-nums"
           />
         </label>
         <label className="flex flex-col text-xs text-slate-600 flex-1 min-w-[160px]">

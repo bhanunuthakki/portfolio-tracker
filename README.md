@@ -260,7 +260,13 @@ Some institutions don't expose `cost_basis` (notably SoFi via Plaid). The
 **Holdings** page surfaces these as data-quality findings with inline forms:
 
 - **Cost basis override** — total dollars paid (price × shares + fees) for
-  an `(account, security)` pair.
+  an `(account, security)` pair. Optional `acquired_at` records the date
+  the shares were originally bought (useful for ACATS-in lots that
+  predate the receiving broker's snapshot history) — Trade Timeline and
+  Position Alpha use it as the SPY counterfactual anchor instead of the
+  receiving broker's first-snapshot proxy. Leave blank if unknown; the
+  fallback (`min(earliest_snapshot, earliest_activity)`) preserves the
+  prior behavior.
 - **Ticker override** — for un-tickered securities (mutual funds with
   internal codes, foreign listings), enter a yfinance-compatible symbol,
   re-run `jobs.prices`.

@@ -68,6 +68,7 @@ def list_cost_basis_overrides(
             total_cost_basis=ov.total_cost_basis,
             notes=ov.notes,
             source=ov.source,
+            acquired_at=ov.acquired_at,
             updated_at=ov.updated_at,
         )
         for ov, a, s in rows
@@ -96,6 +97,7 @@ def upsert_cost_basis_override(
             total_cost_basis=body.total_cost_basis,
             notes=body.notes,
             source="manual",
+            acquired_at=body.acquired_at,
         )
         session.add(existing)
     else:
@@ -105,6 +107,7 @@ def upsert_cost_basis_override(
         existing.total_cost_basis = body.total_cost_basis
         existing.notes = body.notes
         existing.source = "manual"
+        existing.acquired_at = body.acquired_at
     session.commit()
     session.refresh(existing)
     return CostBasisOverrideOut(
@@ -116,6 +119,7 @@ def upsert_cost_basis_override(
         total_cost_basis=existing.total_cost_basis,
         notes=existing.notes,
         source=existing.source,
+        acquired_at=existing.acquired_at,
         updated_at=existing.updated_at,
     )
 
