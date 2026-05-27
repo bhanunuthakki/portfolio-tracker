@@ -343,22 +343,25 @@ action vs which are noise?
 
 def list_sessions(session: Session) -> list[ChatSessionOut]:
     rows = session.execute(
-        select(ChatSession).order_by(ChatSession.updated_at.desc())
-    ).scalars().all()
-    out: list[ChatSessionOut] = []
-    for s in rows:
-        turn_count = session.execute(
-            select(ChatTurn).where(ChatTurn.session_id == s.session_id)
-        ).all()
-        out.append(ChatSessionOut(
+        select(
+            ChatSession,
+            func.count(ChatTurn.turn_id).label("turn_count"),
+        )
+        .outerjoin(ChatTurn, ChatTurn.session_id == ChatSession.session_id)
+        .group_by(ChatSession.session_id)
+        .order_by(ChatSession.updated_at.desc())
+    ).all()
+    return [
+        ChatSessionOut(
             session_id=s.session_id,
             title=s.title,
             created_at=s.created_at,
             updated_at=s.updated_at,
             last_context_refresh_at=s.last_context_refresh_at,
-            turn_count=len(turn_count),
-        ))
-    return out
+            turn_count=tc,
+        )
+        for s, tc in rows
+    ]
 
 
 def create_session(session: Session, title: str | None) -> ChatSessionOut:
