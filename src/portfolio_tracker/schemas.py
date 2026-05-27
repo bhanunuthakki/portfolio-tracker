@@ -337,6 +337,56 @@ class PolicyOut(BaseModel):
     is_balanced: bool
 
 
+class HumanCapitalBucketWeightIn(BaseModel):
+    """One bucket assignment for a ticker.
+
+    `weight_pct` is 0–100 (matches the DB column). A ticker can carry
+    multiple rows (one per bucket); the per-ticker upsert call replaces
+    all existing bucket rows for that ticker with the supplied list.
+    """
+
+    bucket: str
+    weight_pct: Decimal
+    notes: str | None = None
+
+
+class HumanCapitalOverlapIn(BaseModel):
+    """PUT body: full set of (bucket, weight) rows for one ticker.
+
+    PUT semantics — supplying an empty `buckets` list is the same as
+    DELETE for that ticker (all rows removed). Use the DELETE endpoint
+    when the intent is clearer that way.
+    """
+
+    ticker: str
+    buckets: list[HumanCapitalBucketWeightIn]
+
+
+class HumanCapitalBucketWeightOut(BaseModel):
+    bucket: str
+    weight_pct: Decimal
+    notes: str | None
+    updated_at: datetime
+
+
+class HumanCapitalOverlapOut(BaseModel):
+    """One row per ticker; `buckets` carries the per-bucket detail."""
+
+    ticker: str
+    buckets: list[HumanCapitalBucketWeightOut]
+
+
+class HumanCapitalOverlapsOut(BaseModel):
+    """Flat list of all (ticker, bucket, weight) rows + the active caps.
+
+    The caps come from `services/coaching.py:_BUCKET_CAPS` so the editor
+    can render the cap inline next to each bucket without a second fetch.
+    """
+
+    overlaps: list[HumanCapitalOverlapOut]
+    bucket_caps_pct: dict[str, Decimal]
+
+
 class JobRunOut(BaseModel):
     job: str
     status: str

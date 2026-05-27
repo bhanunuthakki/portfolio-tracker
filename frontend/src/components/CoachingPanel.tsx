@@ -125,6 +125,7 @@ export function CoachingPanel(): JSX.Element {
 
 const CATEGORY_ORDER: CoachingTip["category"][] = [
   "drawdown_audit",
+  "concentration_human_capital_aggregate",
   "concentration_human_capital",
   "irr_below_bar",
   "multiples_detachment",
@@ -134,6 +135,8 @@ const CATEGORY_ORDER: CoachingTip["category"][] = [
 
 const CATEGORY_LABELS: Record<CoachingTip["category"], string> = {
   drawdown_audit: "Drawdown requires audit",
+  concentration_human_capital_aggregate:
+    "Aggregate human-capital bucket over cap",
   concentration_human_capital: "Concentration vs. human capital",
   irr_below_bar: "IRR below the 10–12 % bar",
   multiples_detachment: "Multiples have detached — trim candidates",
@@ -144,8 +147,10 @@ const CATEGORY_LABELS: Record<CoachingTip["category"], string> = {
 const CATEGORY_DESCRIPTIONS: Record<CoachingTip["category"], string> = {
   drawdown_audit:
     "Strategic Directive 3: a macro drawdown is a trigger for a micro-economic audit, not an automatic hold. Liquidate if the drawdown coincides with a broken thesis.",
+  concentration_human_capital_aggregate:
+    "Portfolio-wide weighted exposure (Σ position × bucket weight) to one human-capital bucket exceeds the bucket-level cap. Catches the 'twenty small ad-tech positions' case the single-name check misses. Edit bucket weights on the Accounts page; edit caps in services/coaching.py.",
   concentration_human_capital:
-    "Holding too much of an employer-adjacent name stacks portfolio risk on top of salary risk. Trim toward target weight and redeploy elsewhere when multiples compress.",
+    "Single position over the per-name cap AND carrying weight in a human-capital bucket. Stacks portfolio risk on top of salary risk.",
   irr_below_bar:
     "Non-index positions need to clear ~10–12 %/yr to justify the tax + concentration cost over SPY. Below that, re-underwrite or rotate.",
   multiples_detachment:
