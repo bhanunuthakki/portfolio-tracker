@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 
 import { api } from "@/api/client";
+import { HumanCapitalEditor } from "@/components/HumanCapitalEditor";
 import { PolicyEditor } from "@/components/PolicyEditor";
 import { SnapTradeButtons } from "@/components/SnapTradeButtons";
 import {
@@ -205,6 +206,8 @@ export function Accounts(): JSX.Element {
       )}
 
       <PolicyEditor />
+
+      <HumanCapitalEditor />
     </div>
   );
 }

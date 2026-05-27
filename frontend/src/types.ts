@@ -118,6 +118,7 @@ export interface CoachingTip {
   category:
     | "irr_below_bar"
     | "concentration_human_capital"
+    | "concentration_human_capital_aggregate"
     | "thesis_stale"
     | "multiples_detachment"
     | "drawdown_audit"
@@ -144,7 +145,36 @@ export interface CoachingResult {
     multiples_detachment_factor: number;
     drawdown_audit_pct: number;
     drawdown_audit_window_days: number;
+    bucket_caps_pct: Record<string, number>;
   };
+}
+
+export interface HumanCapitalBucketWeightOut {
+  bucket: string;
+  weight_pct: string;
+  notes: string | null;
+  updated_at: string;
+}
+
+export interface HumanCapitalOverlapOut {
+  ticker: string;
+  buckets: HumanCapitalBucketWeightOut[];
+}
+
+export interface HumanCapitalOverlapsOut {
+  overlaps: HumanCapitalOverlapOut[];
+  bucket_caps_pct: Record<string, string>;
+}
+
+export interface HumanCapitalBucketWeightIn {
+  bucket: string;
+  weight_pct: number;
+  notes?: string | null;
+}
+
+export interface HumanCapitalOverlapIn {
+  ticker: string;
+  buckets: HumanCapitalBucketWeightIn[];
 }
 
 export interface CashflowGroupOut {

@@ -27,8 +27,10 @@ export default defineConfig({
     proxy: {
       "/api": {
         // Proxy to 127.0.0.1 explicitly so we never depend on IPv6/IPv4
-        // resolution when forwarding to FastAPI.
-        target: "http://127.0.0.1:8000",
+        // resolution when forwarding to FastAPI. Honor BACKEND_TARGET so
+        // parallel worktrees / preview MCP can point at a custom uvicorn
+        // when 8000 is occupied by another worktree's API.
+        target: process.env.BACKEND_TARGET || "http://127.0.0.1:8000",
         changeOrigin: true,
       },
     },
