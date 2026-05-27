@@ -358,6 +358,36 @@ class PolicyWeight(Base):
     )
 
 
+class HumanCapitalOverlap(Base):
+    """How strongly a ticker's primary tailwind overlaps a human-capital bucket.
+
+    The coaching engine fires `concentration_human_capital_aggregate` when the
+    portfolio's total exposure to any one bucket exceeds that bucket's cap
+    (per-bucket caps live in `services/coaching.py`). A name can sit in
+    multiple buckets — GOOGL is ~80% Big-Tech/Ads + ~20% AI-Infra — so the
+    schema is one row per (ticker, bucket) and `weight_pct` is 0–100.
+
+    Replaces the prior hard-coded frozensets in `services/coaching.py` —
+    buckets are now extensible from the UI + DB without a code change.
+    """
+
+    __tablename__ = "human_capital_overlap"
+
+    ticker: Mapped[str] = mapped_column(String(16), primary_key=True)
+    bucket: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # 0–100 (percent). A name's row weights need not sum to 100 — a name with
+    # only a 60% overlap to one bucket and no other entry just contributes
+    # 0.6× its position value to that bucket's aggregate.
+    weight_pct: Mapped[Decimal] = mapped_column(Numeric(6, 3), nullable=False)
+    notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class TransactionOverride(Base):
     """User-supplied classification override for a single investment_transactions row.
 

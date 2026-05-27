@@ -11,6 +11,9 @@ import type {
   DataQualityReportOut,
   ExchangePublicTokenOut,
   HoldingOut,
+  HumanCapitalOverlapIn,
+  HumanCapitalOverlapOut,
+  HumanCapitalOverlapsOut,
   InvestmentTransactionOut,
   ItemOut,
   LinkTokenOut,
@@ -326,6 +329,24 @@ export const api = {
   },
 
   coachingTips: (): Promise<CoachingResult> => request("/api/coaching/tips"),
+
+  // ---- Human-capital overlap buckets ----------------------------------
+
+  listHumanCapitalOverlaps: (): Promise<HumanCapitalOverlapsOut> =>
+    request("/api/human-capital/overlaps"),
+
+  upsertHumanCapitalOverlap: (
+    body: HumanCapitalOverlapIn,
+  ): Promise<HumanCapitalOverlapOut> =>
+    request("/api/human-capital/overlaps", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  deleteHumanCapitalOverlap: (ticker: string): Promise<void> =>
+    request(`/api/human-capital/overlaps/${encodeURIComponent(ticker)}`, {
+      method: "DELETE",
+    }),
 
   // CIO advisor (LLM-powered chat + monthly brief)
 

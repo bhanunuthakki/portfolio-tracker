@@ -12,8 +12,14 @@ Categories of tips
   return below ``IRR_FLOOR_PCT``. Failing the 10–12% non-index bar.
 
 * ``concentration_human_capital`` — single position > ``CONCENTRATION_MAX_PCT``
-  of portfolio AND the ticker is in the Big-Tech/Ads (Meta) or Startup/VC
-  (Plaid) overlap bucket. These positions magnify household income risk.
+  of portfolio AND the ticker carries non-zero weight in any human-capital
+  bucket (per the ``human_capital_overlap`` table). Secondary check —
+  catches the "one fat position is also employer-correlated" case.
+
+* ``concentration_human_capital_aggregate`` — portfolio-wide weighted
+  exposure to a single bucket exceeds that bucket's per-bucket cap (see
+  ``_BUCKET_CAPS``). Catches the "twenty small ad-tech positions" case
+  the single-name check missed.
 
 * ``concentration_limit`` — single position > ``CONCENTRATION_MAX_PCT``
   even outside human-capital overlap. Surfaced separately so it sorts
@@ -35,6 +41,10 @@ Categories of tips
 Index/ETF positions (VTI/VOO/SPY/IVV/RSP/QQQ) are excluded — they're
 benchmark proxies, not active picks, and the rubric only governs active
 non-index holdings. SGOV and other cash equivalents are also excluded.
+
+Human-capital bucket assignments live in the ``human_capital_overlap``
+table (seeded by migration 0015). Edit via /api/human-capital/overlaps
+or the Accounts page editor.
 """
 
 from __future__ import annotations
@@ -51,6 +61,7 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.models import (
     CostBasisOverride,
     HoldingSnapshot,
+    HumanCapitalOverlap,
     InvestmentTransaction,
     InvestmentTransactionType,
     Security,
@@ -74,35 +85,32 @@ DRAWDOWN_AUDIT_WINDOW_DAYS: int = 90
 # noise (e.g. a $200 starter position doesn't need a coaching ping).
 _MIN_POSITION_VALUE: Decimal = Decimal("2500")
 
-# Tickers whose primary revenue/end-market overlaps the user's employer
-# (Meta — Ads / Big-Tech / consumer Internet). Holding these correlates
-# household income with portfolio income, which violates the human-
-# capital constraint.
-_BIG_TECH_ADS_OVERLAP: frozenset[str] = frozenset(
-    {
-        "META",
-        "GOOG",
-        "GOOGL",
-        "AMZN",
-        "MSFT",
-        "AAPL",
-        "NFLX",
-        "SNAP",
-        "PINS",
-        "TTD",
-        "RDDT",
-        "APP",
-        "ROKU",
-    }
-)
+# Per-bucket portfolio-wide exposure caps. Aggregate weighted exposure to
+# a bucket exceeding its cap fires `concentration_human_capital_aggregate`.
+# Keys here are the bucket names stored in `human_capital_overlap.bucket`;
+# a bucket without a cap entry is still tracked in the DB but does not
+# generate aggregate tips (useful for "watch-only" categorization).
+#
+# Caps reflect the user's CIO_CONTEXT.md philosophy:
+#   * big_tech_ads — tightest cap (15%); stacked on top of Meta salary.
+#   * startup_vc_fintech — tighter still (10%); ZIRP/VC-cycle correlated
+#     with spouse income.
+#   * ai_infra — loose cap (25%); user is structurally bullish on AI per
+#     the Rational Bull thesis, so we tolerate more exposure here.
+_BUCKET_CAPS: dict[str, Decimal] = {
+    "big_tech_ads": Decimal("15"),
+    "startup_vc_fintech": Decimal("10"),
+    "ai_infra": Decimal("25"),
+}
 
-# Tickers/themes whose tailwinds correlate with the spouse's employer
-# (startup/VC ecosystem — fintech infra, recent IPOs of YC/VC names,
-# ZIRP-sensitive fintech). The list is intentionally narrow and curated;
-# add tickers via this file rather than the DB so it's reviewable.
-_STARTUP_VC_OVERLAP: frozenset[str] = frozenset(
-    {"COIN", "AFRM", "UPST", "HOOD", "SOFI", "MQ", "MNDY", "DDOG", "NET", "CRWD", "SNOW", "RBLX"}
-)
+# Friendly labels for tip headlines. Buckets not in this dict fall back to
+# the raw key — fine for non-rendered debug paths but worth adding here
+# when the bucket starts appearing in user-facing copy.
+_BUCKET_LABELS: dict[str, str] = {
+    "big_tech_ads": "Big Tech / Ads (Meta employer overlap)",
+    "startup_vc_fintech": "Startup / VC / Fintech (spouse employer overlap)",
+    "ai_infra": "AI infrastructure",
+}
 
 # Broad-market ETFs — never coached against (they're benchmarks).
 _INDEX_ETFS: frozenset[str] = frozenset(
@@ -116,6 +124,7 @@ _CASH_EQUIV: frozenset[str] = frozenset({"SGOV", "FDRXX", "SHV", "SPAXX", "CUR:U
 TipCategory = Literal[
     "irr_below_bar",
     "concentration_human_capital",
+    "concentration_human_capital_aggregate",
     "concentration_limit",
     "thesis_stale",
     "multiples_detachment",
@@ -143,6 +152,11 @@ class CoachingRubric(BaseModel):
     multiples_detachment_factor: float
     drawdown_audit_pct: float
     drawdown_audit_window_days: int
+    # Portfolio-wide weighted-exposure caps per human-capital bucket
+    # (bucket-name → cap as percent). Mirrors `_BUCKET_CAPS` in this file
+    # so the frontend can render them next to the aggregate tip without
+    # re-reading CIO_CONTEXT.md.
+    bucket_caps_pct: dict[str, float]
 
 
 class CoachingResult(BaseModel):
@@ -201,6 +215,7 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
     portfolio_total = sum((p.value for p in positions.values()), Decimal(0))
     last_decisions_by_ticker = _last_decisions_by_ticker(session)
     last_trim_or_sell_by_ticker = _last_trim_or_sell_by_ticker(session)
+    bucket_weights_by_ticker = _bucket_weights_by_ticker(session)
     # Cross-project: the user maintains research theses in the companion
     # `earnings-summary` project. A position with a thesis there should
     # NOT trigger "has no thesis on file" — that's a false positive that
@@ -275,8 +290,20 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
         if portfolio_total > 0:
             weight_pct = (p.value / portfolio_total) * Decimal(100)
             if weight_pct > CONCENTRATION_MAX_PCT:
-                bucket = _human_capital_bucket(ticker)
-                if bucket is not None:
+                bucket_weights = bucket_weights_by_ticker.get(ticker, {})
+                # Single-name human-capital tip fires when the position is
+                # over cap AND carries non-zero weight in any human-capital
+                # bucket. With weighted buckets a name can be (say) 20%
+                # ai_infra without dominating — we still surface it because
+                # the position size itself is the issue here.
+                hc_buckets = [
+                    (b, w) for b, w in bucket_weights.items() if w > 0
+                ]
+                if hc_buckets:
+                    # Lead with the heaviest-weight bucket — that's the
+                    # narrative driver for "why this ticker is risky".
+                    top_bucket, top_weight = max(hc_buckets, key=lambda x: x[1])
+                    top_label = _BUCKET_LABELS.get(top_bucket, top_bucket)
                     tips.append(
                         CoachingTip(
                             category="concentration_human_capital",
@@ -285,7 +312,8 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                             name=p.name,
                             headline=(
                                 f"{ticker} is {weight_pct:.1f}% of portfolio "
-                                f"AND overlaps {bucket} (human-capital constraint)"
+                                f"AND overlaps {top_label} "
+                                f"({top_weight:.0f}% bucket weight)"
                             ),
                             detail=(
                                 f"Position value ${_int(p.value)} of "
@@ -297,12 +325,13 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                             suggested_action=(
                                 f"Trim toward ≤{CONCENTRATION_MAX_PCT}%. "
                                 "Fund SGOV reserve with proceeds; deploy "
-                                f"into a satellite uncorrelated to {bucket} "
+                                f"into a satellite uncorrelated to {top_label} "
                                 "when multiples compress."
                             ),
                             context={
                                 "weight_pct": f"{weight_pct:.2f}",
-                                "bucket": bucket,
+                                "bucket": top_bucket,
+                                "bucket_weight_pct": f"{top_weight:.2f}",
                                 "value": _int(p.value),
                                 "portfolio_total": _int(portfolio_total),
                             },
@@ -488,6 +517,22 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                         )
                     )
 
+    # ---- Aggregate human-capital bucket exposure -------------------------
+    # Single-name tips above catch the "one fat employer-correlated position"
+    # case. This pass catches the failure mode the prior binary check
+    # missed: many small positions whose combined exposure to one bucket
+    # exceeds the bucket-level cap. Index ETFs + cash equivalents are
+    # excluded from the numerator since they're benchmark/diversifier
+    # exposure, not active concentration.
+    if portfolio_total > 0:
+        tips.extend(
+            _aggregate_bucket_tips(
+                positions=positions,
+                bucket_weights_by_ticker=bucket_weights_by_ticker,
+                portfolio_total=portfolio_total,
+            )
+        )
+
     tips.sort(key=lambda t: (_severity_rank(t.severity), t.category, t.ticker))
 
     return CoachingResult(
@@ -643,13 +688,145 @@ def _last_trim_or_sell_by_ticker(session: Session) -> dict[str, date]:
     return out
 
 
-def _human_capital_bucket(ticker: str) -> str | None:
-    """Return the human-capital overlap bucket name (or None if uncorrelated)."""
-    if ticker in _BIG_TECH_ADS_OVERLAP:
-        return "Big Tech / Ads (Meta)"
-    if ticker in _STARTUP_VC_OVERLAP:
-        return "Startup / VC ecosystem"
-    return None
+def _bucket_weights_by_ticker(session: Session) -> dict[str, dict[str, Decimal]]:
+    """Return `{ticker: {bucket: weight_pct}}` from `human_capital_overlap`.
+
+    Weights are 0–100 (matching the DB column). Tickers absent from the
+    table return an empty inner dict via the caller's `.get(ticker, {})`
+    pattern — no human-capital exposure assumed for un-tagged names.
+    """
+    rows = session.execute(
+        select(
+            HumanCapitalOverlap.ticker,
+            HumanCapitalOverlap.bucket,
+            HumanCapitalOverlap.weight_pct,
+        )
+    ).all()
+    out: dict[str, dict[str, Decimal]] = {}
+    for ticker, bucket, weight in rows:
+        if not ticker or not bucket:
+            continue
+        key = ticker.upper()
+        bucket_map = out.setdefault(key, {})
+        bucket_map[bucket] = Decimal(weight)
+    return out
+
+
+def _bucket_weights_for_ticker(
+    ticker: str, session: Session
+) -> dict[str, Decimal]:
+    """Single-ticker convenience over `_bucket_weights_by_ticker`.
+
+    Kept for callers that need only one lookup; the full-portfolio path
+    uses the batch loader since it queries the table once per request.
+    """
+    rows = session.execute(
+        select(HumanCapitalOverlap.bucket, HumanCapitalOverlap.weight_pct).where(
+            HumanCapitalOverlap.ticker == ticker.upper()
+        )
+    ).all()
+    return {b: Decimal(w) for b, w in rows}
+
+
+def _aggregate_bucket_tips(
+    *,
+    positions: dict[str, _PositionState],
+    bucket_weights_by_ticker: dict[str, dict[str, Decimal]],
+    portfolio_total: Decimal,
+) -> list[CoachingTip]:
+    """Compute portfolio-wide bucket exposure and emit aggregate tips.
+
+    Exposure formula per bucket B:
+        exposure_pct(B) = Σ_t (position_value_t × weight_t(B) / 100)
+                       ÷ portfolio_total × 100
+    where `weight_t(B)` is the 0–100 entry from `human_capital_overlap`
+    for ticker `t` and bucket `B`. Index ETFs + cash equivalents stay
+    out of the numerator (their `bucket_weights_by_ticker` lookup is
+    empty by design — they're not in the seed).
+
+    A tip fires per bucket that (a) has a configured cap in
+    `_BUCKET_CAPS` and (b) exceeds it.
+    """
+    # Per-bucket: cumulative exposure dollars + contributing positions.
+    bucket_exposure: dict[str, Decimal] = {}
+    bucket_contribs: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
+    # (ticker, exposure_dollars, weight_pct) per contributor; sorted at the end.
+
+    for ticker, p in positions.items():
+        if p.ticker in _CASH_EQUIV or p.ticker in _INDEX_ETFS:
+            continue
+        if p.value <= 0:
+            continue
+        bw = bucket_weights_by_ticker.get(ticker)
+        if not bw:
+            continue
+        for bucket, weight in bw.items():
+            if weight <= 0:
+                continue
+            exposure = (p.value * weight) / Decimal(100)
+            bucket_exposure[bucket] = bucket_exposure.get(bucket, Decimal(0)) + exposure
+            bucket_contribs.setdefault(bucket, []).append((ticker, exposure, weight))
+
+    tips: list[CoachingTip] = []
+    for bucket, total_exposure in bucket_exposure.items():
+        cap = _BUCKET_CAPS.get(bucket)
+        if cap is None:
+            # Bucket exists in the data but isn't gated. Common when the
+            # user adds a "watch-only" categorization for context without
+            # wanting a coaching tip. Skip.
+            continue
+        exposure_pct = total_exposure / portfolio_total * Decimal(100)
+        if exposure_pct <= cap:
+            continue
+        label = _BUCKET_LABELS.get(bucket, bucket)
+        # Rank contributors by absolute exposure (biggest first), trim to
+        # the top names for the detail string.
+        ranked = sorted(
+            bucket_contribs[bucket], key=lambda x: x[1], reverse=True
+        )
+        contrib_strs = [
+            f"{t} ${_int(exp)} ({w:.0f}% bucket)"
+            for t, exp, w in ranked[:8]
+        ]
+        more = len(ranked) - 8
+        contrib_blob = ", ".join(contrib_strs)
+        if more > 0:
+            contrib_blob += f", +{more} more"
+        tips.append(
+            CoachingTip(
+                category="concentration_human_capital_aggregate",
+                severity="high",
+                ticker="—",
+                name=None,
+                headline=(
+                    f"{label}: {exposure_pct:.1f}% of portfolio "
+                    f"(cap {cap:.0f}%)"
+                ),
+                detail=(
+                    f"Total weighted exposure ${_int(total_exposure)} of "
+                    f"${_int(portfolio_total)} across "
+                    f"{len(ranked)} position(s): {contrib_blob}. "
+                    f"Each name's contribution is "
+                    f"position_value × bucket_weight, summed across the "
+                    f"book — small individual weights aggregate."
+                ),
+                suggested_action=(
+                    f"Trim the largest contributors to bring "
+                    f"{label} aggregate ≤{cap:.0f}%. Fund SGOV reserve "
+                    "with proceeds; redeploy into satellites uncorrelated "
+                    "to this bucket on the next macro compression."
+                ),
+                context={
+                    "bucket": bucket,
+                    "exposure_pct": f"{exposure_pct:.2f}",
+                    "cap_pct": f"{cap:.2f}",
+                    "exposure_total": _int(total_exposure),
+                    "portfolio_total": _int(portfolio_total),
+                    "contributor_count": str(len(ranked)),
+                },
+            )
+        )
+    return tips
 
 
 def _severity_rank(s: TipSeverity) -> int:
@@ -680,4 +857,5 @@ def _rubric_payload() -> CoachingRubric:
         multiples_detachment_factor=float(DETACHMENT_FACTOR),
         drawdown_audit_pct=float(DRAWDOWN_AUDIT_PCT),
         drawdown_audit_window_days=DRAWDOWN_AUDIT_WINDOW_DAYS,
+        bucket_caps_pct={b: float(c) for b, c in _BUCKET_CAPS.items()},
     )

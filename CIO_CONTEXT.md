@@ -78,16 +78,34 @@ audit, not an automatic Hold/Buy.
 ## Human-capital correlation buckets
 
 Positions whose primary revenue tailwind overlaps these buckets are
-flagged for concentration risk (they magnify household income risk):
+flagged for concentration risk (they magnify household income risk).
+Bucket assignments are now per-ticker weighted (0–100% per bucket) and
+stored in the `human_capital_overlap` table — a single name can carry
+exposure to multiple buckets (e.g. GOOGL is ~80% Big-Tech/Ads and
+~20% AI-Infra). Edit via the **Human-capital overlap buckets** card
+on the Accounts page (calls `/api/human-capital/overlaps`).
 
-- **Big-Tech / Ads (Meta employer overlap):** META, GOOG/GOOGL, AMZN
-  (AWS+ads), MSFT, AAPL, NFLX, SNAP, PINS, TTD, RDDT, APP
-- **Startup / VC (spouse employer overlap):** any series-A/B-stage
-  pre-IPO; recently-IPO'd YC/VC-backed names; private credit funds;
-  fintech infra exposed to ZIRP/VC funding cycles
+Active buckets and their portfolio-wide aggregate caps:
 
-Broad-market ETFs (VTI/VOO/SPY/IVV/RSP/QQQ) are excluded from this
-filter — they're diversifiers by design.
+- **`big_tech_ads`** (cap **15%**) — Meta employer overlap. Includes
+  META, GOOG/GOOGL, AMZN (ads sliver), MSFT, AAPL, NFLX, SNAP, PINS,
+  TTD, RDDT, APP, ROKU.
+- **`startup_vc_fintech`** (cap **10%**) — spouse employer overlap.
+  Includes COIN, AFRM, UPST, HOOD, SOFI, MQ, MNDY, DDOG, NET, CRWD,
+  SNOW, RBLX. Tightest cap because ZIRP / VC-cycle risk amplifies
+  her income volatility.
+- **`ai_infra`** (cap **25%**) — AI infrastructure picks. Looser cap
+  because the user is structurally bullish on AI per the Rational
+  Bull thesis. Includes NVDA (100%), AVGO (70%), GOOGL (20% of its
+  weight), and similar.
+
+Aggregate cap thresholds live in `_BUCKET_CAPS` in
+`services/coaching.py`. Adding a bucket: insert rows into the
+`human_capital_overlap` table (or use the UI) and add a cap entry
+in `_BUCKET_CAPS` if you want aggregate-tip enforcement.
+
+Broad-market ETFs (VTI/VOO/SPY/IVV/RSP/QQQ) and cash equivalents are
+excluded from this filter — they're diversifiers by design.
 
 ---
 
@@ -96,8 +114,19 @@ filter — they're diversifiers by design.
 The `/api/coaching/tips` endpoint emits structured tips classified by:
 
 - `irr_below_bar` — held ≥ 3y, annualized return < 10%
-- `concentration_human_capital` — single name > 5% of portfolio that
-  falls in a human-capital bucket above
+- `concentration_human_capital` — single name > the single-name cap
+  (8%) that also carries non-zero weight in any human-capital bucket
+  (per the `human_capital_overlap` table). Stacks portfolio risk on
+  top of salary risk for that name.
+- `concentration_human_capital_aggregate` — portfolio-wide weighted
+  exposure to one bucket exceeds that bucket's cap (see the bucket
+  list above). Formula: `Σ position_value × bucket_weight ÷ total`.
+  Catches the failure mode the single-name check misses (twenty
+  small ad-tech positions adding up to a fat bucket). Maintain the
+  ticker → bucket → weight mapping via the **Human-capital overlap
+  buckets** editor on the Accounts page.
+- `concentration_limit` — single name > 8% but uncorrelated to
+  human-capital buckets. Lower severity than the human-capital tips.
 - `thesis_stale` — open position, no decision/outcome in 180 days
 - `multiples_detachment` — unrealized return ≥ 2× since first buy and
   no `trim`/`sell` decision logged in the last 180 days
