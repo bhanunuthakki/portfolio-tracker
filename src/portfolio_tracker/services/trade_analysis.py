@@ -1,47 +1,45 @@
 """Per-ticker trade analysis: winners, losers, open positions, turnover.
 
-The simple-aggregation pitfall: averaging buy and sell prices over a
-ticker's *full window* of activity hides multi-phase reality. A position
-that was bought at $20, sold at $20 (loss-harvest), re-bought at $35,
-and sold partially at $40 looks like "average buy $27.50, average sell
-$30" — which obscures both the loss harvest AND the second-phase win.
+P&L methodology — split by position state, to match Holdings:
 
-Cleaner economic measure per ticker:
+* **Open position (today_qty > 0):**
+      P&L_$ = today_value − effective_cost
 
-    P&L_$ = (current_market_value) + (cumulative cash from sells)
-            − (cumulative cash to buys)
+  Where `effective_cost` = per-account override-or-broker cost basis,
+  merged with the same precedence Holdings uses (override beats broker;
+  see `portfolio.py:_consolidate_holdings`). This is exactly the
+  unrealized P&L Holdings shows. Realized P&L from prior in-position
+  sells is intentionally NOT included — that's the cost of view
+  consistency. The Dashboard's position-alpha card still reflects total
+  windowed economic P&L vs benchmarks.
 
-That's true total return on the name within the window: it nets the
-realized cash flows against today's mark, regardless of how many phases
-the position went through. It still misses option-premium income (puts
-sold for cash, then assigned), but it correctly reflects the share-side
-P&L.
+* **Closed position (today_qty = 0):**
+      P&L_$ = sold_total − bought_total
 
-Two important corners we've gotten wrong before:
+  Pure realized cashflow. ACATS-in for a fully closed position is a
+  data-completeness issue we can't recover (we'd need the source
+  broker's cost lots); those rows are flagged via
+  `_detect_cost_basis_gap`.
 
-1. **Window-bounded buys, lifetime today_value.** If we filter buys to
-   the user's chart window but today_value still reflects the full open
-   position, P&L is overstated for every ticker that was opened before
-   the window. A position bought 3 years ago at $20 (outside window),
-   still held at $40 today, with no in-window activity, looked like a
-   $40-of-pure-profit-per-share winner. Fix: aggregates over **all-time**
-   transactions; the activity counters and trade-count remain
-   window-bounded, since the question "was I overtrading?" is a
-   window-bounded one.
+This is a deliberate departure from the older "lifetime cashflow"
+formula (`today_value + sold − bought`), which double-counted ACATS-in
+capital: `bought_total` came from `investment_transactions` only and
+missed pre-history shares the user transferred in. The old formula
+made Holdings and Trade Analysis disagree on identical positions
+whenever an override was present. The new split keeps them in
+lockstep.
 
-2. **ACATS-in / pre-history shares with no recorded buy.** SnapTrade
-   sees Robinhood holdings transferred in from another broker as $0-
-   cost shares without a buy transaction. So lifetime "bought" misses
-   their cost basis entirely, and P&L = today_value + sells − bought
-   massively overstates the win. We can't recover the true cost basis
-   without ingesting 1099-Bs, but we *can* detect the condition (sold
-   shares > bought shares OR today_qty > total_buys_qty) and surface a
-   per-row warning so the user knows the row is unreliable.
+Two corners worth knowing:
 
-3. **Duplicate aggregator connections.** When the same brokerage is
+1. **Window-bounded activity, lifetime P&L.** Aggregates over **all-time**
+   transactions so the open-position cost basis isn't paired with just
+   window-internal buys. Activity counters and trade-count remain
+   window-bounded, since "was I overtrading lately?" is a window-bounded
+   question.
+
+2. **Duplicate aggregator connections.** When the same brokerage is
    reachable via two aggregators (Plaid + SnapTrade for Robinhood),
-   transactions get recorded twice — both `bought` and `sold` get
-   double-counted, shifting P&L unpredictably. Filtering through
+   transactions get recorded twice. Filtering through
    `active_account_ids()` drops the data-disabled half cleanly.
 """
 
@@ -88,8 +86,12 @@ class TickerTrade(BaseModel):
     sold_total: Decimal
     today_qty: Decimal
     today_value: Decimal
-    pnl_dollars: Decimal           # market_value + sells − buys (lifetime)
-    pnl_pct: float | None          # vs total $ deployed (buys); None if buys = 0
+    # Open positions: today_value − effective_cost (unrealized, matches Holdings).
+    # Closed positions: sold_total − bought_total (realized cashflow).
+    pnl_dollars: Decimal
+    # vs denominator implied by the methodology: effective_cost for open
+    # positions, bought_total for closed positions. None when denominator is 0.
+    pnl_pct: float | None
     trade_count: int               # window-bounded, not lifetime
     is_open: bool                  # today_qty > 0
     cost_basis_unreliable: bool    # ACATS-in / pre-history shares detected
@@ -126,12 +128,12 @@ def analyze_trades(
 ) -> TradeAnalysisResult:
     """Build the trade-analysis payload for [start_date, end_date].
 
-    Per-ticker P&L is **lifetime** (regardless of `start_date`) because
-    today's market value reflects a lifetime position; pairing window-
-    bounded buys against a lifetime position is the bug source we've
-    repeatedly hit. Activity stats (turnover, trade count by month) stay
-    window-bounded, since "am I overtrading lately?" is the window-bounded
-    question.
+    Per-ticker P&L is **lifetime** and splits by position state to match
+    Holdings (see module docstring): open positions report unrealized
+    P&L vs Holdings-style effective cost; closed positions report
+    realized cashflow. Activity stats (turnover, trade count by month)
+    stay window-bounded since "am I overtrading lately?" is a
+    window-bounded question.
 
     Includes only tickers with > _MIN_TICKER_NOTIONAL lifetime notional
     traded. Ranks descending by absolute P&L so the most material trades
@@ -275,48 +277,43 @@ def analyze_trades(
             continue
         mv = today_value.get(ticker, Decimal(0))
         qty_today = today_qty.get(ticker, Decimal(0))
+        is_open = qty_today > 0
         share_count_gap = _detect_cost_basis_gap(
             bought_qty=b["bought_qty"],
             sold_qty=b["sold_qty"],
             today_qty=qty_today,
         )
         broker_unreliable = ticker_has_broker_unreliable.get(ticker, False)
-        # P&L methodology — prefer cashflow when buy transactions explain
-        # every share we hold/sold. Cashflow math is `mv + sold - bought`
-        # which is correct regardless of what the broker reports as cost
-        # basis — critical because brokers routinely emit junk values like
-        # $15 cost for $12k positions (see Holdings UNREL flag).
-        #
-        #   * Buys account for all shares → cashflow math (exact)
-        #   * Shares appeared from outside our buy history (ACATS-in)
-        #     AND we have an effective cost basis (override or broker)
-        #     → cost-basis math (Holdings-style)
-        #   * Otherwise (gap + no cost data) → cashflow math, mark unreliable
-        if not share_count_gap:
+        # P&L methodology splits by position state — see module docstring.
+        #   * Open + we have cost basis on at least one contributing account
+        #     → today_value − effective_cost (matches Holdings unrealized)
+        #   * Open + no cost basis anywhere
+        #     → cashflow fallback, mark unreliable (rare; held-but-no-cost
+        #       is a data hole the user can fix with an override)
+        #   * Closed → sold − bought (realized cashflow on a fully exited name)
+        if is_open and effective_cost_known.get(ticker):
+            eff = effective_cost.get(ticker, Decimal(0))
+            pnl = mv - eff
+            denom = eff
+            # Holdings-style: contaminated when at least one contributing
+            # account reports an implausibly low broker cost (e.g.
+            # BrokerageLink $48 cost on a $12k position drags
+            # effective_cost down). Matches Holdings' has_unreliable_cost_basis.
+            unreliable = broker_unreliable
+        elif is_open:
             pnl = mv + b["sold"] - b["bought"]
             denom = b["bought"]
-        elif effective_cost_known.get(ticker):
-            pnl = mv - effective_cost.get(ticker, Decimal(0))
-            denom = effective_cost.get(ticker, Decimal(0))
+            unreliable = True
         else:
-            pnl = mv + b["sold"] - b["bought"]
+            pnl = b["sold"] - b["bought"]
             denom = b["bought"]
+            # Closed positions with share-count gap mean shares were
+            # sold that we never saw bought — ACATS-in then exited.
+            # We can't recover the source-broker cost so the realized
+            # P&L is overstated.
+            unreliable = share_count_gap
         pnl_pct = (
             float(pnl / denom * 100) if denom > 0 else None
-        )
-        # Ticker is unreliable when:
-        #   * share-count math implies missing buys AND no override to
-        #     fall back on, OR
-        #   * we DO have cost basis but at least one contributing account
-        #     reports an implausibly low broker cost (broker_unreliable).
-        # The second case is partial contamination — SoFi might have a
-        # clean inferred-ACATS override but BrokerageLink reports $48 cost
-        # on a $12k position, dragging the combined effective_cost down.
-        has_override_basis = qty_today > 0 and effective_cost_known.get(ticker)
-        cost_basis_branch_used = share_count_gap and has_override_basis
-        unreliable = (
-            (share_count_gap and not has_override_basis)
-            or (cost_basis_branch_used and broker_unreliable)
         )
         tickers.append(
             TickerTrade(
@@ -326,12 +323,12 @@ def analyze_trades(
                 last_action=b["last_action"],
                 bought_total=b["bought"],
                 sold_total=b["sold"],
-                today_qty=today_qty.get(ticker, Decimal(0)),
+                today_qty=qty_today,
                 today_value=mv,
                 pnl_dollars=pnl,
                 pnl_pct=pnl_pct,
                 trade_count=b["trade_count"],
-                is_open=today_qty.get(ticker, Decimal(0)) > 0,
+                is_open=is_open,
                 cost_basis_unreliable=unreliable,
             )
         )
@@ -509,7 +506,7 @@ def _build_notes(activity: TradingActivity, tickers: list[TickerTrade]) -> list[
         win_total = sum((t.pnl_dollars for t in winners), Decimal(0))
         loss_total = sum((t.pnl_dollars for t in losers), Decimal(0))
         notes.append(
-            f"Net realized + unrealized (reliable rows only): "
+            f"Net unrealized (open) + realized (closed), reliable rows only: "
             f"${float(win_total + loss_total):+,.0f} "
             f"(winners ${float(win_total):+,.0f} on {len(winners)} names, "
             f"losers ${float(loss_total):+,.0f} on {len(losers)})."
@@ -518,15 +515,17 @@ def _build_notes(activity: TradingActivity, tickers: list[TickerTrade]) -> list[
         names = ", ".join(t.ticker for t in unreliable[:8])
         more = f" + {len(unreliable) - 8} more" if len(unreliable) > 8 else ""
         notes.append(
-            f"{len(unreliable)} ticker(s) flagged as cost-basis unreliable "
-            f"(likely ACATS-in / pre-history shares with no recorded buy): "
-            f"{names}{more}. Their P&L on this card is missing those shares' "
-            f"original cost basis — treat the dollar values as upper bounds."
+            f"{len(unreliable)} ticker(s) flagged as cost-basis unreliable: "
+            f"{names}{more}. Either a contributing account reports an "
+            f"implausibly low broker cost (fixable with a cost-basis override "
+            f"on Holdings), or the position is fully closed but sold more "
+            f"shares than we have buy records for (ACATS-in then exited; "
+            f"realized P&L is overstated)."
         )
     notes.append(
-        "P&L = today's market value + lifetime sell proceeds − lifetime buy "
-        "cost. Activity counts (trades, notional, turnover) are window-bounded; "
-        "P&L is lifetime so today's open position is paired with the right "
-        "cost basis instead of just window-internal buys."
+        "P&L methodology: open positions use today_value − effective_cost "
+        "(Holdings-style unrealized, override beats broker cost). Closed "
+        "positions use sold − bought (realized cashflow). Activity counts "
+        "(trades, notional, turnover) are window-bounded; P&L is lifetime."
     )
     return notes
