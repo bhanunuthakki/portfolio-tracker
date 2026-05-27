@@ -306,6 +306,13 @@ class CostBasisOverride(Base):
       * `inferred_1099`   — reserved for future 1099-B based inference
     The marker is on the row itself (not on a separate registry) so any
     downstream consumer can filter by origin without consulting other tables.
+
+    `acquired_at` is the date the user (or ACATS source broker) actually
+    bought the shares. Used as the anchor for synthetic SPY buys in the
+    Trade Timeline and as the pre-window quantity anchor in Position
+    Alpha for shares acquired before the system started tracking them.
+    NULL means "unknown — fall back to earliest snapshot date as proxy",
+    which preserves the prior behavior.
     """
 
     __tablename__ = "cost_basis_overrides"
@@ -324,6 +331,7 @@ class CostBasisOverride(Base):
         default="manual",
         server_default="manual",
     )
+    acquired_at: Mapped[date | None] = mapped_column(Date, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

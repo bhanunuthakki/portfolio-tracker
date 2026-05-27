@@ -33,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
     Benchmark,
+    CostBasisOverride,
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
@@ -678,15 +679,25 @@ def _qty_from_snapshot_forward(
 def _qty_walk_back(
     session: Session, anchor_date: date, target_date: date, accts: frozenset[int]
 ) -> dict[str, Decimal]:
-    """Walk backward from anchor snapshot, reversing each tx, to target_date."""
-    qty: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
-    for sid, q in session.execute(
-        select(HoldingSnapshot.security_id, HoldingSnapshot.quantity)
+    """Walk backward from anchor snapshot, reversing each tx, to target_date.
+
+    Tracks qty per (account_id, security_id) so the ACATS-in adjustment
+    below can zero out the right rows without losing precision across
+    accounts. Without per-account tracking, a multi-account ticker would
+    see all its qty wiped when one account has an ACATS-in override.
+    """
+    qty_per_acct_sec: dict[tuple[int, int], Decimal] = defaultdict(lambda: Decimal(0))
+    for acct_id, sid, q in session.execute(
+        select(
+            HoldingSnapshot.account_id,
+            HoldingSnapshot.security_id,
+            HoldingSnapshot.quantity,
+        )
         .where(HoldingSnapshot.snapshot_date == anchor_date)
         .where(HoldingSnapshot.account_id.in_(accts))
     ):
-        if sid is not None and q is not None:
-            qty[sid] += Decimal(q)
+        if acct_id is not None and sid is not None and q is not None:
+            qty_per_acct_sec[(acct_id, sid)] += Decimal(q)
     backward_tx = session.execute(
         select(InvestmentTransaction)
         .where(InvestmentTransaction.account_id.in_(accts))
@@ -699,8 +710,28 @@ def _qty_walk_back(
             continue
         delta = _reverse_quantity_delta(tx)
         if delta is not None:
-            qty[tx.security_id] += delta
-    return _resolve_tickers(session, qty)
+            qty_per_acct_sec[(tx.account_id, tx.security_id)] += delta
+
+    # ACATS-in pre-window adjustment. For each cost-basis override with
+    # `acquired_at > target_date`, the user did NOT have those shares in
+    # that account at target_date — they hadn't been ACATS-transferred
+    # in yet. Zero out the (account, security) qty so V_start excludes
+    # them, preventing the "always held" inflation that would otherwise
+    # mis-attribute the source-broker's pre-transfer gains to this
+    # account's window-start position.
+    acats_in_after_target = session.execute(
+        select(CostBasisOverride.account_id, CostBasisOverride.security_id)
+        .where(CostBasisOverride.acquired_at.is_not(None))
+        .where(CostBasisOverride.acquired_at > target_date)
+        .where(CostBasisOverride.account_id.in_(accts))
+    ).all()
+    for acct_id, sid in acats_in_after_target:
+        qty_per_acct_sec[(acct_id, sid)] = Decimal(0)
+
+    qty_by_sid: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    for (_, sid), q in qty_per_acct_sec.items():
+        qty_by_sid[sid] += q
+    return _resolve_tickers(session, qty_by_sid)
 
 
 def _forward_quantity_delta(tx: InvestmentTransaction) -> Decimal | None:
