@@ -312,14 +312,27 @@ def _open_position_rows(
     # positions (where the receiving broker reports $0 cost) inflate alpha
     # spuriously on the timeline. See data_quality finding
     # `override_disagrees_with_broker` for visibility into divergence.
-    overrides: dict[tuple[int, int], Decimal] = {
-        (o.account_id, o.security_id): Decimal(o.total_cost_basis)
+    # `acquired_at` rides along so the matched-flow SPY counterfactual can
+    # anchor synthetic buys at the actual ACATS-in purchase date instead of
+    # the receiving-broker's first-snapshot proxy.
+    overrides: dict[tuple[int, int], tuple[Decimal, date | None]] = {
+        (o.account_id, o.security_id): (Decimal(o.total_cost_basis), o.acquired_at)
         for o in session.execute(select(CostBasisOverride)).scalars().all()
     }
 
-    # Aggregate by ticker (collapse across accounts).
+    # Aggregate by ticker (collapse across accounts). `dated_overrides`
+    # collects per-account (acct_id, override_cost, acquired_at) tuples so
+    # the matched-flow calc can fire a synthetic SPY buy PER override at
+    # the override's own date, rather than collapsing to one ticker-wide
+    # synthetic buy anchored to an aggregate fallback date.
     by_ticker: dict[str, dict] = defaultdict(
-        lambda: {"qty": Decimal("0"), "value": Decimal("0"), "cost": Decimal("0"), "name": None}
+        lambda: {
+            "qty": Decimal("0"),
+            "value": Decimal("0"),
+            "cost": Decimal("0"),
+            "name": None,
+            "dated_overrides": [],
+        }
     )
     for snap, sec in session.execute(stmt).all():
         if not sec.ticker:
@@ -333,7 +346,12 @@ def _open_position_rows(
         # Per-account cost basis: override wins over broker-reported.
         override = overrides.get((snap.account_id, snap.security_id))
         if override is not None:
-            agg["cost"] += override
+            override_cost, acquired_at = override
+            agg["cost"] += override_cost
+            if acquired_at is not None:
+                agg["dated_overrides"].append(
+                    (snap.account_id, override_cost, acquired_at)
+                )
         elif snap.cost_basis is not None:
             agg["cost"] += snap.cost_basis
         agg["name"] = agg["name"] or sec.name
@@ -379,6 +397,7 @@ def _open_position_rows(
             spy=spy,
             today=today,
             first_buy_fallback=first_buy,
+            dated_overrides=agg["dated_overrides"],
         )
         spy_start = spy.price_on(first_buy)  # informational only
         spy_return_pct: float | None = (
@@ -449,6 +468,7 @@ def _matched_flow_open_position(
     spy: _SpyLookup,
     today: date,
     first_buy_fallback: date | None,
+    dated_overrides: Iterable[tuple[int, Decimal, date]] = (),
 ) -> _MatchedFlowResult:
     """Compute matched-flow SPY counterfactual + alpha for a currently
     open position.
@@ -471,16 +491,21 @@ def _matched_flow_open_position(
 
     **ACATS-in handling.** When `effective_cost > bought - sold` (e.g.
     inferred_acats override on transferred-in shares we have no buy
-    record for), the missing capital gets a single synthetic SPY buy at
-    the position's first observed activity date for the delta. That's
-    an approximation — we don't know the actual ACATS source-broker
-    purchase dates — but it's directionally correct and surfaced via
-    `used_synthetic_buy=True` so the row can be flagged.
+    record for), the missing capital gets a synthetic SPY buy for the
+    delta. Per-account precision: each `dated_overrides` entry triggers
+    its own synthetic buy at the override's `acquired_at` for the
+    portion of cost not explained by that account's actual buy txns.
+    Accounts without a dated override fall through to the residual
+    aggregate fallback: a single synthetic buy at the earliest of
+    (residual-accts' first snapshot, first txn, caller fallback).
+    `used_synthetic_buy=True` is set whenever any synthetic fires so
+    the row can be flagged in the UI.
 
     Returns the components; caller assembles the TimelineRow.
     """
     tx_rows = session.execute(
         select(
+            InvestmentTransaction.account_id,
             InvestmentTransaction.date,
             InvestmentTransaction.type,
             InvestmentTransaction.amount,
@@ -498,7 +523,9 @@ def _matched_flow_open_position(
     weighted_numer = Decimal(0)
     weighted_denom = Decimal(0)
     earliest_activity: date | None = None
-    for tx_date, tx_type, amount in tx_rows:
+    bought_per_acct: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    sold_per_acct: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    for acct_id, tx_date, tx_type, amount in tx_rows:
         if amount is None:
             continue
         if earliest_activity is None or tx_date < earliest_activity:
@@ -510,12 +537,14 @@ def _matched_flow_open_position(
         amt = abs(Decimal(amount))
         if tx_type == "buy":
             bought_via_txns += amt
+            bought_per_acct[acct_id] += amt
             spy_shares += amt / spy_price_dec
             days_held = max((today - tx_date).days, 0)
             weighted_numer += amt * Decimal(days_held)
             weighted_denom += amt
         else:  # sell
             sold_via_txns += amt
+            sold_per_acct[acct_id] += amt
             spy_shares -= amt / spy_price_dec
 
     # For SPY-equivalents and cash equivalents, alpha vs SPY is
@@ -539,53 +568,71 @@ def _matched_flow_open_position(
             used_synthetic_buy=False,
         )
 
-    # Synthetic ACATS-in handling. The original first-txn-date anchor
-    # systematically understated the SPY counterfactual for shares
-    # transferred in from another broker, because those shares were
-    # bought BEFORE the txn log starts. The earliest *snapshot* date for
-    # this ticker is a closer lower bound: we know the user held the
-    # position by that date, even if we don't know when they actually
-    # bought. For genuine ACATS-in, this anchor sits months/years before
-    # the first txn and gives the synthetic SPY share count enough room
-    # to capture the appreciation. For positions whose history is fully
-    # in the txn log, snapshot date ≈ first txn date, so this is a
-    # silent improvement on the previous behavior.
-    earliest_snapshot_date = session.execute(
-        select(func.min(HoldingSnapshot.snapshot_date))
-        .join(Security, Security.security_id == HoldingSnapshot.security_id)
-        .where(HoldingSnapshot.account_id.in_(account_ids))
-        .where(func.upper(Security.ticker) == ticker.upper())
-        .where(HoldingSnapshot.quantity > 0)
-    ).scalar_one_or_none()
-
-    net_txn_deployed = bought_via_txns - sold_via_txns
+    # Per-account dated-override synthetic buys. Each override fires its
+    # own synthetic SPY buy at the override's `acquired_at` for the gap
+    # between override_cost and that account's net deployed via txns.
+    # The dated accounts and their explained txn flows are tracked so
+    # the residual fallback below only considers the un-dated portion.
     used_synthetic_buy = False
-    # Only fire synthetic when `effective_cost > bought_via_txns` —
-    # which captures genuine ACATS-in (more capital paid than buys we
-    # have records for). If the user actively traded a position and the
-    # remaining cost basis happens to be smaller than net_deployed
-    # because they sold some at a profit, that's NOT ACATS-in and
-    # shouldn't trigger a synthetic buy.
-    if effective_cost > bought_via_txns:
-        delta = effective_cost - max(net_txn_deployed, Decimal(0))
-        # Pick the earliest of: snapshot first-seen, txn first-seen,
-        # caller's fallback. Earlier = more time for SPY to appreciate
-        # in the counterfactual = closer to reality for ACATS-in shares
-        # the user actually held for a long time.
-        candidates = [
-            d
-            for d in (earliest_snapshot_date, earliest_activity, first_buy_fallback)
-            if d is not None
-        ]
-        synth_date = min(candidates) if candidates else None
-        if synth_date is not None:
-            synth_spy_price = spy.price_on(synth_date)
-            if synth_spy_price and synth_spy_price > 0:
-                spy_shares += delta / Decimal(str(synth_spy_price))
-                days_held = max((today - synth_date).days, 0)
-                weighted_numer += delta * Decimal(days_held)
-                weighted_denom += delta
-                used_synthetic_buy = True
+    dated_overrides_total_cost = Decimal(0)
+    dated_accts_bought_total = Decimal(0)
+    dated_accts_sold_total = Decimal(0)
+    dated_accts: set[int] = set()
+    for acct_id, override_cost, acquired_at in dated_overrides:
+        dated_accts.add(acct_id)
+        dated_overrides_total_cost += override_cost
+        acct_bought = bought_per_acct.get(acct_id, Decimal(0))
+        acct_sold = sold_per_acct.get(acct_id, Decimal(0))
+        dated_accts_bought_total += acct_bought
+        dated_accts_sold_total += acct_sold
+        acct_net_deployed = acct_bought - acct_sold
+        synthetic_delta = override_cost - max(acct_net_deployed, Decimal(0))
+        if synthetic_delta <= 0:
+            continue
+        synth_spy_price = spy.price_on(acquired_at)
+        if not synth_spy_price or synth_spy_price <= 0:
+            continue
+        spy_shares += synthetic_delta / Decimal(str(synth_spy_price))
+        days_held = max((today - acquired_at).days, 0)
+        weighted_numer += synthetic_delta * Decimal(days_held)
+        weighted_denom += synthetic_delta
+        used_synthetic_buy = True
+
+    # Residual synthetic for accounts WITHOUT a dated override. Mirrors
+    # the previous aggregate behavior, just scoped to the un-dated
+    # portion of effective_cost and the un-dated accounts. With no dated
+    # overrides this reduces exactly to the prior implementation.
+    residual_effective_cost = effective_cost - dated_overrides_total_cost
+    residual_bought = bought_via_txns - dated_accts_bought_total
+    residual_sold = sold_via_txns - dated_accts_sold_total
+    residual_net_deployed = residual_bought - residual_sold
+    if residual_effective_cost > residual_bought:
+        delta = residual_effective_cost - max(residual_net_deployed, Decimal(0))
+        if delta > 0:
+            residual_accts = account_ids - dated_accts
+            earliest_snapshot_date: date | None = None
+            if residual_accts:
+                earliest_snapshot_date = session.execute(
+                    select(func.min(HoldingSnapshot.snapshot_date))
+                    .join(Security, Security.security_id == HoldingSnapshot.security_id)
+                    .where(HoldingSnapshot.account_id.in_(residual_accts))
+                    .where(func.upper(Security.ticker) == ticker.upper())
+                    .where(HoldingSnapshot.quantity > 0)
+                ).scalar_one_or_none()
+            candidates = [
+                d
+                for d in (earliest_snapshot_date, earliest_activity, first_buy_fallback)
+                if d is not None
+            ]
+            synth_date = min(candidates) if candidates else None
+            if synth_date is not None:
+                synth_spy_price = spy.price_on(synth_date)
+                if synth_spy_price and synth_spy_price > 0:
+                    spy_shares += delta / Decimal(str(synth_spy_price))
+                    days_held = max((today - synth_date).days, 0)
+                    weighted_numer += delta * Decimal(days_held)
+                    weighted_denom += delta
+                    used_synthetic_buy = True
 
     spy_end_price = spy.price_on(today)
     if not spy_end_price or spy_end_price <= 0 or effective_cost <= 0:
