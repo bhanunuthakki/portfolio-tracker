@@ -256,6 +256,10 @@ class CostBasisOverrideIn(BaseModel):
     security_id: int
     total_cost_basis: Decimal
     notes: str | None = None
+    # ISO YYYY-MM-DD acquisition date. NULL preserves the pre-existing
+    # fallback (synthetic SPY buy anchored at earliest snapshot date).
+    # Most useful for ACATS-in shares acquired years before tracking began.
+    acquired_at: date | None = None
 
 
 class CostBasisOverrideOut(BaseModel):
@@ -270,6 +274,7 @@ class CostBasisOverrideOut(BaseModel):
     notes: str | None
     # 'manual' | 'inferred_acats' | 'inferred_1099'
     source: str = "manual"
+    acquired_at: date | None = None
     updated_at: datetime
 
 

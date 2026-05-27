@@ -125,6 +125,7 @@ export const api = {
     security_id: number;
     total_cost_basis: number;
     notes?: string | null;
+    acquired_at?: string | null;
   }): Promise<unknown> =>
     request("/api/overrides/cost-basis", {
       method: "PUT",
