@@ -218,23 +218,33 @@ Beta and R² from the regression remain useful as relative measures
 (does the portfolio's daily motion track SPY's?). The alpha INTERCEPT
 is the misleading part.
 
-### F7 — Trade Analysis P&L still uses lifetime aggregates [SUBSTANTIAL for some rows]
+### F7 — Trade Analysis P&L now matches Holdings [FIXED 2026-05-27]
 
-The `Trade Analysis` page (separate from the dashboard) computes
-per-ticker P&L as `today_value + sold − bought` across LIFETIME. For
-36+ tickers with pre-history sells, this overstates the apparent P&L
-because `bought` doesn't include pre-window purchases.
+Trade Analysis P&L was migrated from the lifetime cashflow formula
+(`today_value + sold − bought`) to a split methodology that matches
+Holdings:
 
-Tickers affected (apparent P&L vs reality):
-- VTI: shows +$206k (just realization of pre-history holdings)
-- JPM, BABA, AMZN, GOOG, SOFI, MU: $10-30k each overstated
-- 30+ smaller positions
+* **Open positions:** `today_value − effective_cost`, where
+  `effective_cost` is per-account override-or-broker, merged with the
+  same precedence as `portfolio.py:_consolidate_holdings`. This is
+  numerically identical to the unrealized P&L Holdings shows.
 
-The position-alpha view on the dashboard ISN'T affected — the
-windowed methodology handles pre-history shares correctly.
+* **Closed positions:** `sold − bought`. ACATS-in shares that were
+  later sold can't have their original cost recovered without
+  source-broker cost-lot data; those rows surface the
+  `cost_basis_unreliable` flag so the realized P&L is treated as an
+  upper bound.
 
-**Recommendation**: deprecate the Trade Analysis dollar-P&L column,
-or migrate it to use the windowed position-alpha methodology.
+Trade-off: prior in-position sells against original cost no longer
+contribute to the open-position P&L on this page (consistency with
+Holdings beats the realized-portion economic P&L on this view). The
+Dashboard's position-alpha card still reports total windowed economic
+P&L per ticker.
+
+Code: `services/trade_analysis.py:analyze_trades` (the P&L methodology
+block). Verification: cross-checking the 12 currently-open positions,
+Trade Analysis `pnl_dollars` equals Holdings `unrealized_pnl` to the
+cent on every row.
 
 ### F8 — Snapshots include cash equivalents but position-alpha skips them [BY DESIGN]
 
