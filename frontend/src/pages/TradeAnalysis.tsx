@@ -18,10 +18,11 @@ import type { TickerTrade } from "@/types";
 
 const PNL_METHODOLOGY = {
   definition:
-    "Lifetime P&L per ticker = market value today + cumulative cash from sells − cumulative cash to buys. Computed across ALL transactions (not the window). The date range filters the activity counters and trade count, not the P&L total.",
-  formula: "P&L = today_value + sold − bought",
+    "Open positions: today's market value − effective cost basis (override beats broker), matching what Holdings shows. Closed positions: lifetime sold − bought (realized cashflow). The date range filters the activity counters and trade count, not the P&L total.",
+  formula:
+    "open: P&L = today_value − effective_cost · closed: P&L = sold − bought",
   interpretation:
-    "Position-alpha on the Dashboard uses a windowed methodology and is unaffected by pre-history. The two views answer different questions: this page is 'what did I net on this name?'; the Dashboard is 'did I beat the index, dollar-for-dollar?'",
+    "Open-position P&L on this page now matches Holdings' unrealized P&L exactly — same effective_cost merge. The trade-off is that prior in-position sells against original cost don't show up here; for total windowed economic P&L vs benchmarks, use the Dashboard's position-alpha card.",
 };
 
 /**
@@ -147,13 +148,16 @@ export function TradeAnalysis(): JSX.Element {
       <CoachingPanel />
 
       {unreliableCount > 0 && (
-        <WarningBanner title={`⚠ ${unreliableCount} ${unreliableCount === 1 ? "row has" : "rows have"} unreliable cost basis`}>
-          Rows marked <span className="text-amber-700">⚠</span> have ACATS-in
-          transfers or pre-history shares with no recorded buy. Cost basis is
-          undercounted, so lifetime P&amp;L is overstated. Fix: enter a manual
+        <WarningBanner title={`⚠ ${unreliableCount} ${unreliableCount === 1 ? "row has" : "rows have"} a cost-basis caveat`}>
+          Two flavors, both marked <span className="text-amber-700">⚠</span>:
+          {" "}<strong>Open positions</strong> where a contributing account
+          reports an implausibly low broker cost basis — fix with a manual
           override on the Holdings page (drill into the account, click "Override
-          cost basis"). The Dashboard's position-alpha view is unaffected — it
-          uses qty × price, not cost basis.
+          cost basis"). <strong>Closed positions</strong> where the user sold
+          more shares than we have buy records for (ACATS-in then exited) —
+          realized P&amp;L is overstated and isn't fixable without source-broker
+          cost-lot data. The Dashboard's position-alpha view is unaffected
+          either way — it uses qty × price, not cost basis.
         </WarningBanner>
       )}
 
