@@ -229,9 +229,17 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
         # ---- IRR below bar ------------------------------------------------
         if p.first_buy is not None:
             years_held = Decimal((today - p.first_buy).days) / Decimal("365.25")
-            if years_held >= MIN_HOLD_YEARS_FOR_IRR and p.bought_total > 0:
-                # CAGR proxy: (value + sold) / bought, annualized.
-                ratio = (p.value + p.sold_total) / p.bought_total
+            # `bought_total` only sums transactions at the current broker.
+            # ACATS-in capital lives in `cost_basis_total` via overrides.
+            # Use the larger of the two so transferred positions don't show
+            # an artificially inflated IRR from a too-small denominator.
+            denom = max(p.cost_basis_total, p.bought_total)
+            cost_basis_source = (
+                "override" if p.cost_basis_total > p.bought_total else "transactions"
+            )
+            if years_held >= MIN_HOLD_YEARS_FOR_IRR and denom > 0:
+                # CAGR proxy: (value + sold) / deployed, annualized.
+                ratio = (p.value + p.sold_total) / denom
                 # Decimal-friendly nth-root via float — IRR coaching is
                 # diagnostic, not finance-grade.
                 cagr_pct = (float(ratio) ** (1 / float(years_held)) - 1) * 100
@@ -248,7 +256,7 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                             ),
                             detail=(
                                 f"First buy {p.first_buy}. Total deployed "
-                                f"${_int(p.bought_total)}, value today "
+                                f"${_int(denom)}, value today "
                                 f"${_int(p.value)}, realized "
                                 f"${_int(p.sold_total)}. "
                                 f"Non-index positions need to clear "
@@ -265,6 +273,8 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                                 "years_held": f"{years_held:.2f}",
                                 "cagr_pct": f"{cagr_pct:.2f}",
                                 "bought_total": _int(p.bought_total),
+                                "cost_basis_total": _int(p.cost_basis_total),
+                                "cost_basis_source": cost_basis_source,
                                 "sold_total": _int(p.sold_total),
                                 "value": _int(p.value),
                             },
@@ -408,8 +418,15 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
         # thesis age too once that table has reliable timestamps.
 
         # ---- Multiples detachment (no trim since position 2x'd) -----------
-        if p.bought_total > 0:
-            mtm_ratio = p.value / p.bought_total
+        # Same denom convention as IRR — see comment in that block. Using
+        # `bought_total` alone would flag ACATS-in positions as detached
+        # purely because the broker-side deployment is small.
+        mtm_denom = max(p.cost_basis_total, p.bought_total)
+        mtm_cost_basis_source = (
+            "override" if p.cost_basis_total > p.bought_total else "transactions"
+        )
+        if mtm_denom > 0:
+            mtm_ratio = p.value / mtm_denom
             if mtm_ratio >= DETACHMENT_FACTOR:
                 recent_trim = (
                     last_trim is not None and (today - last_trim).days <= THESIS_STALE_DAYS
@@ -426,7 +443,7 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                                 "with no trim/sell in 180d"
                             ),
                             detail=(
-                                f"Deployed ${_int(p.bought_total)}, position "
+                                f"Deployed ${_int(mtm_denom)}, position "
                                 f"value ${_int(p.value)}. Strategic Directive 3: "
                                 "trim satellites when multiples detach from "
                                 "fundamentals; fund SGOV with the proceeds."
@@ -440,6 +457,8 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                             context={
                                 "mtm_ratio": f"{mtm_ratio:.2f}",
                                 "bought_total": _int(p.bought_total),
+                                "cost_basis_total": _int(p.cost_basis_total),
+                                "cost_basis_source": mtm_cost_basis_source,
                                 "value": _int(p.value),
                             },
                         )
