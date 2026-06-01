@@ -24,7 +24,7 @@ Schedule daily (Windows, see `scripts/run_daily_refresh.bat`):
 from __future__ import annotations
 
 import traceback
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import HTTPException
 
@@ -119,7 +119,31 @@ def run() -> int:
         print("[daily_refresh]   benchmarks: FAILED")
         traceback.print_exc()
 
-    # 5. Earnings calendar — pull upcoming-earnings dates for held names
+    # 5. Per-security prices — yfinance/Stooq close history for every held
+    #    security. daily_refresh historically skipped this, so the `prices`
+    #    table drifted stale between manual `jobs.prices` runs, degrading the
+    #    transaction walk-back valuation and the data-quality
+    #    `no_historical_prices` checks. Like benchmarks, a 30-day rolling pull
+    #    keeps the latest closes fresh without re-fetching years of static
+    #    history every day. Runs AFTER snapshots/syncs so securities added by
+    #    today's activity get priced. Imported lazily to keep yfinance off the
+    #    critical-path startup, matching the benchmarks/earnings legs.
+    try:
+        from portfolio_tracker.jobs import prices
+
+        price_rows, by_source = prices.run(today - timedelta(days=30), today)
+        print(
+            f"[daily_refresh]   prices: {price_rows} rows written "
+            f"(yfinance={by_source.get('yfinance', 0)} "
+            f"stooq={by_source.get('stooq', 0)} "
+            f"none={by_source.get('none', 0)})"
+        )
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   prices: FAILED")
+        traceback.print_exc()
+
+    # 6. Earnings calendar — pull upcoming-earnings dates for held names
     #    via yfinance. Quiet on per-ticker failures so a flaky symbol
     #    doesn't block the rest. Imported lazily to keep yfinance off
     #    the critical-path startup if we ever drop the dependency.
