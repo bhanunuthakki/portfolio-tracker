@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -101,6 +102,16 @@ def _import_claude() -> callable:
     from claude_cli import call_claude  # type: ignore
 
     return call_claude
+
+
+def _import_claude_stream() -> callable:
+    """Lazy import of the streaming variant (sync generator yielding
+    text chunks). Same rationale as `_import_claude`."""
+    if _CLAUDE_CLI_DIR not in sys.path:
+        sys.path.insert(0, _CLAUDE_CLI_DIR)
+    from claude_cli import call_claude_stream  # type: ignore
+
+    return call_claude_stream
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +496,109 @@ def send_turn(
     )
 
 
+def begin_streamed_turn(
+    session: Session,
+    session_id: int,
+    user_content: str,
+) -> tuple[ChatTurnOut, str]:
+    """Prep step for a streaming chat turn.
+
+    Mirrors the front half of `send_turn`: validates the session,
+    handles `/refresh`, attaches a facts block if stale, persists the
+    user turn, and builds the Claude prompt. Returns
+    `(user_turn, prompt)` so the SSE endpoint can emit the user-turn id
+    immediately and then start streaming Claude's output.
+
+    The assistant turn is NOT persisted here — that happens in
+    `finalize_streamed_turn` after the stream completes.
+    """
+    s = session.get(ChatSession, session_id)
+    if s is None:
+        raise ValueError(f"Chat session {session_id} not found")
+
+    user_content = user_content.strip()
+    refresh_requested = user_content.lower().startswith("/refresh")
+    if refresh_requested:
+        user_content = user_content[len("/refresh"):].strip() or (
+            "Refresh context and continue from the last topic."
+        )
+
+    facts_block = _maybe_attach_facts_block(session, s, force=refresh_requested)
+    prompt = _assemble_prompt(session, session_id, facts_block, user_content)
+
+    user_turn = ChatTurn(
+        session_id=session_id,
+        role="user",
+        content=user_content,
+    )
+    session.add(user_turn)
+    session.commit()
+    session.refresh(user_turn)
+
+    return (
+        ChatTurnOut(
+            turn_id=user_turn.turn_id,
+            session_id=user_turn.session_id,
+            role="user",
+            content=user_turn.content,
+            model_used=None,
+            created_at=user_turn.created_at,
+        ),
+        prompt,
+    )
+
+
+def stream_chat_response(prompt: str) -> Iterator[str]:
+    """Stream Claude's response text chunk-by-chunk.
+
+    Thin wrapper around `call_claude_stream` that pins the model to
+    `CHAT_MODEL` (Sonnet — Opus would be too slow for an interactive
+    chat). Caller is responsible for assembling the prompt via
+    `begin_streamed_turn` and persisting the assistant turn via
+    `finalize_streamed_turn` once the iterator is consumed.
+    """
+    call_claude_stream = _import_claude_stream()
+    yield from call_claude_stream(prompt, model=CHAT_MODEL)
+
+
+def finalize_streamed_turn(
+    session: Session,
+    session_id: int,
+    full_text: str,
+) -> ChatTurnOut:
+    """Persist the assistant turn after streaming completes.
+
+    `full_text` is the concatenation of every chunk the SSE handler
+    yielded to the client. If the stream errored mid-flight the caller
+    should append the error sentinel to `full_text` before calling so
+    the transcript reflects the partial reply + the failure inline.
+    """
+    s = session.get(ChatSession, session_id)
+    if s is None:
+        raise ValueError(f"Chat session {session_id} not found")
+
+    text = full_text or "[advisor returned no text]"
+    assistant_turn = ChatTurn(
+        session_id=session_id,
+        role="assistant",
+        content=text,
+        model_used=CHAT_MODEL,
+    )
+    session.add(assistant_turn)
+    s.updated_at = datetime.now(UTC)
+    session.commit()
+    session.refresh(assistant_turn)
+
+    return ChatTurnOut(
+        turn_id=assistant_turn.turn_id,
+        session_id=assistant_turn.session_id,
+        role="assistant",
+        content=assistant_turn.content,
+        model_used=assistant_turn.model_used,
+        created_at=assistant_turn.created_at,
+    )
+
+
 def _maybe_attach_facts_block(
     db: Session, s: ChatSession, *, force: bool = False
 ) -> str | None:
@@ -495,10 +609,17 @@ def _maybe_attach_facts_block(
     Persists the facts block as a 'system' role ChatTurn so we have a
     record of what the model was shown at refresh time.
     """
+    # SQLite drops timezone info on round-trip even when the column is
+    # declared `DateTime(timezone=True)`. Re-attach UTC before comparing
+    # with the aware `datetime.now(UTC)` — otherwise the second turn in
+    # any session raises "can't subtract offset-naive and offset-aware".
+    last_refresh = s.last_context_refresh_at
+    if last_refresh is not None and last_refresh.tzinfo is None:
+        last_refresh = last_refresh.replace(tzinfo=UTC)
     needs_refresh = force or (
-        s.last_context_refresh_at is None
+        last_refresh is None
         or (
-            datetime.now(UTC) - s.last_context_refresh_at
+            datetime.now(UTC) - last_refresh
             > timedelta(hours=_FACTS_FRESHNESS_HOURS)
         )
     )
