@@ -59,11 +59,14 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import (
+    BriefJobStatus,
     ChatSession,
     ChatTurn,
     HoldingSnapshot,
     MonthlyBrief,
+    MonthlyBriefJob,
     Security,
     TradeDecision,
 )
@@ -159,6 +162,22 @@ class MonthlyBriefSummary(BaseModel):
     period_yyyymm: str
     model_used: str | None
     generated_at: datetime
+
+
+class MonthlyBriefJobOut(BaseModel):
+    """Status of an async brief-generation job.
+
+    Frontend polls `GET /briefs/jobs/{job_id}` and pivots on `status`.
+    `brief_id` is populated when status flips to `succeeded`; `error` is
+    populated when status flips to `failed`.
+    """
+    job_id: int
+    period_yyyymm: str
+    status: Literal["pending", "running", "succeeded", "failed"]
+    started_at: datetime
+    completed_at: datetime | None
+    brief_id: int | None
+    error: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -1042,3 +1061,123 @@ def _escape(s: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+# ---------------------------------------------------------------------------
+# Async job lifecycle — see also api/routes/cio_advisor.py:post_brief
+# ---------------------------------------------------------------------------
+
+
+def _job_to_out(job: MonthlyBriefJob) -> MonthlyBriefJobOut:
+    return MonthlyBriefJobOut(
+        job_id=job.job_id,
+        period_yyyymm=job.period_yyyymm,
+        status=job.status,  # type: ignore[arg-type]
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        brief_id=job.brief_id,
+        error=job.error,
+    )
+
+
+def find_in_flight_brief_job(
+    session: Session, period_yyyymm: str
+) -> MonthlyBriefJobOut | None:
+    """Return the pending/running job for `period_yyyymm`, if any.
+
+    Used by `POST /briefs/generate` to dedupe rapid clicks: rather than
+    spawning a second Opus call, we return the existing job so the
+    frontend polls it.
+    """
+    row = session.execute(
+        select(MonthlyBriefJob)
+        .where(MonthlyBriefJob.period_yyyymm == period_yyyymm)
+        .where(
+            MonthlyBriefJob.status.in_(
+                [BriefJobStatus.PENDING.value, BriefJobStatus.RUNNING.value]
+            )
+        )
+        .order_by(MonthlyBriefJob.started_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return _job_to_out(row) if row is not None else None
+
+
+def create_brief_job(session: Session, period_yyyymm: str) -> MonthlyBriefJobOut:
+    """Insert a new pending job row and return it.
+
+    Caller is responsible for the in-flight dedup check (see
+    `find_in_flight_brief_job`) and for scheduling the background
+    worker (`run_brief_job`).
+    """
+    job = MonthlyBriefJob(
+        period_yyyymm=period_yyyymm,
+        status=BriefJobStatus.PENDING.value,
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    return _job_to_out(job)
+
+
+def get_brief_job(session: Session, job_id: int) -> MonthlyBriefJobOut | None:
+    job = session.get(MonthlyBriefJob, job_id)
+    return _job_to_out(job) if job is not None else None
+
+
+def list_brief_jobs(
+    session: Session, statuses: list[str] | None = None
+) -> list[MonthlyBriefJobOut]:
+    """List jobs, newest first. Optionally filter to a subset of statuses
+    (used by the frontend to resume polling on mount via
+    `?status=pending,running`)."""
+    q = select(MonthlyBriefJob).order_by(MonthlyBriefJob.started_at.desc())
+    if statuses:
+        q = q.where(MonthlyBriefJob.status.in_(statuses))
+    rows = session.execute(q).scalars().all()
+    return [_job_to_out(r) for r in rows]
+
+
+def run_brief_job(job_id: int, period_yyyymm: str) -> None:
+    """Sync worker invoked by FastAPI BackgroundTasks.
+
+    Opens its OWN DB session — the request-scoped session that inserted
+    the job row was already closed by the time this runs. Marks the job
+    `running`, calls `generate_brief`, and finalizes to `succeeded` (with
+    `brief_id` set) or `failed` (with `error` set).
+
+    Defined in the service module — not the route — so the lifecycle is
+    a unit of business logic, not glue. FastAPI runs this in a threadpool
+    because it's a sync def.
+    """
+    db = SessionLocal()
+    try:
+        job = db.get(MonthlyBriefJob, job_id)
+        if job is None:
+            # Row vanished between scheduling and running. Nothing to do.
+            return
+
+        job.status = BriefJobStatus.RUNNING.value
+        db.commit()
+
+        try:
+            brief = generate_brief(db, period_yyyymm)
+        except Exception as exc:
+            # Roll back any partial state from `generate_brief` and
+            # re-fetch the job — the rollback can detach our reference.
+            db.rollback()
+            job = db.get(MonthlyBriefJob, job_id)
+            if job is None:
+                return
+            job.status = BriefJobStatus.FAILED.value
+            job.error = str(exc)[:2000]
+            job.completed_at = datetime.now(UTC)
+            db.commit()
+            return
+
+        job.status = BriefJobStatus.SUCCEEDED.value
+        job.brief_id = brief.brief_id
+        job.completed_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()

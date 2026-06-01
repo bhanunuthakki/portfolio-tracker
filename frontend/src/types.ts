@@ -534,3 +534,19 @@ export interface MonthlyBriefSummary {
 export interface MonthlyBriefOut extends MonthlyBriefSummary {
   html: string;
 }
+
+export type MonthlyBriefJobStatus =
+  | "pending"
+  | "running"
+  | "succeeded"
+  | "failed";
+
+export interface MonthlyBriefJobOut {
+  job_id: number;
+  period_yyyymm: string;
+  status: MonthlyBriefJobStatus;
+  started_at: string;
+  completed_at: string | null;
+  brief_id: number | null;
+  error: string | null;
+}
