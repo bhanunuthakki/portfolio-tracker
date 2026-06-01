@@ -18,6 +18,7 @@ import type {
   InvestmentTransactionOut,
   ItemOut,
   LinkTokenOut,
+  MonthlyBriefJobOut,
   MonthlyBriefOut,
   MonthlyBriefSummary,
   PerformanceSeries,
@@ -445,8 +446,22 @@ export const api = {
   cioGetBrief: (briefId: number): Promise<MonthlyBriefOut> =>
     request(`/api/cio-advisor/briefs/${briefId}`),
 
-  cioGenerateBrief: (periodYyyymm?: string): Promise<MonthlyBriefOut> => {
+  cioGenerateBrief: (periodYyyymm?: string): Promise<MonthlyBriefJobOut> => {
     const qs = periodYyyymm ? `?period_yyyymm=${encodeURIComponent(periodYyyymm)}` : "";
     return request(`/api/cio-advisor/briefs/generate${qs}`, { method: "POST" });
+  },
+
+  cioGetBriefJob: (jobId: number): Promise<MonthlyBriefJobOut> =>
+    request(`/api/cio-advisor/briefs/jobs/${jobId}`),
+
+  // Statuses is comma-joined server-side: e.g. ["pending", "running"]
+  // → ?status=pending,running. Used on mount to detect in-flight jobs
+  // and resume polling after a page reload.
+  cioListBriefJobs: (statuses?: string[]): Promise<MonthlyBriefJobOut[]> => {
+    const qs =
+      statuses && statuses.length > 0
+        ? `?status=${encodeURIComponent(statuses.join(","))}`
+        : "";
+    return request(`/api/cio-advisor/briefs/jobs${qs}`);
   },
 };
