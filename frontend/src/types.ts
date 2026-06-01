@@ -512,6 +512,18 @@ export interface ChatTurnPostResponse extends ChatTurnOut {
   paired_turn_id: number;
 }
 
+// Discriminated by which key is present. The server emits one event
+// per `data:` line; the client parses each into one of these shapes.
+//   user_turn_id  — first event, carries the persisted user-turn id.
+//   text          — token chunk; append to the in-progress assistant bubble.
+//   error         — non-fatal; the server will still send a `done` after.
+//   done          — terminal; turn_id is the persisted assistant-turn id.
+export type CioStreamEvent =
+  | { user_turn_id: number }
+  | { text: string }
+  | { error: string }
+  | { done: true; turn_id: number };
+
 export interface MonthlyBriefSummary {
   brief_id: number;
   period_yyyymm: string;

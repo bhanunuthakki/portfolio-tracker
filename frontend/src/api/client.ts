@@ -6,6 +6,7 @@ import type {
   ChatTurnIn,
   ChatTurnOut,
   ChatTurnPostResponse,
+  CioStreamEvent,
   CoachingResult,
   ConsolidatedHoldingOut,
   DataQualityReportOut,
@@ -371,6 +372,72 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+
+  /**
+   * Stream a chat turn via SSE. POST body carries the user message; the
+   * response is `text/event-stream` with one `data: {json}\n\n` event
+   * per chunk. The signal lets the caller abort (e.g. on unmount).
+   *
+   * Yielded shapes (typed loosely so the caller can branch):
+   *   { user_turn_id: number }           — first event
+   *   { text: string }                   — token chunk (one or more)
+   *   { error: string }                  — non-fatal; still followed by `done`
+   *   { done: true, turn_id: number }    — terminal event
+   */
+  cioStreamTurn: async function* cioStreamTurn(
+    sessionId: number,
+    payload: ChatTurnIn,
+    signal?: AbortSignal,
+  ): AsyncGenerator<CioStreamEvent, void, void> {
+    const resp = await fetch(
+      `/api/cio-advisor/sessions/${sessionId}/turns/stream`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal,
+      },
+    );
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`${resp.status} ${resp.statusText}: ${text}`);
+    }
+    if (!resp.body) {
+      throw new Error("Streaming response has no body.");
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    // SSE events are delimited by a blank line. Buffer partial events
+    // across reads — a single chunk might split mid-event.
+    let buffer = "";
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep: number;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const eventBlock = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          // An event block can have multiple lines (`data:`, `event:`, etc.).
+          // We only emit `data:` lines; per SSE the runtime concatenates
+          // multiple data lines, but our server only emits one per event.
+          for (const line of eventBlock.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trimStart();
+            if (!payload) continue;
+            try {
+              yield JSON.parse(payload) as CioStreamEvent;
+            } catch {
+              // Malformed event — skip rather than break the stream.
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  },
 
   cioListBriefs: (): Promise<MonthlyBriefSummary[]> =>
     request("/api/cio-advisor/briefs"),
