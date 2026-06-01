@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
 import { CoachingPanel } from "@/components/CoachingPanel";
@@ -51,9 +52,15 @@ function isoDaysAgo(days: number): string {
 }
 
 export function TradeAnalysis(): JSX.Element {
+  const [searchParams] = useSearchParams();
   const [view, setView] = useState<View>("all");
   const [preset, setPreset] = useState<Preset>("2Y");
-  const [search, setSearch] = useState("");
+  // Deep-link support: /trade-analysis?ticker=NU pre-filters the table to that
+  // name — the research command center links here ("Open in Portfolio
+  // Tracker ↗"). Read once on mount; absent param → empty search (unchanged).
+  const [search, setSearch] = useState(() =>
+    (searchParams.get("ticker") ?? "").toUpperCase(),
+  );
 
   const startDate = useMemo(() => {
     const p = PRESETS.find((x) => x.key === preset);
