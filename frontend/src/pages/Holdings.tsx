@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
 import { DataQualityReport } from "@/components/DataQualityReport";
@@ -117,6 +118,10 @@ function EarningsThesisCell({
 }
 
 export function Holdings(): JSX.Element {
+  const [searchParams] = useSearchParams();
+  // Deep-link support: /holdings?ticker=NU highlights + scrolls to that row
+  // (the research command center can link here). Absent → no focused row.
+  const focusTicker = (searchParams.get("ticker") ?? "").toUpperCase();
   const { data, isLoading, isError } = useQuery({
     queryKey: ["holdings"],
     queryFn: () => api.latestHoldings(),
@@ -153,7 +158,11 @@ export function Holdings(): JSX.Element {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {data.map((h) => (
-              <Row key={h.security_id} h={h} />
+              <Row
+                key={h.security_id}
+                h={h}
+                focus={focusTicker !== "" && (h.ticker ?? "").toUpperCase() === focusTicker}
+              />
             ))}
           </tbody>
         </table>
@@ -166,8 +175,14 @@ export function Holdings(): JSX.Element {
   );
 }
 
-function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
-  const [open, setOpen] = useState(false);
+function Row({ h, focus }: { h: ConsolidatedHoldingOut; focus: boolean }): JSX.Element {
+  const [open, setOpen] = useState(focus); // auto-expand the deep-linked row
+  const rowRef = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    if (focus && rowRef.current) {
+      rowRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [focus]);
   const value = h.total_value !== null ? parseFloat(h.total_value) : null;
   const cost = h.total_cost_basis !== null ? parseFloat(h.total_cost_basis) : null;
   const unrealized = h.unrealized_pnl !== null ? parseFloat(h.unrealized_pnl) : null;
@@ -194,7 +209,8 @@ function Row({ h }: { h: ConsolidatedHoldingOut }): JSX.Element {
   return (
     <>
       <tr
-        className="cursor-pointer hover:bg-slate-50"
+        ref={rowRef}
+        className={`cursor-pointer hover:bg-slate-50 ${focus ? "bg-amber-100" : ""}`}
         onClick={() => setOpen(!open)}
       >
         <Td className="font-mono text-slate-900">
