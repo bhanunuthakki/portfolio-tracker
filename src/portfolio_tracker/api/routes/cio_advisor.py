@@ -1,9 +1,14 @@
 """CIO advisor endpoints — chat sessions + monthly briefs.
 
-All LLM calls are dispatched through `run_in_threadpool` because
-`claude_cli.py` is a sync subprocess wrapper. Without the threadpool
-hop the chat turn (~10–15s) or brief generation (~30–60s) would block
-the FastAPI event loop and stall every other request.
+LLM calls dispatch through `run_in_threadpool` (chat) or FastAPI's
+`BackgroundTasks` (monthly brief). `claude_cli.py` is a sync subprocess
+wrapper; without those hops the chat turn (~10–15s) or brief generation
+(~30–60s) would block the event loop.
+
+The monthly brief is async-spawned: `POST /briefs/generate` returns
+immediately with a job_id (HTTP 202) and the actual Opus call runs in a
+BackgroundTask. The frontend polls `GET /briefs/jobs/{job_id}` every
+few seconds until status flips to `succeeded` or `failed`.
 
 The streaming chat endpoint (`/turns/stream`) bridges the sync subprocess
 to an async generator via a thread + asyncio.Queue. The threadpool hop
@@ -20,8 +25,13 @@ Surfaces
 * `GET  /api/cio-advisor/sessions/{id}/turns` — load the transcript.
 * `POST /api/cio-advisor/sessions/{id}/turns` — send a message + get reply (blocking).
 * `POST /api/cio-advisor/sessions/{id}/turns/stream` — same, but SSE token stream.
-* `POST /api/cio-advisor/briefs/generate` — generate or overwrite the
-  current-month brief. Returns the full HTML body.
+* `POST /api/cio-advisor/briefs/generate` — spawn a brief-generation
+  job. Returns the job_id immediately (202). Idempotent: if a
+  pending/running job already exists for this period, returns it
+  unchanged.
+* `GET  /api/cio-advisor/briefs/jobs` — list jobs; supports
+  `?status=pending,running` for the frontend's resume-on-mount flow.
+* `GET  /api/cio-advisor/briefs/jobs/{job_id}` — poll a job's status.
 * `GET  /api/cio-advisor/briefs` — list briefs by period (newest first).
 * `GET  /api/cio-advisor/briefs/{id}` — fetch one brief by id.
 """
@@ -31,9 +41,10 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from datetime import date
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -44,17 +55,22 @@ from portfolio_tracker.services.cio_advisor import (
     ChatSessionOut,
     ChatTurnIn,
     ChatTurnOut,
+    MonthlyBriefJobOut,
     MonthlyBriefOut,
     MonthlyBriefSummary,
     begin_streamed_turn,
+    create_brief_job,
     create_session,
     delete_session,
     finalize_streamed_turn,
-    generate_brief,
+    find_in_flight_brief_job,
     get_brief,
+    get_brief_job,
+    list_brief_jobs,
     list_briefs,
     list_sessions,
     list_turns,
+    run_brief_job,
     send_turn,
     stream_chat_response,
 )
@@ -267,32 +283,76 @@ async def post_turn_stream(
 
 
 # ---------------------------------------------------------------------------
-# Monthly briefs
+# Monthly briefs — async job spawn + poll
 # ---------------------------------------------------------------------------
 
 
-class _GenerateBriefIn:
-    """Optional override for which YYYY-MM period to generate. Defaults
-    to the current month."""
-    period_yyyymm: str | None = None
+def _resolve_period(period_yyyymm: str | None) -> str:
+    """Default to the current calendar month if the client didn't specify."""
+    if period_yyyymm is not None:
+        return period_yyyymm
+    today = date.today()
+    return f"{today.year:04d}-{today.month:02d}"
 
 
 @router.post(
     "/briefs/generate",
-    response_model=MonthlyBriefOut,
-    status_code=status.HTTP_201_CREATED,
+    response_model=MonthlyBriefJobOut,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def post_brief(
+    background_tasks: BackgroundTasks,
     db: Annotated[Session, Depends(get_session)],
     period_yyyymm: str | None = None,
-) -> MonthlyBriefOut:
-    """Generate (or regenerate, overwriting) the brief for `period_yyyymm`.
+) -> MonthlyBriefJobOut:
+    """Spawn (or join) a brief-generation job for `period_yyyymm`.
 
-    The Opus call is dispatched via run_in_threadpool with a 5-min ceiling
-    inherited from the cio_advisor service. Frontend polls / shows a
-    progress indicator while this is in flight.
+    Returns immediately with a job row (HTTP 202). The actual Opus call
+    runs in a FastAPI BackgroundTask. The frontend polls
+    `GET /briefs/jobs/{job_id}` until status flips to `succeeded` or
+    `failed`.
+
+    Idempotent for in-flight work: if there's already a pending/running
+    job for this period, the existing job is returned unchanged rather
+    than spawning a second Opus call (each ~30-60s and ~$0.50).
     """
-    return await run_in_threadpool(generate_brief, db, period_yyyymm)
+    period = _resolve_period(period_yyyymm)
+
+    in_flight = find_in_flight_brief_job(db, period)
+    if in_flight is not None:
+        return in_flight
+
+    job = create_brief_job(db, period)
+    background_tasks.add_task(run_brief_job, job.job_id, period)
+    return job
+
+
+@router.get("/briefs/jobs", response_model=list[MonthlyBriefJobOut])
+def get_brief_jobs(
+    db: Annotated[Session, Depends(get_session)],
+    status: str | None = None,
+) -> list[MonthlyBriefJobOut]:
+    """List brief jobs, newest first.
+
+    `status` accepts a comma-separated list (e.g. `pending,running`) so
+    the frontend can resume polling on mount without missing the tiny
+    `pending` window between INSERT and the BackgroundTask starting.
+    """
+    statuses: list[str] | None = None
+    if status:
+        statuses = [s.strip() for s in status.split(",") if s.strip()]
+    return list_brief_jobs(db, statuses)
+
+
+@router.get("/briefs/jobs/{job_id}", response_model=MonthlyBriefJobOut)
+def get_brief_job_by_id(
+    job_id: int,
+    db: Annotated[Session, Depends(get_session)],
+) -> MonthlyBriefJobOut:
+    j = get_brief_job(db, job_id)
+    if j is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"job {job_id} not found")
+    return j
 
 
 @router.get("/briefs", response_model=list[MonthlyBriefSummary])
