@@ -28,7 +28,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
@@ -207,6 +207,21 @@ def compute_position_alpha(
     all_tickers = list(by_ticker.keys())
     prices_start = _price_per_ticker_at_date(session, all_tickers, start_date)
     prices_end = _price_per_ticker_at_date(session, all_tickers, end_date)
+    # 3b. Broker-reported V from snapshots when one exists on the exact
+    # date. This is the same source Holdings + Trade Analysis + Trade
+    # Timeline use, so cross-view dollar amounts agree. We only fall
+    # back to `qty × Price.close` when there's no snapshot for the date
+    # — i.e. for historical window-start dates the user didn't already
+    # have snapshots on. yfinance close and broker close can drift up
+    # to ~3% on international ADRs and thinly traded names; for
+    # current-day end_date this drift was the only remaining cross-
+    # view inconsistency after the cost_basis_override unification.
+    snapshot_values_start = _snapshot_value_per_ticker(
+        session, start_date, accts, all_tickers
+    )
+    snapshot_values_end = _snapshot_value_per_ticker(
+        session, end_date, accts, all_tickers
+    )
 
     # 4. Benchmark closes (SPY, QQQ, and policy basket)
     spy_closes = _benchmark_closes_with_lookback(session, "SPY", start_date, end_date)
@@ -245,8 +260,30 @@ def compute_position_alpha(
         q_end = qty_at_end.get(t_up, Decimal(0))
         p_start = prices_start.get(t_up)
         p_end = prices_end.get(t_up)
-        v_start = q_start * p_start if (q_start != 0 and p_start is not None) else Decimal(0)
-        v_end = q_end * p_end if (q_end != 0 and p_end is not None) else Decimal(0)
+        # Prefer broker `institution_value` from the snapshot when one
+        # exists for the exact date. Falls back to qty × Price.close
+        # when there's no snapshot (e.g. historical window-start dates
+        # the user hadn't been running snapshots for). Keeps Holdings,
+        # Trade Timeline, Trade Analysis, and Position Alpha agreeing
+        # on dollar values when they share the same observation date.
+        snap_start = snapshot_values_start.get(t_up)
+        snap_end = snapshot_values_end.get(t_up)
+        if snap_start is not None and snap_start > 0:
+            v_start = snap_start
+        else:
+            v_start = (
+                q_start * p_start
+                if (q_start != 0 and p_start is not None)
+                else Decimal(0)
+            )
+        if snap_end is not None and snap_end > 0:
+            v_end = snap_end
+        else:
+            v_end = (
+                q_end * p_end
+                if (q_end != 0 and p_end is not None)
+                else Decimal(0)
+            )
 
         bought_sum = sum((a for _, a in b["buys"]), Decimal(0))
         sold_sum = sum((a for _, a in b["sells"]), Decimal(0))
@@ -779,6 +816,46 @@ def _resolve_tickers(session: Session, qty_by_sid: dict[int, Decimal]) -> dict[s
 # ---------------------------------------------------------------------------
 # Helpers — price per ticker at a date
 # ---------------------------------------------------------------------------
+
+
+def _snapshot_value_per_ticker(
+    session: Session,
+    target_date: date,
+    accts: frozenset[int],
+    tickers: list[str],
+) -> dict[str, Decimal]:
+    """Return broker-reported `institution_value` summed per ticker for
+    snapshots ON `target_date`. Empty dict when no snapshot exists on
+    that exact date.
+
+    Caller (Position Alpha) prefers this over qty × Price.close when
+    a snapshot is available, so V_end matches what Holdings shows.
+    yfinance / Stooq closes can drift 1-3 % from broker close on
+    international ADRs (NVO), Korea ETFs (FLKR), and other thin names
+    — falling back only when there's no snapshot for the date keeps
+    historical reconstruction working for window-start dates that
+    predate snapshot history.
+    """
+    if not tickers:
+        return {}
+    rows = session.execute(
+        select(
+            Security.ticker,
+            func.sum(HoldingSnapshot.institution_value),
+        )
+        .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
+        .where(HoldingSnapshot.snapshot_date == target_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
+        .where(Security.ticker.in_(tickers))
+        .group_by(Security.ticker)
+    ).all()
+    out: dict[str, Decimal] = {}
+    for t, v in rows:
+        if t is None or v is None:
+            continue
+        # Group key matches `Price` table casing — uppercase for the lookup.
+        out[t.upper()] = Decimal(v)
+    return out
 
 
 def _price_per_ticker_at_date(
