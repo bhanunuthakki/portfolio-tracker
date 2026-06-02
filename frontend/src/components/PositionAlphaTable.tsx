@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
-import { InfoButton } from "@/components/ui";
+import { InfoButton, SortableTh } from "@/components/ui";
+import { useTableSort } from "@/components/useTableSort";
 import type {
   ConsolidatedHoldingOut,
   PositionAlphaResult,
@@ -58,9 +59,22 @@ export function PositionAlphaTable({
    */
   focusTicker?: string;
 }): JSX.Element {
-  const rows = [...data.rows].sort(
-    (a, b) => parseFloat(a.alpha) - parseFloat(b.alpha),
+  const accessors = useMemo(
+    () => ({
+      ticker: (r: PositionAlphaRow) => r.ticker,
+      v_start: (r: PositionAlphaRow) => parseFloat(r.value_at_start),
+      bought: (r: PositionAlphaRow) => parseFloat(r.bought_in_window),
+      sold: (r: PositionAlphaRow) => parseFloat(r.sold_in_window),
+      v_end: (r: PositionAlphaRow) => parseFloat(r.value_at_end),
+      actual: (r: PositionAlphaRow) => parseFloat(r.actual_pl),
+      spy: (r: PositionAlphaRow) => parseFloat(r.spy_counterfactual_pl),
+      alpha: (r: PositionAlphaRow) => parseFloat(r.alpha),
+    }),
+    [],
   );
+  // Default to alpha ascending — the biggest laggards vs SPY surface first.
+  const sort = useTableSort(data.rows, "alpha", "asc", accessors);
+  const rows = sort.sortedRows;
   const totalActual = parseFloat(data.total_actual_pl);
   const totalSpy = parseFloat(data.total_spy_pl);
   const totalAlpha = parseFloat(data.total_alpha);
@@ -91,35 +105,58 @@ export function PositionAlphaTable({
       <table className="min-w-full text-xs">
         <thead className="bg-slate-50 text-slate-600">
           <tr>
-            <th className="px-3 py-2 text-left font-medium">Ticker</th>
-            <th className="px-3 py-2 text-right font-medium">
-              <span className="inline-flex items-center justify-end gap-1">
-                V start
-                <InfoButton label="V start" explainer={V_START_EXPLAINER} />
-              </span>
-            </th>
-            <th className="px-3 py-2 text-right font-medium">Bought</th>
-            <th className="px-3 py-2 text-right font-medium">Sold</th>
-            <th className="px-3 py-2 text-right font-medium">V end</th>
-            <th className="px-3 py-2 text-right font-medium">Actual P&amp;L</th>
-            <th className="px-3 py-2 text-right font-medium">
-              <span className="inline-flex items-center justify-end gap-1">
-                SPY counterfactual
+            <SortableTh column="ticker" sort={sort} pad="tight">
+              Ticker
+            </SortableTh>
+            <SortableTh
+              column="v_start"
+              align="right"
+              sort={sort}
+              pad="tight"
+              aside={<InfoButton label="V start" explainer={V_START_EXPLAINER} />}
+            >
+              V start
+            </SortableTh>
+            <SortableTh column="bought" align="right" sort={sort} pad="tight">
+              Bought
+            </SortableTh>
+            <SortableTh column="sold" align="right" sort={sort} pad="tight">
+              Sold
+            </SortableTh>
+            <SortableTh column="v_end" align="right" sort={sort} pad="tight">
+              V end
+            </SortableTh>
+            <SortableTh column="actual" align="right" sort={sort} pad="tight">
+              Actual P&amp;L
+            </SortableTh>
+            <SortableTh
+              column="spy"
+              align="right"
+              sort={sort}
+              pad="tight"
+              aside={
                 <InfoButton
                   label="SPY counterfactual"
                   explainer={COUNTERFACTUAL_EXPLAINER}
                 />
-              </span>
-            </th>
-            <th className="px-3 py-2 text-right font-medium">
-              <span className="inline-flex items-center justify-end gap-1">
-                Alpha
+              }
+            >
+              SPY counterfactual
+            </SortableTh>
+            <SortableTh
+              column="alpha"
+              align="right"
+              sort={sort}
+              pad="tight"
+              aside={
                 <InfoButton
                   label="Position alpha"
                   explainer={POSITION_ALPHA_EXPLAINER}
                 />
-              </span>
-            </th>
+              }
+            >
+              Alpha
+            </SortableTh>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">

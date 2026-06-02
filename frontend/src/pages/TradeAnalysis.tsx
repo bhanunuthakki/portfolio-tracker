@@ -11,6 +11,7 @@ import {
 import {
   Card,
   InfoButton,
+  SortableTh,
   WarningBanner,
   fmtUSD,
   pnlClass,
@@ -106,16 +107,13 @@ export function TradeAnalysis(): JSX.Element {
       pnl: (t: TickerTrade) => parseFloat(t.pnl_dollars),
       pnl_pct: (t: TickerTrade) => (t.pnl_pct ?? -Infinity),
       trade_count: (t: TickerTrade) => t.trade_count,
+      earnings: (t: TickerTrade) => t.es_next_earnings_date ?? "",
     }),
     [],
   );
 
-  const { sortedRows, toggle, sortIndicator } = useTableSort(
-    searchFiltered,
-    "pnl",
-    "desc",
-    accessors,
-  );
+  const sort = useTableSort(searchFiltered, "pnl", "desc", accessors);
+  const { sortedRows } = sort;
 
   const totals = useMemo(() => {
     let wins = 0,
@@ -231,40 +229,42 @@ export function TradeAnalysis(): JSX.Element {
               <table className="w-full text-xs">
                 <thead className="bg-slate-50 text-slate-600">
                   <tr>
-                    <Sh onClick={() => toggle("ticker")}>
-                      Ticker{sortIndicator("ticker")}
-                    </Sh>
-                    <Sh onClick={() => toggle("name")}>
-                      Name{sortIndicator("name")}
-                    </Sh>
-                    <Sh onClick={() => toggle("first_buy")}>
-                      First buy{sortIndicator("first_buy")}
-                    </Sh>
-                    <Sh onClick={() => toggle("last_action")}>
-                      Last action{sortIndicator("last_action")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("bought")}>
-                      Bought{sortIndicator("bought")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("sold")}>
-                      Sold{sortIndicator("sold")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("qty")}>
-                      Today qty{sortIndicator("qty")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("value")}>
-                      Today value{sortIndicator("value")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("pnl")}>
-                      P&amp;L $ {sortIndicator("pnl")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("pnl_pct")}>
-                      P&amp;L %{sortIndicator("pnl_pct")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("trade_count")}>
-                      Trades{sortIndicator("trade_count")}
-                    </Sh>
-                    <Sh onClick={() => undefined}>Earnings / thesis</Sh>
+                    <SortableTh column="ticker" sort={sort} pad="tight">
+                      Ticker
+                    </SortableTh>
+                    <SortableTh column="name" sort={sort} pad="tight">
+                      Name
+                    </SortableTh>
+                    <SortableTh column="first_buy" sort={sort} pad="tight">
+                      First buy
+                    </SortableTh>
+                    <SortableTh column="last_action" sort={sort} pad="tight">
+                      Last action
+                    </SortableTh>
+                    <SortableTh column="bought" align="right" sort={sort} pad="tight">
+                      Bought
+                    </SortableTh>
+                    <SortableTh column="sold" align="right" sort={sort} pad="tight">
+                      Sold
+                    </SortableTh>
+                    <SortableTh column="qty" align="right" sort={sort} pad="tight">
+                      Today qty
+                    </SortableTh>
+                    <SortableTh column="value" align="right" sort={sort} pad="tight">
+                      Today value
+                    </SortableTh>
+                    <SortableTh column="pnl" align="right" sort={sort} pad="tight">
+                      P&amp;L $
+                    </SortableTh>
+                    <SortableTh column="pnl_pct" align="right" sort={sort} pad="tight">
+                      P&amp;L %
+                    </SortableTh>
+                    <SortableTh column="trade_count" align="right" sort={sort} pad="tight">
+                      Trades
+                    </SortableTh>
+                    <SortableTh column="earnings" sort={sort} pad="tight">
+                      Earnings / thesis
+                    </SortableTh>
                   </tr>
                 </thead>
                 <tbody>
@@ -405,28 +405,6 @@ function EarningsThesisChips({ trade }: { trade: TickerTrade }): JSX.Element {
         </a>
       ) : null}
     </div>
-  );
-}
-
-function Sh({
-  children,
-  align,
-  onClick,
-}: {
-  children: React.ReactNode;
-  align?: "left" | "right";
-  onClick: () => void;
-}): JSX.Element {
-  return (
-    <th
-      onClick={onClick}
-      className={[
-        "cursor-pointer select-none px-3 py-2 text-xs font-medium uppercase tracking-wide text-slate-600 hover:bg-slate-100",
-        align === "right" ? "text-right" : "text-left",
-      ].join(" ")}
-    >
-      {children}
-    </th>
   );
 }
 

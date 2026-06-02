@@ -390,3 +390,93 @@ class HumanCapitalOverlapsOut(BaseModel):
 
     overlaps: list[HumanCapitalOverlapOut]
     bucket_caps_pct: dict[str, Decimal]
+
+
+# ---------------------------------------------------------------------------
+# Positioning — the Holdings "how is the book positioned" cuts
+# ---------------------------------------------------------------------------
+
+
+class PositioningBucketOut(BaseModel):
+    """One slice of a breakdown: a labeled bucket with its share of the book."""
+
+    label: str
+    value: Decimal
+    weight_pct: Decimal
+    count: int
+
+
+class ConcentrationOut(BaseModel):
+    """Concentration summary across consolidated-by-security positions."""
+
+    num_positions: int
+    top1_weight_pct: Decimal | None
+    top5_weight_pct: Decimal | None
+    top10_weight_pct: Decimal | None
+    # HHI on the 0-10000 scale (sum of squared percent weights);
+    # effective_holdings = 1 / sum(weight_fraction^2) reads as "behaves like
+    # ~N equal positions".
+    hhi: float | None
+    effective_holdings: float | None
+
+
+class PositionCorrelationRow(BaseModel):
+    """Per-ticker correlation + beta to each benchmark over the window.
+
+    Each `correlation_*` / `beta_*` is None when that security lacks enough
+    overlapping price history with the benchmark (see `sample_size`).
+    """
+
+    security_id: int
+    ticker: str | None
+    name: str | None
+    value: Decimal
+    weight_pct: Decimal
+    sample_size: int
+    correlation_spy: float | None
+    beta_spy: float | None
+    correlation_qqq: float | None
+    beta_qqq: float | None
+    correlation_policy: float | None
+    beta_policy: float | None
+
+
+class PositioningOut(BaseModel):
+    """Everything the Holdings positioning section renders in one payload."""
+
+    snapshot_date: date
+    start_date: date
+    end_date: date
+    total_value: Decimal
+    by_asset_type: list[PositioningBucketOut]
+    by_sector: list[PositioningBucketOut]
+    by_region: list[PositioningBucketOut]
+    by_account_type: list[PositioningBucketOut]
+    concentration: ConcentrationOut
+    correlations: list[PositionCorrelationRow]
+    # Book value-weighted average correlation to SPY across the names that
+    # have a correlation — a single "how diversified am I vs the market" read.
+    weighted_avg_correlation_spy: float | None
+    has_policy: bool
+    notes: list[str]
+
+
+class SecurityClassificationIn(BaseModel):
+    """Set / replace the manual sector + region classification for a security."""
+
+    security_id: int
+    sector: str | None = None
+    region: str | None = None
+    notes: str | None = None
+
+
+class SecurityClassificationOut(BaseModel):
+    security_id: int
+    ticker: str | None
+    security_name: str | None
+    sector: str | None
+    region: str | None
+    # 'auto' (yfinance enrichment) | 'manual' (user-entered)
+    source: str
+    notes: str | None
+    updated_at: datetime

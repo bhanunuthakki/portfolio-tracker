@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
 import { DataQualityReport } from "@/components/DataQualityReport";
+import { PositioningSection } from "@/components/PositioningSection";
 import {
   Card,
   EmptyState,
@@ -11,9 +12,10 @@ import {
   fmtSignedUSD,
   fmtUSD,
   pnlClass,
+  SortableTh,
   Td,
-  Th,
 } from "@/components/ui";
+import { useTableSort } from "@/components/useTableSort";
 import type {
   ConsolidatedHoldingOut,
   CostBasisSource,
@@ -127,6 +129,30 @@ export function Holdings(): JSX.Element {
     queryFn: () => api.latestHoldings(),
   });
 
+  const accessors = useMemo(
+    () => ({
+      ticker: (h: ConsolidatedHoldingOut) => h.ticker ?? "",
+      name: (h: ConsolidatedHoldingOut) => h.name ?? "",
+      quantity: (h: ConsolidatedHoldingOut) => parseFloat(h.total_quantity),
+      avg_cost: (h: ConsolidatedHoldingOut) =>
+        h.weighted_avg_cost_per_share !== null
+          ? parseFloat(h.weighted_avg_cost_per_share)
+          : null,
+      cost: (h: ConsolidatedHoldingOut) =>
+        h.total_cost_basis !== null ? parseFloat(h.total_cost_basis) : null,
+      value: (h: ConsolidatedHoldingOut) =>
+        h.total_value !== null ? parseFloat(h.total_value) : null,
+      unrealized: (h: ConsolidatedHoldingOut) =>
+        h.unrealized_pnl !== null ? parseFloat(h.unrealized_pnl) : null,
+      earnings: (h: ConsolidatedHoldingOut) =>
+        h.earnings?.next_earnings_date ?? "",
+      accounts: (h: ConsolidatedHoldingOut) => h.accounts.length,
+    }),
+    [],
+  );
+  // Default to largest position first — the natural way to read a book.
+  const sort = useTableSort(data ?? [], "value", "desc", accessors);
+
   if (isLoading) return <div className="text-sm text-slate-500">Loading…</div>;
   if (isError)
     return <ErrorBanner>Failed to load holdings.</ErrorBanner>;
@@ -141,23 +167,38 @@ export function Holdings(): JSX.Element {
   return (
     <div className="space-y-4">
       <DataQualityReport />
+      <PositioningSection />
       <Card className="overflow-hidden">
         <table className="min-w-full divide-y divide-slate-200">
           <thead className="bg-slate-50">
             <tr>
-              <Th>Ticker</Th>
-              <Th>Name</Th>
-              <Th align="right">Quantity</Th>
-              <Th align="right">Avg cost / share</Th>
-              <Th align="right">Cost basis</Th>
-              <Th align="right">Value</Th>
-              <Th align="right">Unrealized</Th>
-              <Th>Earnings / thesis</Th>
-              <Th align="right">Accounts</Th>
+              <SortableTh column="ticker" sort={sort}>Ticker</SortableTh>
+              <SortableTh column="name" sort={sort}>Name</SortableTh>
+              <SortableTh column="quantity" align="right" sort={sort}>
+                Quantity
+              </SortableTh>
+              <SortableTh column="avg_cost" align="right" sort={sort}>
+                Avg cost / share
+              </SortableTh>
+              <SortableTh column="cost" align="right" sort={sort}>
+                Cost basis
+              </SortableTh>
+              <SortableTh column="value" align="right" sort={sort}>
+                Value
+              </SortableTh>
+              <SortableTh column="unrealized" align="right" sort={sort}>
+                Unrealized
+              </SortableTh>
+              <SortableTh column="earnings" sort={sort}>
+                Earnings / thesis
+              </SortableTh>
+              <SortableTh column="accounts" align="right" sort={sort}>
+                Accounts
+              </SortableTh>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {data.map((h) => (
+            {sort.sortedRows.map((h) => (
               <Row
                 key={h.security_id}
                 h={h}
@@ -167,8 +208,9 @@ export function Holdings(): JSX.Element {
           </tbody>
         </table>
         <p className="border-t border-slate-100 bg-slate-50 px-4 py-2.5 text-xs text-slate-500">
-          Positions consolidated by ticker. Click any row to expand the
-          per-account drill-down. Avg cost = total cost basis ÷ total shares.
+          Positions consolidated by ticker. Click any header to sort; click any
+          row to expand the per-account drill-down. Avg cost = total cost basis ÷
+          total shares.
         </p>
       </Card>
     </div>

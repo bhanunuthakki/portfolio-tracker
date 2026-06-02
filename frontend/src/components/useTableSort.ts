@@ -3,9 +3,14 @@ import { useMemo, useState } from "react";
 /**
  * Hook + helpers for sortable tables with search filtering.
  *
+ * PROJECT CONVENTION: every data table in this app is sortable on every
+ * column, ascending and descending. Pair this hook with the <SortableTh>
+ * primitive in `ui.tsx` — don't hand-roll one-off clickable <th>s. New
+ * tables (and new columns on existing tables) must follow this.
+ *
  * Usage:
  *
- *   const { sortKey, sortDir, sortedRows, headerProps } = useTableSort(
+ *   const sort = useTableSort(
  *     rows,
  *     "date",            // default sort key
  *     "desc",            // default direction
@@ -16,13 +21,15 @@ import { useMemo, useState } from "react";
  *     },
  *   );
  *
- *   // In your <th>:
- *   <th {...headerProps("date", "Date")}>Date</th>
+ *   // Headers — one <SortableTh> per column, pass the whole controller:
+ *   <SortableTh column="date" sort={sort}>Date</SortableTh>
+ *   <SortableTh column="amount" align="right" sort={sort}>Amount</SortableTh>
  *
- *   // Or for finer control:
- *   <th onClick={() => toggle("date")}>
- *     Date {sortIndicator("date")}
- *   </th>
+ *   // Body:
+ *   {sort.sortedRows.map(...)}
+ *
+ * `setSort(key, dir)` is for preset shortcuts (e.g. a "Best alpha" chip
+ * that jumps straight to alpha/desc) — the column headers stay in sync.
  */
 
 export type SortDir = "asc" | "desc";
@@ -34,6 +41,7 @@ export interface UseTableSortResult<T> {
   sortDir: SortDir;
   sortedRows: T[];
   toggle: (key: string) => void;
+  setSort: (key: string, dir: SortDir) => void;
   sortIndicator: (key: string) => string;
 }
 
@@ -73,10 +81,27 @@ export function useTableSort<T>(
       setSortDir((d) => (d === "asc" ? "desc" : "asc"));
     } else {
       setSortKey(key);
-      // Default to descending for numerics, ascending for everything else.
-      // Users almost always want "biggest first" on a $ column.
-      setSortDir("desc");
+      // Default to descending for numerics ("biggest first" on a $ column is
+      // almost always what you want), ascending for text/dates (A→Z). We sniff
+      // the column type from the first non-null value the accessor yields.
+      const acc = accessors[key];
+      let firstVal: string | number | null | undefined;
+      if (acc) {
+        for (const r of rows) {
+          const v = acc(r);
+          if (v != null) {
+            firstVal = v;
+            break;
+          }
+        }
+      }
+      setSortDir(typeof firstVal === "number" ? "desc" : "asc");
     }
+  };
+
+  const setSort = (key: string, dir: SortDir) => {
+    setSortKey(key);
+    setSortDir(dir);
   };
 
   const sortIndicator = (key: string): string => {
@@ -84,7 +109,7 @@ export function useTableSort<T>(
     return sortDir === "asc" ? " ↑" : " ↓";
   };
 
-  return { sortKey, sortDir, sortedRows, toggle, sortIndicator };
+  return { sortKey, sortDir, sortedRows, toggle, setSort, sortIndicator };
 }
 
 /**
