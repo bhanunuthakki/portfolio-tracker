@@ -70,3 +70,9 @@ typeCheckingMode = "all"
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
 reportAny = false
+
+[tool.pytest.ini_options]
+# Put `src/` on the path so `pytest` works from a fresh clone without an
+# editable install, and only collect from `tests/`.
+pythonpath = ["src"]
+testpaths = ["tests"]
