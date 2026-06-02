@@ -26,12 +26,15 @@ from portfolio_tracker.models import (
     CostBasisOverride,
     InvestmentTransaction,
     Security,
+    SecurityClassification,
     TickerOverride,
     TransactionOverride,
 )
 from portfolio_tracker.schemas import (
     CostBasisOverrideIn,
     CostBasisOverrideOut,
+    SecurityClassificationIn,
+    SecurityClassificationOut,
     TickerOverrideIn,
     TickerOverrideOut,
     TransactionOverrideIn,
@@ -300,6 +303,91 @@ def delete_transaction_override(
     session: Annotated[Session, Depends(get_session)],
 ) -> None:
     record = session.get(TransactionOverride, plaid_investment_transaction_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND)
+    session.delete(record)
+    session.commit()
+
+
+# ---- security classification (sector / region) ---------------------------
+
+
+def _clean(value: str | None) -> str | None:
+    """Trim a label; treat blank as 'unset' so the bucket falls back cleanly."""
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _serialize_classification(
+    classification: SecurityClassification, security: Security
+) -> SecurityClassificationOut:
+    return SecurityClassificationOut(
+        security_id=classification.security_id,
+        ticker=security.ticker,
+        security_name=security.name,
+        sector=classification.sector,
+        region=classification.region,
+        source=classification.source,
+        notes=classification.notes,
+        updated_at=classification.updated_at,
+    )
+
+
+@router.get("/security-classification", response_model=list[SecurityClassificationOut])
+def list_security_classifications(
+    session: Annotated[Session, Depends(get_session)],
+) -> list[SecurityClassificationOut]:
+    rows = session.execute(
+        select(SecurityClassification, Security)
+        .join(Security, Security.security_id == SecurityClassification.security_id)
+        .order_by(Security.ticker)
+    ).all()
+    return [_serialize_classification(c, s) for c, s in rows]
+
+
+@router.put("/security-classification", response_model=SecurityClassificationOut)
+def upsert_security_classification(
+    body: SecurityClassificationIn,
+    session: Annotated[Session, Depends(get_session)],
+) -> SecurityClassificationOut:
+    security = session.get(Security, body.security_id)
+    if security is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "security not found")
+    sector = _clean(body.sector)
+    region = _clean(body.region)
+    existing = session.get(SecurityClassification, body.security_id)
+    if existing is None:
+        existing = SecurityClassification(
+            security_id=body.security_id,
+            sector=sector,
+            region=region,
+            source="manual",
+            notes=_clean(body.notes),
+        )
+        session.add(existing)
+    else:
+        # A PUT is always a human edit; promote to 'manual' so the yfinance
+        # enrichment job won't overwrite the user's chosen value.
+        existing.sector = sector
+        existing.region = region
+        existing.source = "manual"
+        existing.notes = _clean(body.notes)
+    session.commit()
+    session.refresh(existing)
+    return _serialize_classification(existing, security)
+
+
+@router.delete(
+    "/security-classification/{security_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_security_classification(
+    security_id: int,
+    session: Annotated[Session, Depends(get_session)],
+) -> None:
+    record = session.get(SecurityClassification, security_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     session.delete(record)
