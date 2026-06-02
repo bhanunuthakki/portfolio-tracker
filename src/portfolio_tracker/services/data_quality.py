@@ -11,7 +11,7 @@ The report is read-only. Findings are computed on demand — no caching.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -80,7 +80,7 @@ def build_report(session: Session) -> DataQualityReportOut:
         counts[f.severity] += 1
 
     return DataQualityReportOut(
-        generated_at=datetime.now(timezone.utc),
+        generated_at=datetime.now(UTC),
         findings=findings,
         summary_counts=dict(counts),
     )
@@ -97,8 +97,7 @@ def _find_missing_cost_basis(session: Session) -> list[DataQualityFindingOut]:
     if not accts:
         return []
     latest_date = session.execute(
-        select(func.max(HoldingSnapshot.snapshot_date))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
@@ -123,13 +122,9 @@ def _find_missing_cost_basis(session: Session) -> list[DataQualityFindingOut]:
         if (a.account_id, s.security_id) in overridden_keys:
             continue
         ticker = s.ticker or "unknown"
-        current_price = (
-            float(h.institution_price) if h.institution_price is not None else None
-        )
+        current_price = float(h.institution_price) if h.institution_price is not None else None
         price_hint = (
-            f" Current price ≈ ${current_price:,.0f}/share."
-            if current_price is not None
-            else ""
+            f" Current price ≈ ${current_price:,.0f}/share." if current_price is not None else ""
         )
         findings.append(
             DataQualityFindingOut(
@@ -178,15 +173,13 @@ def _find_untickered_securities(session: Session) -> list[DataQualityFindingOut]
     if not accts:
         return []
     latest_date = session.execute(
-        select(func.max(HoldingSnapshot.snapshot_date))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
 
     overridden_security_ids = {
-        ov.security_id
-        for ov in session.execute(select(TickerOverride)).scalars().all()
+        ov.security_id for ov in session.execute(select(TickerOverride)).scalars().all()
     }
 
     rows = session.execute(
@@ -243,22 +236,25 @@ def _find_securities_without_prices(session: Session) -> list[DataQualityFinding
     if not accts:
         return []
     latest_date = session.execute(
-        select(func.max(HoldingSnapshot.snapshot_date))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
 
-    held_securities = session.execute(
-        select(Security)
-        .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
-        .where(HoldingSnapshot.snapshot_date == latest_date)
-        .where(HoldingSnapshot.account_id.in_(accts))
-        .where(Security.ticker.is_not(None))
-        .where(Security.is_cash_equivalent.is_(False))
-        .where(HoldingSnapshot.quantity > 0)
-        .group_by(Security.security_id)
-    ).scalars().all()
+    held_securities = (
+        session.execute(
+            select(Security)
+            .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
+            .where(HoldingSnapshot.snapshot_date == latest_date)
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .where(Security.ticker.is_not(None))
+            .where(Security.is_cash_equivalent.is_(False))
+            .where(HoldingSnapshot.quantity > 0)
+            .group_by(Security.security_id)
+        )
+        .scalars()
+        .all()
+    )
 
     findings: list[DataQualityFindingOut] = []
     for s in held_securities:
@@ -360,23 +356,20 @@ def _find_stale_items(session: Session) -> list[DataQualityFindingOut]:
     around for connection-slot reasons but explicitly aren't expected to
     influence the numbers, so a stale snapshot doesn't matter.
     """
-    threshold = datetime.now(timezone.utc) - timedelta(days=7)
-    rows = session.execute(
-        select(Item)
-        .where(Item.is_data_active.is_(True))
-        .where(
-            (Item.last_refreshed_at.is_(None))
-            | (Item.last_refreshed_at < threshold)
+    threshold = datetime.now(UTC) - timedelta(days=7)
+    rows = (
+        session.execute(
+            select(Item)
+            .where(Item.is_data_active.is_(True))
+            .where((Item.last_refreshed_at.is_(None)) | (Item.last_refreshed_at < threshold))
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     findings: list[DataQualityFindingOut] = []
     for item in rows:
-        last = (
-            item.last_refreshed_at.isoformat()
-            if item.last_refreshed_at is not None
-            else "never"
-        )
+        last = item.last_refreshed_at.isoformat() if item.last_refreshed_at is not None else "never"
         findings.append(
             DataQualityFindingOut(
                 category=STALE_ITEM,
@@ -408,8 +401,9 @@ def _find_sparse_forward_snapshots(session: Session) -> list[DataQualityFindingO
     if not accts:
         return []
     distinct_dates = session.execute(
-        select(func.count(func.distinct(HoldingSnapshot.snapshot_date)))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.count(func.distinct(HoldingSnapshot.snapshot_date))).where(
+            HoldingSnapshot.account_id.in_(accts)
+        )
     ).scalar_one()
     if distinct_dates >= 7:
         return []
@@ -417,15 +411,13 @@ def _find_sparse_forward_snapshots(session: Session) -> list[DataQualityFindingO
         DataQualityFindingOut(
             category=SPARSE_FORWARD_SNAPSHOTS,
             severity=INFO,
-            title=(
-                f"Only {distinct_dates} day(s) of forward snapshots exist"
-            ),
+            title=(f"Only {distinct_dates} day(s) of forward snapshots exist"),
             detail=(
-                f"The performance chart currently falls back to a 365-day "
-                f"transaction-walk reconstruction because we don't have "
-                f"enough observed snapshots to plot. Backfilled values are "
-                f"modeled from Plaid's transaction history and will drift "
-                f"on incomplete records."
+                "The performance chart currently falls back to a 365-day "
+                "transaction-walk reconstruction because we don't have "
+                "enough observed snapshots to plot. Backfilled values are "
+                "modeled from Plaid's transaction history and will drift "
+                "on incomplete records."
             ),
             recommended_action=(
                 "Schedule the snapshot job daily. After ~1 week of forward "
@@ -452,9 +444,9 @@ def _find_overlapping_broker_connections(
     where `is_data_active=True`. >1 active item per institution is the
     overlap.
     """
-    rows = session.execute(
-        select(Item).order_by(Item.institution_name, Item.source)
-    ).scalars().all()
+    rows = (
+        session.execute(select(Item).order_by(Item.institution_name, Item.source)).scalars().all()
+    )
 
     by_institution: dict[str, list[Item]] = defaultdict(list)
     for item in rows:
@@ -464,7 +456,7 @@ def _find_overlapping_broker_connections(
         by_institution[key].append(item)
 
     findings: list[DataQualityFindingOut] = []
-    for key, group in by_institution.items():
+    for _key, group in by_institution.items():
         active = [i for i in group if i.is_data_active]
         if len(active) <= 1:
             continue
@@ -518,16 +510,18 @@ def _find_missing_policy_benchmarks(
     Run `python -m portfolio_tracker.jobs.benchmarks --start <date>` to
     fix.
     """
-    policy_tickers = session.execute(
-        select(PolicyWeight.ticker).where(PolicyWeight.weight_bps > 0)
-    ).scalars().all()
+    policy_tickers = (
+        session.execute(select(PolicyWeight.ticker).where(PolicyWeight.weight_bps > 0))
+        .scalars()
+        .all()
+    )
     if not policy_tickers:
         return []
 
     found_symbols = set(
-        session.execute(
-            select(Benchmark.symbol).where(Benchmark.symbol.in_(policy_tickers))
-        ).scalars().all()
+        session.execute(select(Benchmark.symbol).where(Benchmark.symbol.in_(policy_tickers)))
+        .scalars()
+        .all()
     )
     missing = [t for t in policy_tickers if t not in found_symbols]
     if not missing:
@@ -537,9 +531,7 @@ def _find_missing_policy_benchmarks(
         DataQualityFindingOut(
             category=MISSING_POLICY_BENCHMARK,
             severity=WARNING,
-            title=(
-                f"Policy benchmark missing for: {', '.join(missing)}"
-            ),
+            title=(f"Policy benchmark missing for: {', '.join(missing)}"),
             detail=(
                 f"Your policy weights reference {len(missing)} ticker(s) "
                 f"({', '.join(missing)}) that have no rows in the "
@@ -595,8 +587,7 @@ def _find_overrides_disagreeing_with_broker(
         return []
 
     latest_date = session.execute(
-        select(func.max(HoldingSnapshot.snapshot_date))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     if latest_date is None:
         return []
@@ -618,10 +609,7 @@ def _find_overrides_disagreeing_with_broker(
         .where(HoldingSnapshot.snapshot_date == latest_date)
         .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
-    by_key = {
-        (row[0], row[1]): row[2:]
-        for row in snap_rows
-    }
+    by_key = {(row[0], row[1]): row[2:] for row in snap_rows}
 
     findings: list[DataQualityFindingOut] = []
     for ov in overrides:
@@ -649,9 +637,7 @@ def _find_overrides_disagreeing_with_broker(
             DataQualityFindingOut(
                 category=OVERRIDE_DISAGREES_WITH_BROKER,
                 severity=INFO,
-                title=(
-                    f"{ticker_label} in {account_name}: override and broker disagree"
-                ),
+                title=(f"{ticker_label} in {account_name}: override and broker disagree"),
                 detail=(
                     f"Your override says ${float(override_dec):,.0f} total "
                     f"cost basis, but the broker now reports "

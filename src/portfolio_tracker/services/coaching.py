@@ -67,8 +67,8 @@ from portfolio_tracker.models import (
     Security,
     TradeDecision,
 )
-from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
+from portfolio_tracker.services.active_items import active_account_ids
 
 # Numeric rubric — keep aligned with CIO_CONTEXT.md "Numeric bar" table.
 # These are the deterministic thresholds the engine evaluates; the
@@ -224,9 +224,7 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
     # only" gracefully.
     es_thesis_by_ticker = {
         t: s
-        for t, s in earnings_summary_svc.summary_by_ticker(
-            list(positions.keys())
-        ).items()
+        for t, s in earnings_summary_svc.summary_by_ticker(list(positions.keys())).items()
         if s.thesis_status is not None or s.thesis_summary is not None
     }
 
@@ -306,9 +304,7 @@ def generate_coaching_tips(session: Session) -> CoachingResult:
                 # bucket. With weighted buckets a name can be (say) 20%
                 # ai_infra without dominating — we still surface it because
                 # the position size itself is the issue here.
-                hc_buckets = [
-                    (b, w) for b, w in bucket_weights.items() if w > 0
-                ]
+                hc_buckets = [(b, w) for b, w in bucket_weights.items() if w > 0]
                 if hc_buckets:
                     # Lead with the heaviest-weight bucket — that's the
                     # narrative driver for "why this ticker is risky".
@@ -731,9 +727,7 @@ def _bucket_weights_by_ticker(session: Session) -> dict[str, dict[str, Decimal]]
     return out
 
 
-def _bucket_weights_for_ticker(
-    ticker: str, session: Session
-) -> dict[str, Decimal]:
+def _bucket_weights_for_ticker(ticker: str, session: Session) -> dict[str, Decimal]:
     """Single-ticker convenience over `_bucket_weights_by_ticker`.
 
     Kept for callers that need only one lookup; the full-portfolio path
@@ -800,13 +794,8 @@ def _aggregate_bucket_tips(
         label = _BUCKET_LABELS.get(bucket, bucket)
         # Rank contributors by absolute exposure (biggest first), trim to
         # the top names for the detail string.
-        ranked = sorted(
-            bucket_contribs[bucket], key=lambda x: x[1], reverse=True
-        )
-        contrib_strs = [
-            f"{t} ${_int(exp)} ({w:.0f}% bucket)"
-            for t, exp, w in ranked[:8]
-        ]
+        ranked = sorted(bucket_contribs[bucket], key=lambda x: x[1], reverse=True)
+        contrib_strs = [f"{t} ${_int(exp)} ({w:.0f}% bucket)" for t, exp, w in ranked[:8]]
         more = len(ranked) - 8
         contrib_blob = ", ".join(contrib_strs)
         if more > 0:
@@ -817,10 +806,7 @@ def _aggregate_bucket_tips(
                 severity="high",
                 ticker="—",
                 name=None,
-                headline=(
-                    f"{label}: {exposure_pct:.1f}% of portfolio "
-                    f"(cap {cap:.0f}%)"
-                ),
+                headline=(f"{label}: {exposure_pct:.1f}% of portfolio (cap {cap:.0f}%)"),
                 detail=(
                     f"Total weighted exposure ${_int(total_exposure)} of "
                     f"${_int(portfolio_total)} across "

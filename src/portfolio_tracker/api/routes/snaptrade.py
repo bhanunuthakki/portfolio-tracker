@@ -139,12 +139,17 @@ def sync(
 
             for h in holdings_resp.holdings:
                 security = next(
-                    (s for s in holdings_resp.securities if s.plaid_security_id == h.plaid_security_id),
+                    (
+                        s
+                        for s in holdings_resp.securities
+                        if s.plaid_security_id == h.plaid_security_id
+                    ),
                     None,
                 )
                 if security is None:
                     continue
                 from portfolio_tracker.models import Security
+
                 stored_security = session.execute(
                     select(Security).where(Security.plaid_security_id == security.plaid_security_id)
                 ).scalar_one()
@@ -169,6 +174,7 @@ def sync(
             session.flush()
             for tx in activities.transactions:
                 from portfolio_tracker.models import Security as Sec
+
                 security_id: int | None = None
                 if tx.plaid_security_id is not None:
                     stored = session.execute(
@@ -204,6 +210,7 @@ def sync(
     # side), so without this the chart would lag a day until the next
     # daily-values cron tick.
     from portfolio_tracker.jobs import daily_values
+
     today = date.today()
     daily_values.run(start_date=today, end_date=today)
 

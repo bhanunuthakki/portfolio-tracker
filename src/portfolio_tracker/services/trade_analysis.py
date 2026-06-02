@@ -46,7 +46,7 @@ Two corners worth knowing:
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -62,7 +62,6 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services.active_items import active_account_ids
-from sqlalchemy import func, and_
 
 # Tickers below this combined buy+sell notional are dropped from the
 # per-ticker breakdown. They're noise — small one-off trades that don't
@@ -92,9 +91,9 @@ class TickerTrade(BaseModel):
     # vs denominator implied by the methodology: effective_cost for open
     # positions, bought_total for closed positions. None when denominator is 0.
     pnl_pct: float | None
-    trade_count: int               # window-bounded, not lifetime
-    is_open: bool                  # today_qty > 0
-    cost_basis_unreliable: bool    # ACATS-in / pre-history shares detected
+    trade_count: int  # window-bounded, not lifetime
+    is_open: bool  # today_qty > 0
+    cost_basis_unreliable: bool  # ACATS-in / pre-history shares detected
     # Cross-project enrichment (None when earnings-summary unreachable):
     es_tracked: bool = False
     es_next_earnings_date: date | None = None
@@ -196,7 +195,7 @@ def analyze_trades(
             "trade_count": 0,
         }
     )
-    for sid, ticker, name, tx_date, tx_type, amount, quantity in rows:
+    for _sid, ticker, name, tx_date, tx_type, amount, quantity in rows:
         if amount is None:
             continue
         bucket = by_ticker[ticker]
@@ -312,9 +311,7 @@ def analyze_trades(
             # We can't recover the source-broker cost so the realized
             # P&L is overstated.
             unreliable = share_count_gap
-        pnl_pct = (
-            float(pnl / denom * 100) if denom > 0 else None
-        )
+        pnl_pct = float(pnl / denom * 100) if denom > 0 else None
         tickers.append(
             TickerTrade(
                 ticker=ticker,
@@ -405,14 +402,10 @@ def _detect_cost_basis_gap(
     if sold_qty > bought_qty * (Decimal(1) + _ACATS_INFLATION_THRESHOLD):
         return True
     expected_today = bought_qty - sold_qty
-    if today_qty > expected_today * (Decimal(1) + _ACATS_INFLATION_THRESHOLD):
-        return True
-    return False
+    return today_qty > expected_today * (Decimal(1) + _ACATS_INFLATION_THRESHOLD)
 
 
-def _latest_snapshot_date(
-    session: Session, accts: frozenset[int]
-) -> date | None:
+def _latest_snapshot_date(session: Session, accts: frozenset[int]) -> date | None:
     return session.execute(
         select(HoldingSnapshot.snapshot_date)
         .where(HoldingSnapshot.account_id.in_(accts))
@@ -457,9 +450,7 @@ def _trading_activity(
         total_notional += abs(Decimal(amount))
         by_month[tx_date.strftime("%Y-%m")] += 1
 
-    avg_position = (
-        sum(today_value.values(), Decimal(0)) if today_value else Decimal(0)
-    )
+    avg_position = sum(today_value.values(), Decimal(0)) if today_value else Decimal(0)
     days = max((end_date - start_date).days, 1)
     years = Decimal(days) / Decimal(365)
 

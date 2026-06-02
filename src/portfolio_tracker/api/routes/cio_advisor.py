@@ -148,9 +148,7 @@ async def post_turn(
     so it doesn't block the event loop while the LLM is thinking.
     """
     if not payload.content.strip():
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Message content cannot be empty."
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message content cannot be empty.")
     try:
         user_turn, assistant_turn = await run_in_threadpool(
             send_turn, db, session_id, payload.content
@@ -193,9 +191,7 @@ async def post_turn_stream(
     any error sentinel).
     """
     if not payload.content.strip():
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "Message content cannot be empty."
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Message content cannot be empty.")
     try:
         user_turn, prompt = await run_in_threadpool(
             begin_streamed_turn, db, session_id, payload.content
@@ -223,7 +219,7 @@ async def post_turn_stream(
             try:
                 for chunk in stream_chat_response(prompt):
                     loop.call_soon_threadsafe(queue.put_nowait, ("chunk", chunk))
-            except BaseException as exc:  # noqa: BLE001 — last-chance handler
+            except BaseException as exc:  # last-chance handler
                 loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)))
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
@@ -248,20 +244,17 @@ async def post_turn_stream(
             # Append the sentinel so the persisted transcript shows the
             # failure inline — mirrors what the blocking endpoint does.
             full_text = (
-                (full_text + "\n\n" if full_text else "")
-                + f"[advisor error — Claude call failed: {error_msg}]"
-            )
+                full_text + "\n\n" if full_text else ""
+            ) + f"[advisor error — Claude call failed: {error_msg}]"
 
         try:
             assistant_turn = await run_in_threadpool(
                 finalize_streamed_turn, db, session_id, full_text
             )
             yield (
-                "data: "
-                + json.dumps({"done": True, "turn_id": assistant_turn.turn_id})
-                + "\n\n"
+                "data: " + json.dumps({"done": True, "turn_id": assistant_turn.turn_id}) + "\n\n"
             )
-        except Exception as exc:  # noqa: BLE001 — generator can't raise to caller
+        except Exception as exc:  # generator can't raise to caller
             yield (
                 "data: "
                 + json.dumps({"error": f"failed to persist assistant turn: {exc!s}"})

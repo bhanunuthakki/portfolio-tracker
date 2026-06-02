@@ -83,10 +83,7 @@ def get_client() -> SnapTrade:
 
 def is_configured() -> bool:
     settings = get_settings()
-    return (
-        settings.snaptrade_client_id is not None
-        and settings.snaptrade_consumer_key is not None
-    )
+    return settings.snaptrade_client_id is not None and settings.snaptrade_consumer_key is not None
 
 
 def register_user(user_id: str) -> SnapTradeUserCredentials:
@@ -129,7 +126,7 @@ def recover_user(user_id: str) -> SnapTradeUserCredentials:
             time.sleep(attempt_delay)
         try:
             return register_user(user_id)
-        except Exception as exc:  # noqa: BLE001 - SDK raises bare ApiException
+        except Exception as exc:  # SDK raises bare ApiException
             text = str(exc).lower()
             if "1012" in text or "can only register one user" in text:
                 last_exc = exc
@@ -206,7 +203,10 @@ def list_user_accounts(
     rows = body if isinstance(body, list) else body.get("data", [])
     out: list[tuple[str, PlaidAccount]] = []
     for raw in rows:
-        if authorization_id is not None and str(raw.get("brokerage_authorization", "")) != authorization_id:
+        if (
+            authorization_id is not None
+            and str(raw.get("brokerage_authorization", "")) != authorization_id
+        ):
             continue
         account_id = str(raw["id"])
         out.append((account_id, _account_from_snaptrade(raw)))
@@ -282,7 +282,9 @@ def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
         name=str(raw.get("name") or raw.get("number") or snaptrade_account_id),
         official_name=_opt_str(raw.get("name")),
         type="investment",
-        subtype=_opt_str(raw.get("meta", {}).get("type") if isinstance(raw.get("meta"), dict) else None),
+        subtype=_opt_str(
+            raw.get("meta", {}).get("type") if isinstance(raw.get("meta"), dict) else None
+        ),
         mask=_opt_str(raw.get("number")),
         currency=str(_dig(raw, ["balance", "total", "currency"]) or "USD"),
     )
@@ -290,10 +292,7 @@ def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
 
 def _security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
     symbol = raw.get("symbol") if isinstance(raw, dict) else None
-    if isinstance(symbol, dict):
-        symbol_dict = symbol
-    else:
-        symbol_dict = raw
+    symbol_dict = symbol if isinstance(symbol, dict) else raw
     symbol_id = str(symbol_dict.get("id") or symbol_dict.get("symbol") or "unknown")
     return PlaidSecurity(
         plaid_security_id=f"snaptrade:{symbol_id}",

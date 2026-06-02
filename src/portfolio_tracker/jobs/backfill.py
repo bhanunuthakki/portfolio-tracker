@@ -41,9 +41,11 @@ def run(start_date: date | None = None, end_date: date | None = None) -> int:
 
     rows_written = 0
     with SessionLocal() as session:
-        items = session.execute(
-            select(Item).where(Item.source == ItemSource.PLAID.value)
-        ).scalars().all()
+        items = (
+            session.execute(select(Item).where(Item.source == ItemSource.PLAID.value))
+            .scalars()
+            .all()
+        )
         for item in items:
             rows_written += _backfill_item(session, item, start_date, end_date)
         session.commit()

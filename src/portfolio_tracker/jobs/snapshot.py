@@ -13,8 +13,7 @@ Run manually:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import UTC, date, datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -35,9 +34,11 @@ def run() -> int:
     snapshot_date = date.today()
     rows_written = 0
     with SessionLocal() as session:
-        items = session.execute(
-            select(Item).where(Item.source == ItemSource.PLAID.value)
-        ).scalars().all()
+        items = (
+            session.execute(select(Item).where(Item.source == ItemSource.PLAID.value))
+            .scalars()
+            .all()
+        )
         for item in items:
             rows_written += _snapshot_item(session, item, snapshot_date)
         session.commit()
@@ -46,6 +47,7 @@ def run() -> int:
     # don't have to recompute it on every request. Imported lazily to keep
     # snapshot.py free of the performance-service dependency at module load.
     from portfolio_tracker.jobs import daily_values
+
     daily_values.run(start_date=snapshot_date, end_date=snapshot_date)
 
     return rows_written
@@ -100,7 +102,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         )
         rows_written += 1
 
-    item.last_refreshed_at = datetime.now(timezone.utc)
+    item.last_refreshed_at = datetime.now(UTC)
     return rows_written
 
 

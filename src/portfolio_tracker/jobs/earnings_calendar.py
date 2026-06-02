@@ -15,7 +15,7 @@ Wired into `jobs.daily_refresh` so it runs automatically each morning.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import yfinance as yf
@@ -65,15 +65,19 @@ def _held_tickers(session: Session) -> list[str]:
     ).scalar_one_or_none()
     if latest is None:
         return []
-    rows = session.execute(
-        select(Security.ticker)
-        .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
-        .where(HoldingSnapshot.snapshot_date == latest)
-        .where(Security.is_cash_equivalent.is_(False))
-        .where(Security.ticker.is_not(None))
-        .where(Security.type != "derivative")
-        .distinct()
-    ).scalars().all()
+    rows = (
+        session.execute(
+            select(Security.ticker)
+            .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
+            .where(HoldingSnapshot.snapshot_date == latest)
+            .where(Security.is_cash_equivalent.is_(False))
+            .where(Security.ticker.is_not(None))
+            .where(Security.type != "derivative")
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
     return sorted({t for t in rows if t})
 
 
@@ -139,7 +143,7 @@ def _coerce_decimal(v) -> Decimal | None:
 
 
 def _upsert(session: Session, row: dict) -> None:
-    stmt = sqlite_insert(EarningsCalendar).values(**row, fetched_at=datetime.now(timezone.utc))
+    stmt = sqlite_insert(EarningsCalendar).values(**row, fetched_at=datetime.now(UTC))
     stmt = stmt.on_conflict_do_update(
         index_elements=[EarningsCalendar.ticker, EarningsCalendar.earnings_date],
         set_={

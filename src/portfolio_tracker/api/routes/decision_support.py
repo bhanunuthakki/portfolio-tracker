@@ -15,7 +15,7 @@ own React Query hook.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
 
@@ -93,7 +93,7 @@ class MatchedExecutions(BaseModel):
     direction: str  # 'buy' or 'sell'
     transaction_count: int
     total_quantity: Decimal  # magnitude (SUM(ABS)) — direction carried separately
-    total_amount: Decimal    # magnitude (SUM(ABS)) — broker conventions vary
+    total_amount: Decimal  # magnitude (SUM(ABS)) — broker conventions vary
     first_date: date
     last_date: date
 
@@ -178,10 +178,8 @@ def attach_outcome(
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"decision {decision_id} not found")
     decision.outcome_date = payload.outcome_date
     decision.outcome_status = payload.outcome_status
-    decision.outcome_notes = (
-        payload.outcome_notes.strip() if payload.outcome_notes else None
-    )
-    decision.updated_at = datetime.now(timezone.utc)
+    decision.outcome_notes = payload.outcome_notes.strip() if payload.outcome_notes else None
+    decision.updated_at = datetime.now(UTC)
     session.commit()
     session.refresh(decision)
     return _decision_to_out(decision, session)
@@ -199,9 +197,7 @@ def delete_decision(
     session.commit()
 
 
-def _matched_executions(
-    session: Session, d: TradeDecision
-) -> MatchedExecutions | None:
+def _matched_executions(session: Session, d: TradeDecision) -> MatchedExecutions | None:
     """Find transactions that look like the user acting on this decision.
 
     Joined on Security.ticker (case-insensitive) and filtered by tx type
@@ -316,9 +312,7 @@ def tag_vocabulary() -> list[str]:
     return ALLOWED_TAGS
 
 
-@router.post(
-    "/trade-tags", response_model=TradeTagOut, status_code=status.HTTP_201_CREATED
-)
+@router.post("/trade-tags", response_model=TradeTagOut, status_code=status.HTTP_201_CREATED)
 def create_tag(
     payload: TradeTagIn,
     session: Annotated[Session, Depends(get_session)],
@@ -353,9 +347,7 @@ def list_tags(
 
 
 @router.delete("/trade-tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_tag(
-    tag_id: int, session: Annotated[Session, Depends(get_session)]
-) -> None:
+def delete_tag(tag_id: int, session: Annotated[Session, Depends(get_session)]) -> None:
     tag = session.get(TradeTag, tag_id)
     if tag is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"tag {tag_id} not found")
