@@ -40,6 +40,11 @@ frontend/.vite/
 *.tsbuildinfo
 *.log
 npm-debug.log*
+# TypeScript composite-project intermediate artifacts (vite.config.ts
+# is built via tsconfig.node.json with composite:true, which emits
+# .d.ts + .js next to the source). Regenerable; never commit.
+frontend/vite.config.d.ts
+frontend/vite.config.js
 
 # Cron / scheduler logs from local task scheduler
 scripts/logs/
