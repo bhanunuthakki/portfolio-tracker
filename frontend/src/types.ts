@@ -171,6 +171,23 @@ export interface QueueItem {
   dismissed_at: string | null;
 }
 
+export interface ThesisHealthRow {
+  ticker: string;
+  name: string | null;
+  weight_pct: number;
+  tracked: boolean;
+  list_type: string | null;
+  verdict_status: "ok" | "warn" | "breach" | null;
+  flagged_rules: string[];
+  valuation_signal: "rich" | "cheap" | "fair" | "unknown" | null;
+  over_under_pct: number | null;
+  fair_value: number | null;
+  live_price: number | null;
+  alert_count: number;
+  has_brief: boolean;
+  brief_iso_date: string | null;
+}
+
 export interface HumanCapitalBucketWeightOut {
   bucket: string;
   weight_pct: string;

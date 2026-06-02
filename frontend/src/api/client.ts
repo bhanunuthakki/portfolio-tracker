@@ -38,6 +38,7 @@ import type {
   TradeTagOut,
   EarningsRow,
   QueueItem,
+  ThesisHealthRow,
 } from "@/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -378,6 +379,9 @@ export const api = {
 
   cockpitSnooze: (id: number, days = 7): Promise<QueueItem> =>
     request(`/api/cockpit/items/${id}/snooze?days=${days}`, { method: "POST" }),
+
+  thesisHealth: (): Promise<ThesisHealthRow[]> =>
+    request("/api/cockpit/thesis-health"),
 
   // ---- Human-capital overlap buckets ----------------------------------
 

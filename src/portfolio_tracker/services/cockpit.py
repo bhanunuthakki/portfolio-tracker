@@ -720,3 +720,92 @@ def _loads_list(raw: str) -> list[str]:
     if not isinstance(data, list):
         return []
     return [str(x) for x in cast(list[object], data)]
+
+
+# ---------------------------------------------------------------------------
+# Thesis Health board (P4)
+#
+# Per-holding fundamental health for the dollar-weighted Thesis Health page:
+# the earnings-summary verdict + valuation + pending-alert count + brief link
+# for each holding, with blind-spot flagging for holdings that have no thesis
+# coverage at all. Sorted by attention (breach -> warn -> blind spot / alert ->
+# valuation-rich -> ok), then by dollar exposure.
+# ---------------------------------------------------------------------------
+
+_VERDICT_RANK = {"breach": 0, "warn": 1}
+
+
+class ThesisHealthRow(BaseModel):
+    """One holding's fundamental-health snapshot for the Thesis Health page."""
+
+    ticker: str
+    name: str | None
+    weight_pct: float
+    tracked: bool
+    list_type: str | None
+    verdict_status: str | None  # ok | warn | breach | None (no coverage)
+    flagged_rules: list[str]
+    valuation_signal: str | None  # rich | cheap | fair | unknown | None
+    over_under_pct: float | None
+    fair_value: float | None
+    live_price: float | None
+    alert_count: int
+    has_brief: bool
+    brief_iso_date: str | None
+
+
+def thesis_health(session: Session) -> list[ThesisHealthRow]:
+    """Per-holding thesis/fundamental health, dollar-weighted + attention-sorted."""
+    value_by_ticker, names = _value_by_ticker(session)
+    total = Decimal(0)
+    for v in value_by_ticker.values():
+        total += v
+    tickers = list(value_by_ticker.keys())
+    if not tickers:
+        return []
+
+    summaries = es.summary_by_ticker(tickers)
+    verdicts = es.latest_verdicts(tickers)
+    valuations = es.latest_valuations(tickers)
+    alerts = es.pending_alerts(tickers)
+
+    rows: list[ThesisHealthRow] = []
+    for ticker in tickers:
+        weight = float(value_by_ticker[ticker] / total * 100) if total > 0 else 0.0
+        summary = summaries.get(ticker)
+        verdict = verdicts.get(ticker)
+        val = valuations.get(ticker)
+        rows.append(
+            ThesisHealthRow(
+                ticker=ticker,
+                name=names.get(ticker),
+                weight_pct=weight,
+                tracked=summary.tracked if summary else False,
+                list_type=summary.list_type if summary else None,
+                verdict_status=verdict.status if verdict else None,
+                flagged_rules=(
+                    [r.kpi_name for r in verdict.flagged_rules[:4]] if verdict else []
+                ),
+                valuation_signal=val.signal if val else None,
+                over_under_pct=val.over_under_pct if val else None,
+                fair_value=val.fair_value if val else None,
+                live_price=val.live_price if val else None,
+                alert_count=len(alerts.get(ticker, ())),
+                has_brief=summary.has_brief if summary else False,
+                brief_iso_date=summary.latest_brief_iso_date if summary else None,
+            )
+        )
+
+    rows.sort(key=lambda r: (_attention_rank(r), -r.weight_pct, r.ticker))
+    return rows
+
+
+def _attention_rank(row: ThesisHealthRow) -> int:
+    """Lower = more urgent: breach(0) < warn(1) < blind spot/alert(2) < rich(3) < ok(4)."""
+    if row.verdict_status in _VERDICT_RANK:
+        return _VERDICT_RANK[row.verdict_status]
+    if not row.tracked or row.alert_count > 0:
+        return 2
+    if row.valuation_signal == "rich":
+        return 3
+    return 4
