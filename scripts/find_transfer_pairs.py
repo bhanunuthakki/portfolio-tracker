@@ -24,8 +24,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -40,7 +39,6 @@ from portfolio_tracker.models import (
     TransactionOverride,
 )
 from portfolio_tracker.services.performance import (
-    _classify_by_name,
     effective_classification,
 )
 
@@ -126,14 +124,14 @@ def main() -> None:
 
 class _Leg:
     __slots__ = (
-        "tx_id",
-        "date",
         "account_id",
         "account_name",
         "amount",  # always positive (magnitude)
-        "signed_in",  # True if cash flowed INTO this account
+        "date",
         "effective",
         "name",
+        "signed_in",  # True if cash flowed INTO this account
+        "tx_id",
     )
 
     def __init__(
@@ -158,7 +156,7 @@ class _Leg:
 
 
 class _Pair:
-    __slots__ = ("inflow", "outflow", "diff_days", "amt_diff")
+    __slots__ = ("amt_diff", "diff_days", "inflow", "outflow")
 
     def __init__(self, inflow: _Leg, outflow: _Leg) -> None:
         self.inflow = inflow
@@ -172,8 +170,9 @@ class _Pair:
 
 def _load_classified_legs(session: Session) -> list[_Leg]:
     rows = session.execute(
-        select(InvestmentTransaction, Account)
-        .join(Account, Account.account_id == InvestmentTransaction.account_id)
+        select(InvestmentTransaction, Account).join(
+            Account, Account.account_id == InvestmentTransaction.account_id
+        )
     ).all()
     out: list[_Leg] = []
     for tx, a in rows:
@@ -204,8 +203,8 @@ def _load_classified_legs(session: Session) -> list[_Leg]:
 def _find_pairs(legs: list[_Leg], window_days: int, tolerance: Decimal) -> list[_Pair]:
     """Greedy nearest-amount-within-window match between inflows and outflows
     across DIFFERENT accounts. Each leg can only pair with one other leg."""
-    inflows = [l for l in legs if l.signed_in]
-    outflows = [l for l in legs if not l.signed_in]
+    inflows = [leg for leg in legs if leg.signed_in]
+    outflows = [leg for leg in legs if not leg.signed_in]
 
     # Sort inflows by date for stable processing
     inflows.sort(key=lambda x: x.date)
