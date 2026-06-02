@@ -2,12 +2,269 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
+/* ============================================================
+   Editorial design tokens — "paper on monochrome".
+
+   Ported from the Earnings Summary workspace renderer: a warm
+   paper canvas, white panels, hairline rules, a single blue
+   accent, and disciplined gain/loss/warn semantics. Every color
+   is stored as space-separated RGB *channels* (not hex) so the
+   Tailwind config can wrap them in `rgb(var(--x) / <alpha-value>)`
+   and keep opacity modifiers (e.g. `bg-paper/60`) working.
+
+   Two themes (light · dark) flip the same channel variables, so
+   any component built on the Tailwind tokens themes for free.
+   ============================================================ */
+:root,
+:root[data-theme="light"] {
   color-scheme: light;
+
+  /* Surfaces */
+  --canvas: 250 250 247; /* #fafaf7 — app background          */
+  --surface: 255 255 255; /* #ffffff — cards / panels         */
+  --paper: 244 243 239; /* #f4f3ef — insets, table heads      */
+  --paper-2: 237 236 230; /* #edece6 — deeper inset           */
+  /* Tailwind `white` is remapped to this so the dozens of existing
+     `bg-white` / `text-white` usages theme automatically: in light it is
+     pure white; in dark it flips to the dark surface, which keeps panels
+     dark AND flips white-on-dark-button text to dark-on-light-button. */
+  --white: 255 255 255;
+
+  /* Rules */
+  --hairline: 236 235 229; /* #ecebe5 — faint divider         */
+  --line: 226 225 218; /* #e2e1da — default border            */
+  --line-strong: 211 209 200; /* #d3d1c8 — inputs, emphasis    */
+
+  /* Ink */
+  --ink: 18 19 24; /* #121318 — primary text                  */
+  --ink-soft: 47 50 57; /* #2f3239 — strong body              */
+  --body: 74 77 85; /* #4a4d55 — body copy                    */
+  --muted: 108 111 120; /* #6c6f78 — secondary                */
+  --faint: 154 157 166; /* #9a9da6 — placeholders, chevrons   */
+
+  /* Serif stack as an explicit-quoted variable. Tailwind's dev pipeline
+     emits the bare family "Source Serif 4" unquoted (the trailing digit
+     makes that invalid CSS, so the whole declaration gets dropped); routing
+     `font-serif` through this variable sidesteps the quoting bug. */
+  --serif: "Source Serif 4", "Source Serif Pro", Georgia, Cambria, serif;
+
+  /* Accent — single editorial blue */
+  --accent: 29 78 216; /* #1d4ed8                             */
+  --accent-strong: 30 64 175; /* #1e40af                      */
+  --accent-soft: 238 242 255; /* #eef2ff — tints, chip bg      */
+
+  /* Neutral ramp — remaps Tailwind `slate` onto the palette */
+  --n-50: 244 243 239;
+  --n-100: 236 235 229;
+  --n-200: 226 225 218;
+  --n-300: 211 209 200;
+  --n-400: 154 157 166;
+  --n-500: 108 111 120;
+  --n-600: 74 77 85;
+  --n-700: 47 50 57;
+  --n-800: 31 33 39;
+  --n-900: 18 19 24;
+
+  /* Accent ramp — remaps `indigo` / `blue` */
+  --ac-50: 238 242 255;
+  --ac-100: 224 230 251;
+  --ac-200: 199 212 245;
+  --ac-300: 165 184 240;
+  --ac-600: 37 87 214;
+  --ac-700: 29 78 216;
+  --ac-800: 30 64 175;
+  --ac-900: 30 58 138;
+
+  /* Steel blue — remaps `sky` (kept distinct from the accent) */
+  --sk-50: 238 245 251;
+  --sk-100: 219 232 243;
+  --sk-200: 187 212 232;
+  --sk-600: 59 111 158;
+  --sk-700: 51 95 136;
+  --sk-800: 47 102 144;
+
+  /* Gain green — remaps `emerald` (muted, paper-friendly) */
+  --gn-50: 236 243 238;
+  --gn-100: 216 233 222;
+  --gn-200: 188 217 198;
+  --gn-600: 47 125 79;
+  --gn-700: 33 105 66;
+  --gn-800: 26 83 53;
+  --gn-900: 20 64 41;
+
+  /* Loss red — remaps `red` + `rose` */
+  --ls-50: 251 238 238;
+  --ls-100: 246 222 222;
+  --ls-200: 239 197 197;
+  --ls-600: 192 57 43;
+  --ls-700: 179 38 30;
+  --ls-800: 145 28 22;
+  --ls-900: 122 24 19;
+
+  /* Warn ochre — remaps `amber` */
+  --wn-50: 251 244 230;
+  --wn-100: 244 231 201;
+  --wn-200: 233 210 154;
+  --wn-600: 166 115 10;
+  --wn-700: 138 96 0;
+  --wn-800: 111 77 0;
+  --wn-900: 90 63 0;
+
+  /* Tonal section backgrounds */
+  --tone-pos: 238 242 255;
+  --tone-neu: 244 243 239;
+  --tone-warn: 255 248 230;
+  --tone-neg: 253 242 242;
+
+  /* Soft editorial shadow */
+  --shadow-card: 0 1px 2px rgb(17 17 17 / 0.04), 0 1px 1px rgb(17 17 17 / 0.03);
+  --shadow-pop: 0 12px 40px rgb(17 17 17 / 0.14);
 }
 
-html,
-body,
-#root {
-  height: 100%;
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: 12 13 16; /* #0c0d10 */
+  --surface: 20 22 27; /* #14161b */
+  --paper: 26 29 35; /* #1a1d23 */
+  --paper-2: 32 35 42;
+  --white: 20 22 27; /* flips `bg-white` → dark surface, `text-white` → dark */
+
+  --hairline: 31 33 39; /* #1f2127 */
+  --line: 42 45 53; /* #2a2d35 */
+  --line-strong: 56 59 68; /* #383b44 */
+
+  --ink: 244 243 239; /* #f4f3ef */
+  --ink-soft: 213 214 210; /* #d5d6d2 */
+  --body: 168 171 179;
+  --muted: 136 139 148; /* #888b94 */
+  --faint: 91 94 102; /* #5b5e66 */
+
+  --accent: 138 168 255; /* #8aa8ff */
+  --accent-strong: 170 192 255;
+  --accent-soft: 28 33 56; /* #1c2138 */
+
+  --n-50: 26 29 35;
+  --n-100: 31 33 39;
+  --n-200: 42 45 53;
+  --n-300: 56 59 68;
+  --n-400: 91 94 102;
+  --n-500: 136 139 148;
+  --n-600: 168 171 179;
+  --n-700: 213 214 210;
+  --n-800: 232 232 228;
+  --n-900: 244 243 239;
+
+  --ac-50: 28 33 56;
+  --ac-100: 30 38 66;
+  --ac-200: 42 54 92;
+  --ac-300: 70 92 150;
+  --ac-600: 111 147 245;
+  --ac-700: 138 168 255;
+  --ac-800: 170 192 255;
+  --ac-900: 196 212 255;
+
+  --sk-50: 24 33 44;
+  --sk-100: 26 41 56;
+  --sk-200: 40 62 84;
+  --sk-600: 122 168 208;
+  --sk-700: 143 193 232;
+  --sk-800: 168 206 236;
+
+  --gn-50: 18 33 25;
+  --gn-100: 22 41 31;
+  --gn-200: 32 60 45;
+  --gn-600: 74 208 138;
+  --gn-700: 110 231 168;
+  --gn-800: 138 240 189;
+  --gn-900: 176 245 210;
+
+  --ls-50: 36 22 22;
+  --ls-100: 43 26 26;
+  --ls-200: 70 38 38;
+  --ls-600: 229 115 115;
+  --ls-700: 240 138 138;
+  --ls-800: 244 163 163;
+  --ls-900: 248 192 192;
+
+  --wn-50: 36 30 18;
+  --wn-100: 43 36 24;
+  --wn-200: 66 54 30;
+  --wn-600: 224 178 90;
+  --wn-700: 245 198 106;
+  --wn-800: 248 214 143;
+  --wn-900: 250 226 176;
+
+  --tone-pos: 26 34 56;
+  --tone-neu: 26 29 35;
+  --tone-warn: 43 36 24;
+  --tone-neg: 43 26 26;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4), 0 1px 1px rgb(0 0 0 / 0.3);
+  --shadow-pop: 0 12px 40px rgb(0 0 0 / 0.5);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    font-family: theme("fontFamily.sans");
+    background: rgb(var(--canvas));
+    color: rgb(var(--ink));
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Tabular figures everywhere a number lives next to another number. */
+  .tabular-nums,
+  table {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  ::selection {
+    background: rgb(var(--accent) / 0.18);
+  }
+
+  /* Quiet, editorial focus ring (keyboard only). */
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent) / 0.55);
+    outline-offset: 1px;
+    border-radius: 3px;
+  }
+
+  /* Slim, paper-toned scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--line-strong)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--line-strong));
+    border: 3px solid rgb(var(--canvas));
+    border-radius: 999px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--muted));
+  }
+}
+
+@layer components {
+  /* Mono uppercase "eyebrow" label — the signature editorial kicker
+     that sits above section titles and panel headers. */
+  .eyebrow {
+    font-family: theme("fontFamily.mono");
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: rgb(var(--muted));
+  }
 }
