@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
 import { DataQualityReport } from "@/components/DataQualityReport";
+import { PositioningSection } from "@/components/PositioningSection";
 import {
   Card,
   EmptyState,
@@ -166,6 +167,7 @@ export function Holdings(): JSX.Element {
   return (
     <div className="space-y-4">
       <DataQualityReport />
+      <PositioningSection />
       <Card className="overflow-hidden">
         <table className="min-w-full divide-y divide-slate-200">
           <thead className="bg-slate-50">
