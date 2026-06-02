@@ -27,6 +27,10 @@ os.environ.setdefault("PLAID_SECRET", "test-secret")
 os.environ.setdefault("PLAID_ENV", "sandbox")
 os.environ.setdefault("FERNET_KEY", Fernet.generate_key().decode())
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+# Pin the brief-email recipient empty so the email-job guard test is
+# deterministic — an env var takes precedence over any real `.env` on the
+# dev's main checkout (where BRIEF_EMAIL_RECIPIENT is set for live sends).
+os.environ.setdefault("BRIEF_EMAIL_RECIPIENT", "")
 
 
 @pytest.fixture
