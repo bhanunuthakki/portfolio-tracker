@@ -14,10 +14,10 @@ removed for that ticker; rows present are upserted.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import CursorResult, delete, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import get_session
@@ -28,7 +28,7 @@ from portfolio_tracker.schemas import (
     HumanCapitalOverlapOut,
     HumanCapitalOverlapsOut,
 )
-from portfolio_tracker.services.coaching import _BUCKET_CAPS
+from portfolio_tracker.services.coaching import _BUCKET_CAPS  # pyright: ignore[reportPrivateUsage]
 
 router = APIRouter(prefix="/api/human-capital", tags=["human-capital"])
 
@@ -147,6 +147,6 @@ def delete_overlap(
     if not upper:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ticker required")
     result = session.execute(delete(HumanCapitalOverlap).where(HumanCapitalOverlap.ticker == upper))
-    if result.rowcount == 0:
+    if cast("CursorResult[Any]", result).rowcount == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     session.commit()

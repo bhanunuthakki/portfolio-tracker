@@ -328,8 +328,20 @@ python -m portfolio_tracker.jobs.migrate_broker_to_snaptrade --commit
 
 ```bash
 ruff format src && ruff check --fix src
-pyright && basedpyright
+pyright
 cd frontend && npm run typecheck && npm run build
+```
+
+`pyright` runs in **strict** mode (`[tool.pyright]` in `pyproject.toml`) and
+resolves third-party imports from the project virtualenv. With the conventional
+`.venv` at the repo root this works out of the box (`venvPath` / `venv` are set
+in config). If your venv lives elsewhere — e.g. inside a `git worktree`, where
+`.venv` only exists in the main checkout — point pyright at the interpreter
+explicitly:
+
+```bash
+pyright --pythonpath /path/to/.venv/Scripts/python.exe   # Windows
+pyright --pythonpath /path/to/.venv/bin/python           # macOS / Linux
 ```
 
 ## Troubleshooting
