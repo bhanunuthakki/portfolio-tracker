@@ -7,6 +7,7 @@ import { Contributions } from "./pages/Contributions";
 import { Dashboard } from "./pages/Dashboard";
 import { Earnings } from "./pages/Earnings";
 import { Holdings } from "./pages/Holdings";
+import { ThesisHealth } from "./pages/ThesisHealth";
 import { TradeAnalysis } from "./pages/TradeAnalysis";
 import { TradeTimeline } from "./pages/TradeTimeline";
 import { Transactions } from "./pages/Transactions";
@@ -15,6 +16,7 @@ const navItems: { to: string; label: string }[] = [
   { to: "/", label: "Cockpit" },
   { to: "/dashboard", label: "Dashboard" },
   { to: "/holdings", label: "Holdings" },
+  { to: "/thesis", label: "Thesis health" },
   { to: "/transactions", label: "Transactions" },
   { to: "/contributions", label: "Contributions" },
   { to: "/trade-analysis", label: "Trade analysis" },
@@ -129,6 +131,7 @@ export function App(): JSX.Element {
             <Route path="/" element={<Cockpit />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/holdings" element={<Holdings />} />
+            <Route path="/thesis" element={<ThesisHealth />} />
             <Route path="/transactions" element={<Transactions />} />
             <Route path="/contributions" element={<Contributions />} />
             <Route path="/trade-analysis" element={<TradeAnalysis />} />
