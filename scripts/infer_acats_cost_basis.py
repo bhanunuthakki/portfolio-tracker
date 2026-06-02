@@ -31,12 +31,12 @@ import os
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from sqlalchemy import select, and_
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import SessionLocal
@@ -97,7 +97,9 @@ def main() -> None:
             matches = out_index.get(key)
             if not matches:
                 plans.append(
-                    _skip(inn, f"no matching ACATS-out (date={inn.date}, |qty|={abs(inn.quantity)})")
+                    _skip(
+                        inn, f"no matching ACATS-out (date={inn.date}, |qty|={abs(inn.quantity)})"
+                    )
                 )
                 continue
             # Use first match. Could refine if there are multiple pairs on the
@@ -120,13 +122,19 @@ def main() -> None:
         for p in plans:
             if (p.dest_account_id, p.security_id) in manual_keys:
                 n_protected += 1
-                print(f"  {'skip:manual-override':<26} acct[{p.dest_account_id}] {p.dest_account_name[:18]:<18}  {p.ticker:<6}  {float(p.transferred_qty):>9,.2f}  $   skipped     manual override exists; not touching")
+                print(
+                    f"  {'skip:manual-override':<26} acct[{p.dest_account_id}] {p.dest_account_name[:18]:<18}  {p.ticker:<6}  {float(p.transferred_qty):>9,.2f}  $   skipped     manual override exists; not touching"
+                )
                 continue
             if p.method.startswith("skipped"):
                 n_skipped += 1
-                print(f"  {p.method:<26} acct[{p.dest_account_id}] {p.dest_account_name[:18]:<18}  {p.ticker:<6}  {float(p.transferred_qty):>9,.2f}  ${'':>13}  {p.notes}")
+                print(
+                    f"  {p.method:<26} acct[{p.dest_account_id}] {p.dest_account_name[:18]:<18}  {p.ticker:<6}  {float(p.transferred_qty):>9,.2f}  ${'':>13}  {p.notes}"
+                )
                 continue
-            print(f"  {p.method:<26} acct[{p.dest_account_id}] {p.dest_account_name[:18]:<18}  {p.ticker:<6}  {float(p.transferred_qty):>9,.2f}  ${float(p.total_cost_basis):>12,.2f}  {p.notes}")
+            print(
+                f"  {p.method:<26} acct[{p.dest_account_id}] {p.dest_account_name[:18]:<18}  {p.ticker:<6}  {float(p.transferred_qty):>9,.2f}  ${float(p.total_cost_basis):>12,.2f}  {p.notes}"
+            )
             if args.commit:
                 _upsert_override(session, p)
                 n_written += 1
@@ -173,9 +181,7 @@ def _load_legs(session: Session, subtype: str) -> list[AcatsLeg]:
     return out
 
 
-def _infer_for_pair(
-    session: Session, in_leg: AcatsLeg, out_leg: AcatsLeg
-) -> InferredOverride:
+def _infer_for_pair(session: Session, in_leg: AcatsLeg, out_leg: AcatsLeg) -> InferredOverride:
     transferred = abs(in_leg.quantity)
     # Attempt 1: source-account snapshot the day before
     snap = session.execute(
@@ -207,9 +213,7 @@ def _infer_for_pair(
         )
 
     # Attempt 2: running average from source-account buys
-    avg_cost = _running_avg_cost_at(
-        session, out_leg.account_id, out_leg.security_id, in_leg.date
-    )
+    avg_cost = _running_avg_cost_at(session, out_leg.account_id, out_leg.security_id, in_leg.date)
     if avg_cost is not None:
         total = avg_cost * transferred
         return InferredOverride(
@@ -242,14 +246,20 @@ def _running_avg_cost_at(
     avg per-share is preserved. If the running quantity hits zero or below,
     we reset (defensive — shouldn't happen with consistent data).
     """
-    rows = session.execute(
-        select(InvestmentTransaction)
-        .where(InvestmentTransaction.account_id == account_id)
-        .where(InvestmentTransaction.security_id == security_id)
-        .where(InvestmentTransaction.date < asof_date)
-        .where(InvestmentTransaction.type.in_(("buy", "sell")))
-        .order_by(InvestmentTransaction.date, InvestmentTransaction.plaid_investment_transaction_id)
-    ).scalars().all()
+    rows = (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.account_id == account_id)
+            .where(InvestmentTransaction.security_id == security_id)
+            .where(InvestmentTransaction.date < asof_date)
+            .where(InvestmentTransaction.type.in_(("buy", "sell")))
+            .order_by(
+                InvestmentTransaction.date, InvestmentTransaction.plaid_investment_transaction_id
+            )
+        )
+        .scalars()
+        .all()
+    )
     if not rows:
         return None
 
