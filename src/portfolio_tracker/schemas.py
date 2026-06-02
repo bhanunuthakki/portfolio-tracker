@@ -390,11 +390,3 @@ class HumanCapitalOverlapsOut(BaseModel):
 
     overlaps: list[HumanCapitalOverlapOut]
     bucket_caps_pct: dict[str, Decimal]
-
-
-class JobRunOut(BaseModel):
-    job: str
-    status: str
-    items_processed: int
-    started_at: datetime
-    finished_at: datetime
