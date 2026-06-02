@@ -25,6 +25,8 @@ import type {
   PolicyOut,
   PolicyWeightIn,
   PositionAlphaResult,
+  PositioningOut,
+  SecurityClassificationOut,
   TradeAnalysisResult,
   TradeTimelineResult,
   TransactionOverrideIn,
@@ -85,6 +87,33 @@ export const api = {
 
   latestHoldingsByAccount: (): Promise<HoldingOut[]> =>
     request("/api/portfolio/holdings/by-account"),
+
+  positioning: (params?: {
+    startDate?: string;
+    endDate?: string;
+  }): Promise<PositioningOut> => {
+    const search = new URLSearchParams();
+    if (params?.startDate) search.set("start_date", params.startDate);
+    if (params?.endDate) search.set("end_date", params.endDate);
+    const qs = search.toString();
+    return request(`/api/portfolio/positioning${qs ? `?${qs}` : ""}`);
+  },
+
+  setSecurityClassification: (input: {
+    security_id: number;
+    sector?: string | null;
+    region?: string | null;
+    notes?: string | null;
+  }): Promise<SecurityClassificationOut> =>
+    request("/api/overrides/security-classification", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  deleteSecurityClassification: (securityId: number): Promise<void> =>
+    request(`/api/overrides/security-classification/${securityId}`, {
+      method: "DELETE",
+    }),
 
   cashflowAudit: (): Promise<CashflowAuditOut> =>
     request("/api/portfolio/cashflow-audit"),
