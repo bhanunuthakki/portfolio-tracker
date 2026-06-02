@@ -30,22 +30,22 @@ from portfolio_tracker.schemas import (
     InvestmentTransactionOut,
     PerformanceSeries,
 )
-from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
+from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
 from portfolio_tracker.services import trade_timeline as trade_timeline_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
-from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
-from portfolio_tracker.services.trade_timeline import TradeTimelineResult
 from portfolio_tracker.services.performance import (
     _is_external_cashflow,
     _load_transaction_overrides,
     _signed_cashflow,
     effective_classification,
 )
+from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
+from portfolio_tracker.services.trade_timeline import TradeTimelineResult
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -80,7 +80,7 @@ def latest_holdings_consolidated(
         if not c.ticker:
             continue
         es = enrichment.get(c.ticker.upper())
-        if es is None or not es.tracked and not es.has_brief and es.next_earnings_date is None:
+        if es is None or (not es.tracked and not es.has_brief and es.next_earnings_date is None):
             continue
         c.earnings = EarningsEnrichment(
             tracked=es.tracked,
@@ -233,9 +233,7 @@ def _consolidate_holdings(
             else:
                 effective_cost = h.cost_basis
                 cost_basis_source = None
-                row_unreliable = _is_cost_basis_unreliable(
-                    effective_cost, h.institution_value
-                )
+                row_unreliable = _is_cost_basis_unreliable(effective_cost, h.institution_value)
             if row_unreliable:
                 any_unreliable = True
             per_account.append(
@@ -256,14 +254,8 @@ def _consolidate_holdings(
             if effective_cost is not None:
                 any_cost = True
                 total_cost += effective_cost
-        weighted_avg = (
-            (total_cost / total_quantity)
-            if any_cost and total_quantity > 0
-            else None
-        )
-        unrealized = (
-            (total_value - total_cost) if any_value and any_cost else None
-        )
+        weighted_avg = (total_cost / total_quantity) if any_cost and total_quantity > 0 else None
+        unrealized = (total_value - total_cost) if any_value and any_cost else None
         out.append(
             ConsolidatedHoldingOut(
                 snapshot_date=snapshot_date,
@@ -377,7 +369,10 @@ def position_alpha(
     if start_date is None:
         start_date = end_date - timedelta(days=365)
     return position_alpha_service.compute_position_alpha(
-        session, start_date, end_date, exclude_broad_index=exclude_broad_index,
+        session,
+        start_date,
+        end_date,
+        exclude_broad_index=exclude_broad_index,
     )
 
 
@@ -436,9 +431,7 @@ def performance_series(
 _MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT = 7
 
 
-def _default_start_date(
-    session: Session, end_date: date, include_backfill: bool
-) -> date:
+def _default_start_date(session: Session, end_date: date, include_backfill: bool) -> date:
     """Default chart window — chosen to balance "useful on day one" against
     "doesn't silently show modeled values as observed".
 
@@ -455,12 +448,12 @@ def _default_start_date(
     if not accts:
         return end_date - timedelta(days=365)
     earliest_snap = session.execute(
-        select(func.min(HoldingSnapshot.snapshot_date))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.min(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
     ).scalar_one_or_none()
     earliest_tx = session.execute(
-        select(func.min(InvestmentTransaction.date))
-        .where(InvestmentTransaction.account_id.in_(accts))
+        select(func.min(InvestmentTransaction.date)).where(
+            InvestmentTransaction.account_id.in_(accts)
+        )
     ).scalar_one_or_none()
 
     if include_backfill and earliest_tx is not None:
@@ -468,8 +461,9 @@ def _default_start_date(
         return max(min(candidates), end_date - timedelta(days=730))
 
     snap_count = session.execute(
-        select(func.count(func.distinct(HoldingSnapshot.snapshot_date)))
-        .where(HoldingSnapshot.account_id.in_(accts))
+        select(func.count(func.distinct(HoldingSnapshot.snapshot_date))).where(
+            HoldingSnapshot.account_id.in_(accts)
+        )
     ).scalar_one()
     if snap_count >= _MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT and earliest_snap is not None:
         return earliest_snap
@@ -496,25 +490,34 @@ def cashflow_audit(
     if start_date is None:
         # For diagnostics, always go as far back as the data goes (24 months
         # by Plaid's retention) so the user sees every external cashflow.
-        earliest_tx = session.execute(
-            select(func.min(InvestmentTransaction.date))
-            .where(InvestmentTransaction.account_id.in_(accts))
-        ).scalar_one_or_none() if accts else None
+        earliest_tx = (
+            session.execute(
+                select(func.min(InvestmentTransaction.date)).where(
+                    InvestmentTransaction.account_id.in_(accts)
+                )
+            ).scalar_one_or_none()
+            if accts
+            else None
+        )
         start_date = earliest_tx or (end_date - timedelta(days=730))
 
-    rows = session.execute(
-        select(
-            InvestmentTransaction.type,
-            InvestmentTransaction.subtype,
-            func.count(InvestmentTransaction.plaid_investment_transaction_id),
-            func.sum(InvestmentTransaction.amount),
-        )
-        .where(InvestmentTransaction.date >= start_date)
-        .where(InvestmentTransaction.date <= end_date)
-        .where(InvestmentTransaction.account_id.in_(accts))
-        .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-        .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-    ).all() if accts else []
+    rows = (
+        session.execute(
+            select(
+                InvestmentTransaction.type,
+                InvestmentTransaction.subtype,
+                func.count(InvestmentTransaction.plaid_investment_transaction_id),
+                func.sum(InvestmentTransaction.amount),
+            )
+            .where(InvestmentTransaction.date >= start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
+            .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
+        ).all()
+        if accts
+        else []
+    )
 
     groups: list[CashflowGroupOut] = []
     net_in = Decimal(0)
@@ -541,8 +544,7 @@ def cashflow_audit(
         "amount because brokers use it for both directions.",
         "Trades, dividends, interest, and fees are intentionally excluded — they "
         "affect value but not basis.",
-        "`transfer/assignment` and other corporate-action subtypes are treated "
-        "as INTERNAL.",
+        "`transfer/assignment` and other corporate-action subtypes are treated as INTERNAL.",
     ]
 
     return CashflowAuditOut(
@@ -659,6 +661,4 @@ def trade_timeline_endpoint(
     same holding window. Designed for a 'which trades earned/cost me alpha'
     timeline on the dashboard.
     """
-    return trade_timeline_service.build_timeline(
-        session, year=year, include_open=include_open
-    )
+    return trade_timeline_service.build_timeline(session, year=year, include_open=include_open)

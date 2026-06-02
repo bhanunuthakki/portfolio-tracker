@@ -42,9 +42,13 @@ def run(start_date: date, end_date: date) -> tuple[int, dict[str, int]]:
             ov.security_id: ov.ticker
             for ov in session.execute(select(TickerOverride)).scalars().all()
         }
-        securities = session.execute(
-            select(Security).where(Security.is_cash_equivalent == False)  # noqa: E712
-        ).scalars().all()
+        securities = (
+            session.execute(
+                select(Security).where(Security.is_cash_equivalent == False)  # noqa: E712
+            )
+            .scalars()
+            .all()
+        )
         for security in securities:
             ticker = override_map.get(security.security_id) or security.ticker
             if ticker is None:
@@ -71,16 +75,14 @@ def _fetch_history(
     return {}, "none"
 
 
-def _yfinance_history(
-    ticker: str, start_date: date, end_date: date
-) -> dict[date, Decimal]:
+def _yfinance_history(ticker: str, start_date: date, end_date: date) -> dict[date, Decimal]:
     try:
         history = yf.Ticker(ticker).history(
             start=start_date.isoformat(),
             end=(end_date + timedelta(days=1)).isoformat(),
             auto_adjust=False,
         )
-    except Exception:  # noqa: BLE001 - yfinance raises a variety of exceptions
+    except Exception:  # yfinance raises a variety of exceptions
         return {}
     if history.empty:
         return {}
@@ -94,9 +96,7 @@ def _yfinance_history(
     return out
 
 
-def _stooq_history(
-    ticker: str, start_date: date, end_date: date
-) -> dict[date, Decimal]:
+def _stooq_history(ticker: str, start_date: date, end_date: date) -> dict[date, Decimal]:
     """Stooq US tickers usually need a `.US` suffix; try both."""
     for candidate in (ticker, f"{ticker}.US"):
         result = _stooq_one(candidate, start_date, end_date)
@@ -105,9 +105,7 @@ def _stooq_history(
     return {}
 
 
-def _stooq_one(
-    symbol: str, start_date: date, end_date: date
-) -> dict[date, Decimal]:
+def _stooq_one(symbol: str, start_date: date, end_date: date) -> dict[date, Decimal]:
     params = {
         "s": symbol.lower(),
         "d1": start_date.strftime("%Y%m%d"),
@@ -141,18 +139,14 @@ def _stooq_one(
     return out
 
 
-def _write_history(
-    session: Session, security: Security, history: dict[date, Decimal]
-) -> int:
+def _write_history(session: Session, security: Security, history: dict[date, Decimal]) -> int:
     rows_written = 0
     for bar_date, close in history.items():
         existing = session.get(Price, (security.security_id, bar_date))
         if existing is not None:
             existing.close = close
             continue
-        session.add(
-            Price(security_id=security.security_id, date=bar_date, close=close)
-        )
+        session.add(Price(security_id=security.security_id, date=bar_date, close=close))
         rows_written += 1
     return rows_written
 

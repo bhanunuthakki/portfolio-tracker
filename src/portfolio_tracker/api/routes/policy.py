@@ -35,9 +35,7 @@ _BALANCE_TOLERANCE_PCT = Decimal("0.01")
 
 @router.get("", response_model=PolicyOut)
 def get_policy(session: Annotated[Session, Depends(get_session)]) -> PolicyOut:
-    rows = session.execute(
-        select(PolicyWeight).order_by(PolicyWeight.ticker)
-    ).scalars().all()
+    rows = session.execute(select(PolicyWeight).order_by(PolicyWeight.ticker)).scalars().all()
     weights = [_to_out(r) for r in rows]
     total = sum((w.weight_pct for w in weights), Decimal(0))
     return PolicyOut(
@@ -60,9 +58,7 @@ def replace_policy(
     for row in body:
         ticker = row.ticker.strip().upper()
         if not ticker:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "ticker must be non-empty"
-            )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "ticker must be non-empty")
         if ticker in seen:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,

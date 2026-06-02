@@ -173,6 +173,7 @@ class MonthlyBriefOut(BaseModel):
 
 class MonthlyBriefSummary(BaseModel):
     """Light row for listing briefs — excludes the HTML payload."""
+
     brief_id: int
     period_yyyymm: str
     model_used: str | None
@@ -186,6 +187,7 @@ class MonthlyBriefJobOut(BaseModel):
     `brief_id` is populated when status flips to `succeeded`; `error` is
     populated when status flips to `failed`.
     """
+
     job_id: int
     period_yyyymm: str
     status: Literal["pending", "running", "succeeded", "failed"]
@@ -245,17 +247,22 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
         # position values N× (where N = snapshot count). Same pattern
         # data_quality.py uses.
         latest_date = session.execute(
-            select(func.max(HoldingSnapshot.snapshot_date))
-            .where(HoldingSnapshot.account_id.in_(accts))
+            select(func.max(HoldingSnapshot.snapshot_date)).where(
+                HoldingSnapshot.account_id.in_(accts)
+            )
         ).scalar_one_or_none()
-        latest = session.execute(
-            select(HoldingSnapshot, Security)
-            .join(Security, Security.security_id == HoldingSnapshot.security_id)
-            .where(HoldingSnapshot.account_id.in_(accts))
-            .where(HoldingSnapshot.snapshot_date == latest_date)
-            .where(Security.is_cash_equivalent.is_(False))
-            .where(Security.ticker.is_not(None))
-        ).all() if latest_date is not None else []
+        latest = (
+            session.execute(
+                select(HoldingSnapshot, Security)
+                .join(Security, Security.security_id == HoldingSnapshot.security_id)
+                .where(HoldingSnapshot.account_id.in_(accts))
+                .where(HoldingSnapshot.snapshot_date == latest_date)
+                .where(Security.is_cash_equivalent.is_(False))
+                .where(Security.ticker.is_not(None))
+            ).all()
+            if latest_date is not None
+            else []
+        )
         # Roll up across accounts for a clean per-ticker view.
         agg: dict[str, dict] = {}
         for h, s in latest:
@@ -273,22 +280,28 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
             portfolio_total += row["value"]
         for row in sorted(agg.values(), key=lambda r: -r["value"]):
             v = row["value"]
-            positions.append({
-                "ticker": row["ticker"],
-                "name": row["name"],
-                # Integer USD per project convention (no decimal dollars).
-                "value_usd": int(round(float(v))),
-                # Percentages keep 2 decimals — they're not dollars.
-                "weight_pct": round(
-                    float(v / portfolio_total * 100), 2
-                ) if portfolio_total > 0 else 0.0,
-            })
+            positions.append(
+                {
+                    "ticker": row["ticker"],
+                    "name": row["name"],
+                    # Integer USD per project convention (no decimal dollars).
+                    "value_usd": round(float(v)),
+                    # Percentages keep 2 decimals — they're not dollars.
+                    "weight_pct": round(float(v / portfolio_total * 100), 2)
+                    if portfolio_total > 0
+                    else 0.0,
+                }
+            )
 
-    decisions = session.execute(
-        select(TradeDecision)
-        .order_by(TradeDecision.decision_date.desc(), TradeDecision.decision_id.desc())
-        .limit(12)
-    ).scalars().all()
+    decisions = (
+        session.execute(
+            select(TradeDecision)
+            .order_by(TradeDecision.decision_date.desc(), TradeDecision.decision_id.desc())
+            .limit(12)
+        )
+        .scalars()
+        .all()
+    )
     recent_decisions = [
         {
             "decision_date": d.decision_date.isoformat(),
@@ -315,7 +328,7 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
 
     return FactsSnapshot(
         as_of=today_iso,
-        portfolio_total_value=int(round(float(portfolio_total))),
+        portfolio_total_value=round(float(portfolio_total)),
         positions=positions,
         recent_decisions=recent_decisions,
         coaching_findings=coaching_findings,
@@ -437,11 +450,15 @@ def delete_session(session: Session, session_id: int) -> None:
 
 
 def list_turns(session: Session, session_id: int) -> list[ChatTurnOut]:
-    rows = session.execute(
-        select(ChatTurn)
-        .where(ChatTurn.session_id == session_id)
-        .order_by(ChatTurn.turn_id.asc())
-    ).scalars().all()
+    rows = (
+        session.execute(
+            select(ChatTurn)
+            .where(ChatTurn.session_id == session_id)
+            .order_by(ChatTurn.turn_id.asc())
+        )
+        .scalars()
+        .all()
+    )
     return [
         ChatTurnOut(
             turn_id=t.turn_id,
@@ -475,7 +492,7 @@ def send_turn(
     if refresh_requested:
         # Strip the slash command so the model just sees the rest of the
         # message (or treats it as a noop continuation).
-        user_content = user_content[len("/refresh"):].strip() or (
+        user_content = user_content[len("/refresh") :].strip() or (
             "Refresh context and continue from the last topic."
         )
 
@@ -556,7 +573,7 @@ def begin_streamed_turn(
     user_content = user_content.strip()
     refresh_requested = user_content.lower().startswith("/refresh")
     if refresh_requested:
-        user_content = user_content[len("/refresh"):].strip() or (
+        user_content = user_content[len("/refresh") :].strip() or (
             "Refresh context and continue from the last topic."
         )
 
@@ -636,9 +653,7 @@ def finalize_streamed_turn(
     )
 
 
-def _maybe_attach_facts_block(
-    db: Session, s: ChatSession, *, force: bool = False
-) -> str | None:
+def _maybe_attach_facts_block(db: Session, s: ChatSession, *, force: bool = False) -> str | None:
     """Return a facts block to prepend, OR None if the existing snapshot
     is fresh enough to skip. Either way, records the refresh timestamp
     on the session so subsequent turns know when to next attach.
@@ -655,20 +670,19 @@ def _maybe_attach_facts_block(
         last_refresh = last_refresh.replace(tzinfo=UTC)
     needs_refresh = force or (
         last_refresh is None
-        or (
-            datetime.now(UTC) - last_refresh
-            > timedelta(hours=_FACTS_FRESHNESS_HOURS)
-        )
+        or (datetime.now(UTC) - last_refresh > timedelta(hours=_FACTS_FRESHNESS_HOURS))
     )
     if not needs_refresh:
         return None
     snap = build_facts_snapshot(db)
     block = _facts_to_prompt_block(snap)
-    db.add(ChatTurn(
-        session_id=s.session_id,
-        role="system",
-        content=block,
-    ))
+    db.add(
+        ChatTurn(
+            session_id=s.session_id,
+            role="system",
+            content=block,
+        )
+    )
     s.last_context_refresh_at = datetime.now(UTC)
     db.commit()
     return block
@@ -720,7 +734,7 @@ def _assemble_prompt(
         "`coaching_findings.tips[].context` for tip-specific numbers, "
         "and the `portfolio_total_value` for the portfolio total. If "
         "the number you want isn't in the facts block, say so "
-        "explicitly (\"facts feed doesn't include …\") rather than "
+        'explicitly ("facts feed doesn\'t include …") rather than '
         "estimating.\n"
         "2. **No decimal points on dollar amounts.** Render dollars as "
         "whole integers with thousands separators (e.g., $89,436 — not "
@@ -733,12 +747,16 @@ def _assemble_prompt(
         "number larger than the portfolio total, stop and re-read.\n"
     )
 
-    prior_turns = db.execute(
-        select(ChatTurn)
-        .where(ChatTurn.session_id == session_id)
-        .where(ChatTurn.role.in_(["user", "assistant"]))
-        .order_by(ChatTurn.turn_id.asc())
-    ).scalars().all()
+    prior_turns = (
+        db.execute(
+            select(ChatTurn)
+            .where(ChatTurn.session_id == session_id)
+            .where(ChatTurn.role.in_(["user", "assistant"]))
+            .order_by(ChatTurn.turn_id.asc())
+        )
+        .scalars()
+        .all()
+    )
     if len(prior_turns) > _MAX_REPLAY_TURNS:
         prior_turns = prior_turns[-_MAX_REPLAY_TURNS:]
 
@@ -767,9 +785,11 @@ _BRIEF_SECTIONS: list[tuple[str, str]] = [
 
 
 def list_briefs(session: Session) -> list[MonthlyBriefSummary]:
-    rows = session.execute(
-        select(MonthlyBrief).order_by(MonthlyBrief.period_yyyymm.desc())
-    ).scalars().all()
+    rows = (
+        session.execute(select(MonthlyBrief).order_by(MonthlyBrief.period_yyyymm.desc()))
+        .scalars()
+        .all()
+    )
     return [
         MonthlyBriefSummary(
             brief_id=b.brief_id,
@@ -845,8 +865,7 @@ def generate_brief(session: Session, period_yyyymm: str | None = None) -> Monthl
 def _build_brief_prompt(facts_block: str, period_yyyymm: str) -> str:
     section_keys = ", ".join(f"`{k}`" for k, _ in _BRIEF_SECTIONS)
     section_descriptions = "\n".join(
-        f"  * `{k}` — {label}: {_brief_section_guidance(k)}"
-        for k, label in _BRIEF_SECTIONS
+        f"  * `{k}` — {label}: {_brief_section_guidance(k)}" for k, label in _BRIEF_SECTIONS
     )
     return f"""{facts_block}
 
@@ -941,7 +960,7 @@ def _parse_brief_sections(raw: str) -> dict[str, str]:
     # Strip a leading code fence if present
     if text.startswith("```"):
         first_nl = text.find("\n")
-        text = text[first_nl + 1:] if first_nl != -1 else text
+        text = text[first_nl + 1 :] if first_nl != -1 else text
         if text.endswith("```"):
             text = text[:-3]
     text = text.strip()
@@ -962,9 +981,7 @@ def _parse_brief_sections(raw: str) -> dict[str, str]:
     return {k: str(v) for k, v in parsed.items() if k in dict(_BRIEF_SECTIONS)}
 
 
-def _render_brief_html(
-    period_yyyymm: str, snap: FactsSnapshot, sections: dict[str, str]
-) -> str:
+def _render_brief_html(period_yyyymm: str, snap: FactsSnapshot, sections: dict[str, str]) -> str:
     """Wrap the LLM section HTML in a consistent stylesheet + scaffold."""
     rendered_sections: list[str] = []
     for key, label in _BRIEF_SECTIONS:
@@ -1074,11 +1091,7 @@ def _render_brief_html(
 
 def _escape(s: str) -> str:
     """Minimal HTML escape for the JSON-parse-failure fallback."""
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 # ---------------------------------------------------------------------------
@@ -1098,9 +1111,7 @@ def _job_to_out(job: MonthlyBriefJob) -> MonthlyBriefJobOut:
     )
 
 
-def find_in_flight_brief_job(
-    session: Session, period_yyyymm: str
-) -> MonthlyBriefJobOut | None:
+def find_in_flight_brief_job(session: Session, period_yyyymm: str) -> MonthlyBriefJobOut | None:
     """Return the pending/running job for `period_yyyymm`, if any.
 
     Used by `POST /briefs/generate` to dedupe rapid clicks: rather than
@@ -1111,9 +1122,7 @@ def find_in_flight_brief_job(
         select(MonthlyBriefJob)
         .where(MonthlyBriefJob.period_yyyymm == period_yyyymm)
         .where(
-            MonthlyBriefJob.status.in_(
-                [BriefJobStatus.PENDING.value, BriefJobStatus.RUNNING.value]
-            )
+            MonthlyBriefJob.status.in_([BriefJobStatus.PENDING.value, BriefJobStatus.RUNNING.value])
         )
         .order_by(MonthlyBriefJob.started_at.desc())
         .limit(1)

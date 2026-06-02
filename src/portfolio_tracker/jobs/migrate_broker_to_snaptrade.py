@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import delete, func, select
@@ -81,6 +81,8 @@ def run(
     # SDK fails to load (e.g., on a machine without snaptrade installed).
     from portfolio_tracker.api.routes.snaptrade import (
         SnapTradeProfile,
+    )
+    from portfolio_tracker.api.routes.snaptrade import (
         sync as snaptrade_sync,
     )
     from portfolio_tracker.jobs import daily_values
@@ -91,17 +93,14 @@ def run(
         # ---- 1. Validate Plaid item ----------------------------------
         item = _validate_plaid_item(session, plaid_item_id)
         plaid_accounts = list(
-            session.execute(
-                select(Account).where(Account.item_id == item.item_id)
-            ).scalars().all()
+            session.execute(select(Account).where(Account.item_id == item.item_id)).scalars().all()
         )
         plaid_masks = {_normalize_mask(a.mask) for a in plaid_accounts if a.mask}
 
         print(f"Plaid item {item.item_id}: {item.institution_name}")
         for a in plaid_accounts:
             print(
-                f"  acct {a.account_id} \"{a.name}\" "
-                f"type={a.type}/{a.subtype or '-'} mask={a.mask}"
+                f'  acct {a.account_id} "{a.name}" type={a.type}/{a.subtype or "-"} mask={a.mask}'
             )
 
         if not plaid_masks:
@@ -130,9 +129,7 @@ def run(
             .where(Item.source == ItemSource.SNAPTRADE.value)
         ).all()
         snaptrade_masks: dict[str, Account] = {
-            _normalize_mask(a.mask): a
-            for a, _ in snaptrade_account_rows
-            if a.mask is not None
+            _normalize_mask(a.mask): a for a, _ in snaptrade_account_rows if a.mask is not None
         }
         unmatched = plaid_masks - set(snaptrade_masks.keys())
         if unmatched:
@@ -144,23 +141,26 @@ def run(
         print(f"\nAll {len(plaid_masks)} Plaid masks matched on SnapTrade side:")
         for m in sorted(plaid_masks):
             ms_acct = snaptrade_masks[m]
-            print(
-                f"  mask {m}: snaptrade acct {ms_acct.account_id} "
-                f"\"{ms_acct.name}\""
-            )
+            print(f'  mask {m}: snaptrade acct {ms_acct.account_id} "{ms_acct.name}"')
 
         # ---- 4. Show deletion plan -----------------------------------
         plaid_account_ids = [a.account_id for a in plaid_accounts]
-        n_snaps = session.execute(
-            select(func.count())
-            .select_from(HoldingSnapshot)
-            .where(HoldingSnapshot.account_id.in_(plaid_account_ids))
-        ).scalar() or 0
-        n_txs = session.execute(
-            select(func.count())
-            .select_from(InvestmentTransaction)
-            .where(InvestmentTransaction.account_id.in_(plaid_account_ids))
-        ).scalar() or 0
+        n_snaps = (
+            session.execute(
+                select(func.count())
+                .select_from(HoldingSnapshot)
+                .where(HoldingSnapshot.account_id.in_(plaid_account_ids))
+            ).scalar()
+            or 0
+        )
+        n_txs = (
+            session.execute(
+                select(func.count())
+                .select_from(InvestmentTransaction)
+                .where(InvestmentTransaction.account_id.in_(plaid_account_ids))
+            ).scalar()
+            or 0
+        )
         print("\nWill delete:")
         print(f"  - {n_snaps} holdings_snapshots rows")
         print(f"  - {n_txs} investment_transactions rows")
@@ -173,16 +173,12 @@ def run(
             return 0
 
         # ---- 5. Backup -----------------------------------------------
-        backup_path = _backup_plaid_data(
-            session, item, plaid_accounts, plaid_account_ids
-        )
+        backup_path = _backup_plaid_data(session, item, plaid_accounts, plaid_account_ids)
         print(f"\nBacked up to {backup_path}")
 
         # ---- 6. Delete in FK-safe order ------------------------------
         session.execute(
-            delete(HoldingSnapshot).where(
-                HoldingSnapshot.account_id.in_(plaid_account_ids)
-            )
+            delete(HoldingSnapshot).where(HoldingSnapshot.account_id.in_(plaid_account_ids))
         )
         session.execute(
             delete(InvestmentTransaction).where(
@@ -253,19 +249,21 @@ def _backup_plaid_data(
     account_ids that accidentally include too much.
     """
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     path = _BACKUP_DIR / f"migration_item{item.item_id}_{timestamp}.json"
 
-    snaps = session.execute(
-        select(HoldingSnapshot).where(
-            HoldingSnapshot.account_id.in_(account_ids)
+    snaps = (
+        session.execute(select(HoldingSnapshot).where(HoldingSnapshot.account_id.in_(account_ids)))
+        .scalars()
+        .all()
+    )
+    txs = (
+        session.execute(
+            select(InvestmentTransaction).where(InvestmentTransaction.account_id.in_(account_ids))
         )
-    ).scalars().all()
-    txs = session.execute(
-        select(InvestmentTransaction).where(
-            InvestmentTransaction.account_id.in_(account_ids)
-        )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     payload = {
         "exported_at_utc": timestamp,

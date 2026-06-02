@@ -22,22 +22,20 @@ For open positions, "acquired_date" = first_buy from investment_transactions;
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Iterable
 
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
-    Account,
     Benchmark,
     CostBasisOverride,
     HoldingSnapshot,
     InvestmentTransaction,
-    Item,
     Security,
     TaxFormImport,
     TaxFormRealizedLot,
@@ -62,24 +60,33 @@ _SPY_SYMBOL: str = "SPY"
 # rows (kept in sync intentionally).
 _NON_ALPHA_TICKERS: frozenset[str] = frozenset(
     {
-        "VTI", "VOO", "SPY", "IVV", "RSP",  # SPY-equivalents
-        "SGOV", "FDRXX", "SHV", "SPAXX", "VMFXX", "CUR:USD",  # Cash equiv
+        "VTI",
+        "VOO",
+        "SPY",
+        "IVV",
+        "RSP",  # SPY-equivalents
+        "SGOV",
+        "FDRXX",
+        "SHV",
+        "SPAXX",
+        "VMFXX",
+        "CUR:USD",  # Cash equiv
     }
 )
 
 
 class TimelineRow(BaseModel):
     # Identity
-    row_kind: str                       # "closed" | "open"
+    row_kind: str  # "closed" | "open"
     ticker: str | None
     name: str | None
-    description: str                    # display name (incl. option strings)
+    description: str  # display name (incl. option strings)
 
     # Dates
-    acquired_date: date | None          # first buy or 1099 acquired date
-    disposed_date: date                 # disposal or today (for open)
-    acquired_approx: bool               # True if Various/proxy
-    holding_days: int                   # days from acquired_date to disposed
+    acquired_date: date | None  # first buy or 1099 acquired date
+    disposed_date: date  # disposal or today (for open)
+    acquired_approx: bool  # True if Various/proxy
+    holding_days: int  # days from acquired_date to disposed
     # Open positions: dollar-weighted-average days held across all buys
     # (Σ buy_dollars × days_held_for_those_dollars / Σ buy_dollars).
     # Closed-lot rows have no meaningful weighted average; we set it equal
@@ -89,10 +96,10 @@ class TimelineRow(BaseModel):
 
     # Money (all Decimal, JSON-serialized as strings)
     quantity: Decimal | None
-    proceeds: Decimal                   # 1099 proceeds or current mkt value
+    proceeds: Decimal  # 1099 proceeds or current mkt value
     cost_basis: Decimal
-    realized_gain: Decimal              # gain_or_loss from 1099 OR unrealized
-    return_pct: float | None            # gain / cost_basis (None if cost=0)
+    realized_gain: Decimal  # gain_or_loss from 1099 OR unrealized
+    return_pct: float | None  # gain / cost_basis (None if cost=0)
 
     # SPY counterfactual
     # For closed lots: cost × (SPY_end/SPY_start - 1) — single entry point.
@@ -101,17 +108,17 @@ class TimelineRow(BaseModel):
     # (override beyond observed buys) deploys at first observed activity
     # date. This avoids overstating the SPY counterfactual when capital
     # was deployed in tranches over years.
-    spy_start_price: Decimal | None     # for open positions: first buy date proxy
+    spy_start_price: Decimal | None  # for open positions: first buy date proxy
     spy_end_price: Decimal | None
-    spy_return_pct: float | None        # SPY's own return over the window
+    spy_return_pct: float | None  # SPY's own return over the window
     spy_counterfactual_dollars: Decimal | None
-    alpha_dollars: Decimal | None       # gain - spy_counterfactual
+    alpha_dollars: Decimal | None  # gain - spy_counterfactual
 
     # Provenance
-    source: str                         # "1099" | "broker"
-    broker: str | None                  # for 1099 rows
+    source: str  # "1099" | "broker"
+    broker: str | None  # for 1099 rows
     tax_year: int | None
-    term: str | None                    # short / long / None for open
+    term: str | None  # short / long / None for open
 
 
 class YearSummary(BaseModel):
@@ -137,7 +144,7 @@ class _SpyLookup:
     _cache: dict[date, Decimal | None]
 
     @classmethod
-    def for_session(cls, session: Session) -> "_SpyLookup":
+    def for_session(cls, session: Session) -> _SpyLookup:
         return cls(session=session, _cache={})
 
     def price_on(self, d: date | None) -> Decimal | None:
@@ -224,9 +231,7 @@ def _closed_lot_rows(
 
         cost_basis = lot.cost_basis or Decimal("0")
         gain = lot.net_gain_loss or Decimal("0")
-        return_pct = (
-            float(gain / cost_basis) if cost_basis and cost_basis != 0 else None
-        )
+        return_pct = float(gain / cost_basis) if cost_basis and cost_basis != 0 else None
 
         spy_start = spy.price_on(acquired)
         spy_end = spy.price_on(lot.disposed_date)
@@ -349,9 +354,7 @@ def _open_position_rows(
             override_cost, acquired_at = override
             agg["cost"] += override_cost
             if acquired_at is not None:
-                agg["dated_overrides"].append(
-                    (snap.account_id, override_cost, acquired_at)
-                )
+                agg["dated_overrides"].append((snap.account_id, override_cost, acquired_at))
         elif snap.cost_basis is not None:
             agg["cost"] += snap.cost_basis
         agg["name"] = agg["name"] or sec.name
@@ -401,9 +404,7 @@ def _open_position_rows(
         )
         spy_start = spy.price_on(first_buy)  # informational only
         spy_return_pct: float | None = (
-            float(spy_end / spy_start) - 1.0
-            if spy_start and spy_end and spy_start > 0
-            else None
+            float(spy_end / spy_start) - 1.0 if spy_start and spy_end and spy_start > 0 else None
         )
 
         out.append(
@@ -448,6 +449,7 @@ class _MatchedFlowResult:
     summarize when capital was actually deployed (dollar-weighted),
     fixing the old "first buy date" overstatement of SPY counterfactual.
     """
+
     spy_counterfactual_pl: Decimal | None
     alpha_pl: Decimal | None
     weighted_entry_date: date | None
@@ -555,7 +557,7 @@ def _matched_flow_open_position(
         weighted_holding_days = 0
         weighted_entry_date: date | None = None
         if weighted_denom > 0:
-            avg_days = int(round(float(weighted_numer / weighted_denom)))
+            avg_days = round(float(weighted_numer / weighted_denom))
             weighted_holding_days = avg_days
             weighted_entry_date = today - timedelta(days=avg_days)
         return _MatchedFlowResult(
@@ -654,7 +656,7 @@ def _matched_flow_open_position(
     weighted_holding_days = 0
     weighted_entry_date: date | None = None
     if weighted_denom > 0:
-        avg_days = int(round(float(weighted_numer / weighted_denom)))
+        avg_days = round(float(weighted_numer / weighted_denom))
         weighted_holding_days = avg_days
         weighted_entry_date = today - timedelta(days=avg_days)
 
