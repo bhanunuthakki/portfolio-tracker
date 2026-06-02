@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Fires every Saturday at the given time. The job (jobs.email_brief) only
-    actually sends on the FIRST Saturday of the month — the weekly trigger plus
+    actually sends on the FIRST Saturday of the month - the weekly trigger plus
     the job's own guard keeps the "first Saturday" rule in one place.
 
     Run from an elevated PowerShell prompt in the MAIN checkout (where .venv,
@@ -42,5 +42,5 @@ Register-ScheduledTask `
     -Description "Emails the monthly portfolio brief on the first Saturday of each month." `
     -Force | Out-Null
 
-Write-Host "Registered '$TaskName' — fires Saturdays at $At; the job sends only on the first Saturday."
+Write-Host "Registered '$TaskName' - fires Saturdays at $At; the job sends only on the first Saturday."
 Write-Host "To run whether you're logged on or not, open Task Scheduler -> the task -> Properties -> General -> 'Run whether user is logged on or not'."
