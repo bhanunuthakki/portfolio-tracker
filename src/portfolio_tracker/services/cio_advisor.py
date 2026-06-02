@@ -4,11 +4,11 @@ Architecture
 ============
 
 * **Single-shot Claude calls via `claude_cli.py`.** Routes through the
-  user's Pro/Max subscription rather than the metered API. See
-  `C:\\Users\\user\\.gemini\\snippets\\claude_cli.py` and the project's
-  CLAUDE.md for the rationale. The wrapper is sync; FastAPI endpoints
-  must invoke this module via `run_in_threadpool` so the subprocess
-  doesn't block the event loop.
+  user's Pro/Max subscription rather than the metered API. The wrapper
+  module lives outside this repo; set `CLAUDE_CLI_DIR` in your `.env` to
+  the directory that contains it (see `.env.example`). The wrapper is
+  sync; FastAPI endpoints must invoke this module via `run_in_threadpool`
+  so the subprocess doesn't block the event loop.
 
 * **Stuffed context.** Each call assembles a fresh facts block from the
   current portfolio state and prepends it to the user prompt. We don't
@@ -40,8 +40,9 @@ Files / surfaces
 * `coaching.py` — deterministic engine; its output is fed into the LLM
   context here as the "rule-based facts" block. Source of truth for
   numeric thresholds.
-* `CIO_CONTEXT.md` — the user's persona file. Read fresh on every call
-  so edits take effect without restart.
+* `CIO_CONTEXT.md` — the persona file (gitignored; copy the tracked
+  `CIO_CONTEXT.example.md` to `CIO_CONTEXT.local.md` and edit). Read
+  fresh on every call so edits take effect without restart.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from portfolio_tracker.config import get_settings
 from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import (
     BriefJobStatus,
@@ -87,21 +89,33 @@ _MAX_REPLAY_TURNS: int = 30
 _FACTS_FRESHNESS_HOURS: int = 24
 
 # The CIO persona prose lives in the repo root. Read fresh on every
-# advisor call so edits don't require a restart.
-_PERSONA_FILE: Path = Path(__file__).resolve().parents[3] / "CIO_CONTEXT.md"
+# advisor call so edits don't require a restart. The real (personal)
+# file is gitignored; the repo ships a generic CIO_CONTEXT.example.md.
+# Resolution prefers the personal copy, then a plain CIO_CONTEXT.md, then
+# the tracked example — so a fresh clone still gets working context.
+_REPO_ROOT: Path = Path(__file__).resolve().parents[3]
+_PERSONA_CANDIDATES: tuple[str, ...] = (
+    "CIO_CONTEXT.local.md",
+    "CIO_CONTEXT.md",
+    "CIO_CONTEXT.example.md",
+)
 
-# Path to the canonical Claude CLI subprocess wrapper, per CLAUDE.md.
-# Routes calls to the user's subscription (not the metered API).
-_CLAUDE_CLI_DIR: str = r"C:\Users\user\.gemini\snippets"
+
+def _claude_cli_dir() -> str | None:
+    """Directory holding the out-of-repo `claude_cli.py` subprocess wrapper,
+    sourced from `CLAUDE_CLI_DIR` in `.env`. The wrapper routes calls to the
+    user's subscription (not the metered API). None if unset — the lazy
+    import below then raises a clear ImportError."""
+    return get_settings().claude_cli_dir
 
 
 def _import_claude() -> callable:
-    """Lazy import so module-import doesn't fail if the snippet dir is
-    missing on a colleague's machine. The CLI wrapper raises clearly if
-    its prerequisites aren't met (ANTHROPIC_API_KEY set, claude CLI
-    missing, etc.)."""
-    if _CLAUDE_CLI_DIR not in sys.path:
-        sys.path.insert(0, _CLAUDE_CLI_DIR)
+    """Lazy import so module-import doesn't fail if the wrapper dir is
+    unset or missing. The CLI wrapper raises clearly if its prerequisites
+    aren't met (ANTHROPIC_API_KEY set, claude CLI missing, etc.)."""
+    cli_dir = _claude_cli_dir()
+    if cli_dir and cli_dir not in sys.path:
+        sys.path.insert(0, cli_dir)
     from claude_cli import call_claude  # type: ignore
 
     return call_claude
@@ -110,8 +124,9 @@ def _import_claude() -> callable:
 def _import_claude_stream() -> callable:
     """Lazy import of the streaming variant (sync generator yielding
     text chunks). Same rationale as `_import_claude`."""
-    if _CLAUDE_CLI_DIR not in sys.path:
-        sys.path.insert(0, _CLAUDE_CLI_DIR)
+    cli_dir = _claude_cli_dir()
+    if cli_dir and cli_dir not in sys.path:
+        sys.path.insert(0, cli_dir)
     from claude_cli import call_claude_stream  # type: ignore
 
     return call_claude_stream
@@ -309,11 +324,14 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
 
 
 def _read_persona() -> str:
-    """Read CIO_CONTEXT.md fresh from disk. Empty string if missing."""
-    try:
-        return _PERSONA_FILE.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
+    """Read the CIO persona file fresh from disk. Tries the personal copy
+    first, then the tracked example. Empty string if none exist."""
+    for name in _PERSONA_CANDIDATES:
+        try:
+            return (_REPO_ROOT / name).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+    return ""
 
 
 def _facts_to_prompt_block(snap: FactsSnapshot) -> str:

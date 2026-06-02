@@ -33,11 +33,11 @@ const PRESETS: { key: Exclude<RangePreset, "CUSTOM">; label: string }[] = [
   { key: "MAX", label: "Max" },
 ];
 
-// Dollar amount of "untouchable" emergency cash reserve. When the user
-// toggles "Exclude reserve" on the dashboard, this much is carved off the
+// Default dollar amount of "untouchable" emergency cash reserve. When the
+// user toggles "Exclude reserve" on the dashboard, this much is carved off the
 // top of V_start, every daily V, AND each synthetic-benchmark base before
 // returns are computed — so the chart compares the *investable* portion
-// against an equivalent-sized index allocation.
+// against an equivalent-sized index allocation. Adjust to your own reserve.
 const CASH_RESERVE_AMOUNT = 30000;
 
 function isoDaysBefore(anchorISO: string, days: number): string {
@@ -257,8 +257,8 @@ export function Dashboard(): JSX.Element {
               active={excludeReserve}
               onClick={() => setExcludeReserve(!excludeReserve)}
               activeColor="emerald"
-              label="Excl. $30k SGOV reserve"
-              tooltip="Carves $30k off the legacy performance + Risk Metrics calculations. For position-alpha, SGOV is already excluded as a cash equivalent — so this toggle is effectively a no-op for the main chart but still affects the Risk Metrics card below."
+              label={`Excl. $${CASH_RESERVE_AMOUNT / 1000}k cash reserve`}
+              tooltip={`Carves $${CASH_RESERVE_AMOUNT / 1000}k off the legacy performance + Risk Metrics calculations. For position-alpha, short-T-bill cash equivalents (e.g. SGOV) are already excluded — so this toggle is effectively a no-op for the main chart but still affects the Risk Metrics card below.`}
             />
             <ToggleChip
               active={excludeIndexEtfs}
