@@ -6,7 +6,13 @@ import {
   filterBySearch,
   useTableSort,
 } from "@/components/useTableSort";
-import { Card, EmptyState, ErrorBanner } from "@/components/ui";
+import {
+  Card,
+  CLASSIFICATION_CHIP_CLASSES,
+  CLASSIFICATION_LABELS,
+  EmptyState,
+  ErrorBanner,
+} from "@/components/ui";
 import type { InvestmentTransactionOut, TxClassification } from "@/types";
 
 /**
@@ -43,18 +49,6 @@ function isoDaysAgo(days: number): string {
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
 }
-
-const CLASSIFICATION_LABELS: Record<TxClassification, string> = {
-  external_in: "Contribution",
-  external_out: "Withdrawal",
-  internal: "Internal",
-};
-
-const CLASSIFICATION_CHIP_CLASSES: Record<TxClassification, string> = {
-  external_in: "bg-emerald-100 text-emerald-800",
-  external_out: "bg-rose-100 text-rose-800",
-  internal: "bg-slate-200 text-slate-700",
-};
 
 const CLASSIFICATION_BTN_CLASSES: Record<TxClassification, string> = {
   external_in: "bg-emerald-600 hover:bg-emerald-700 text-white",

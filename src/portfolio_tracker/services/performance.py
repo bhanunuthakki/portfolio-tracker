@@ -37,13 +37,13 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
-    PolicyWeight,
     PortfolioValueDaily,
     Price,
     Security,
 )
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
 from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.policy import load_policy_weights
 
 # Diagnostics-only threshold: daily portfolio-value swings beyond this are
 # almost certainly reconstruction artifacts (unobserved transfers, gifted
@@ -231,7 +231,7 @@ def compute_performance_series(
     qqq_equivalent = _money_flow_matched_value(
         sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("QQQ", {})
     )
-    policy_weights = _load_policy_weights(session)
+    policy_weights = load_policy_weights(session)
     policy_equivalent = (
         _policy_matched_value(
             sorted_dates, base_value_adj, daily_cashflow, benchmark_series, policy_weights
@@ -278,18 +278,6 @@ def compute_performance_series(
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
         backfill_start_unreliable=_is_start_value_unreliable(base_value, end_value),
     )
-
-
-def _load_policy_weights(session: Session) -> dict[str, Decimal]:
-    """Return ticker → fraction (0..1) for the user's policy mix.
-
-    Empty result means no policy is set; the caller should skip the
-    synthetic policy series. Total fraction may not exactly sum to 1.0
-    if the user's weights aren't fully balanced — we keep the raw
-    fractions and let the synthetic portfolio scale accordingly.
-    """
-    rows = session.execute(select(PolicyWeight)).scalars().all()
-    return {r.ticker: Decimal(r.weight_bps) / Decimal(10000) for r in rows if r.weight_bps > 0}
 
 
 def _broad_index_security_ids(session: Session) -> frozenset[int]:

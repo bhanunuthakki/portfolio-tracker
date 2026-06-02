@@ -6,8 +6,14 @@ import {
   filterBySearch,
   useTableSort,
 } from "@/components/useTableSort";
-import { Card, fmtSignedUSD, pnlClass } from "@/components/ui";
-import type { InvestmentTransactionOut, TxClassification } from "@/types";
+import {
+  Card,
+  CLASSIFICATION_CHIP_CLASSES as CLASSIFICATION_CHIP,
+  CLASSIFICATION_LABELS as CLASSIFICATION_LABEL,
+  fmtSignedUSD,
+  pnlClass,
+} from "@/components/ui";
+import type { InvestmentTransactionOut } from "@/types";
 
 /**
  * Standalone "Contribution detail" page with sort + search.
@@ -17,17 +23,6 @@ import type { InvestmentTransactionOut, TxClassification } from "@/types";
  * matches across date / account / description / classification, and
  * date range pickers for ad-hoc analysis.
  */
-
-const CLASSIFICATION_LABEL: Record<TxClassification, string> = {
-  external_in: "Contribution",
-  external_out: "Withdrawal",
-  internal: "Internal",
-};
-const CLASSIFICATION_CHIP: Record<TxClassification, string> = {
-  external_in: "bg-emerald-100 text-emerald-800",
-  external_out: "bg-rose-100 text-rose-800",
-  internal: "bg-slate-200 text-slate-700",
-};
 
 type Preset = "6M" | "1Y" | "2Y" | "5Y" | "MAX";
 
