@@ -14,7 +14,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import get_session
-from portfolio_tracker.services.cockpit import Signal, gather_signals
+from portfolio_tracker.services.cockpit import (
+    ActionItem,
+    Signal,
+    gather_signals,
+    rank_signals,
+)
 
 router = APIRouter(prefix="/api/cockpit", tags=["cockpit"])
 
@@ -23,3 +28,17 @@ router = APIRouter(prefix="/api/cockpit", tags=["cockpit"])
 def get_signals(db: Annotated[Session, Depends(get_session)]) -> list[Signal]:
     """Grounded, dollar-weighted signals for the current portfolio."""
     return gather_signals(db)
+
+
+@router.get("/queue", response_model=list[ActionItem])
+def get_queue(
+    db: Annotated[Session, Depends(get_session)],
+    use_llm: bool = True,
+) -> list[ActionItem]:
+    """Ranked, advisory action queue over the grounded signals.
+
+    `use_llm=true` (default) routes an Opus ranking pass; `use_llm=false`
+    returns the fast deterministic queue with no LLM call. (Persistence and
+    event-driven regeneration arrive in slice 3 — this ranks on demand.)
+    """
+    return rank_signals(gather_signals(db), use_llm=use_llm)
