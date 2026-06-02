@@ -851,3 +851,52 @@ class MonthlyBriefJob(Base):
         ForeignKey("monthly_briefs.brief_id", ondelete="SET NULL"), nullable=True
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ActionQueueItem(Base):
+    """A persisted cockpit action-queue item (P3).
+
+    The Opus-ranked, grounded action queue is snapshotted here so the
+    accept / dismiss / snooze lifecycle survives regeneration. `signature` is
+    the stable identity (a hash of the ticker + the concern's signal kinds), so
+    a regeneration updates the same row instead of spawning a duplicate — and a
+    dismissal or snooze sticks across refreshes. Status flow:
+    `open` -> accepted | dismissed | snoozed; vanished open items -> `resolved`.
+    """
+
+    __tablename__ = "action_queue"
+    __table_args__ = (
+        UniqueConstraint("signature", name="uq_action_queue_signature"),
+        Index("ix_action_queue_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signature: Mapped[str] = mapped_column(String(64), nullable=False)
+    ticker: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str | None] = mapped_column(String, nullable=True)
+    tier: Mapped[str] = mapped_column(String(8), nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_action: Mapped[str] = mapped_column(Text, nullable=False)
+    weight_pct: Mapped[Decimal] = mapped_column(Numeric(9, 4), nullable=False, default=0)
+    evidence_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    signal_kinds_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    llm_ranked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="open", server_default="open"
+    )
+    snooze_until: Mapped[date | None] = mapped_column(Date, nullable=True)
+    commitment_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
