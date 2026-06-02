@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 import { InfoButton } from "@/components/ui";
 import type {
   ConsolidatedHoldingOut,
@@ -44,9 +46,17 @@ const colorCls = (v: number): string =>
 export function PositionAlphaTable({
   data,
   holdings = [],
+  focusTicker,
 }: {
   data: PositionAlphaResult;
   holdings?: ConsolidatedHoldingOut[];
+  /**
+   * When set (typically from a `?ticker=NU` deep-link on the Dashboard),
+   * the matching row is highlighted and scrolled into view on mount.
+   * The parent `<details>` element is responsible for being open —
+   * this component only handles the within-table scroll + highlight.
+   */
+  focusTicker?: string;
 }): JSX.Element {
   const rows = [...data.rows].sort(
     (a, b) => parseFloat(a.alpha) - parseFloat(b.alpha),
@@ -54,6 +64,7 @@ export function PositionAlphaTable({
   const totalActual = parseFloat(data.total_actual_pl);
   const totalSpy = parseFloat(data.total_spy_pl);
   const totalAlpha = parseFloat(data.total_alpha);
+  const focusNorm = (focusTicker ?? "").toUpperCase();
 
   // Map ticker -> reliability info from current holdings. A ticker is
   // 'unreliable' when at least one contributing account has implausibly
@@ -64,6 +75,16 @@ export function PositionAlphaTable({
       unreliableByTicker.set(h.ticker.toUpperCase(), h.has_unreliable_cost_basis);
     }
   }
+
+  // Scroll the focused row into view once the table mounts. Block:'center'
+  // matches the Holdings + TradeAnalysis deep-link UX so the ticker chip
+  // navigation feels the same everywhere.
+  const focusRowRef = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    if (focusNorm && focusRowRef.current) {
+      focusRowRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [focusNorm]);
 
   return (
     <div className="overflow-x-auto">
@@ -106,8 +127,17 @@ export function PositionAlphaTable({
             const alpha = parseFloat(r.alpha);
             const actual = parseFloat(r.actual_pl);
             const spy = parseFloat(r.spy_counterfactual_pl);
+            const isFocus = focusNorm !== "" && r.ticker.toUpperCase() === focusNorm;
             return (
-              <tr key={r.ticker} className="hover:bg-slate-50">
+              <tr
+                key={r.ticker}
+                ref={isFocus ? focusRowRef : undefined}
+                className={
+                  isFocus
+                    ? "bg-amber-100 hover:bg-amber-100"
+                    : "hover:bg-slate-50"
+                }
+              >
                 <td className="px-3 py-1.5 font-mono font-medium text-slate-900">
                   {r.ticker}
                   {r.incomplete && (
