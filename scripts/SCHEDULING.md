@@ -115,3 +115,53 @@ Get-ChildItem "C:\path\to\portfolio-tracker\scripts\logs" |
 
 If the most recent log file is older than yesterday, the schedule is
 broken. Look at the file content for the actual error.
+
+---
+
+# Monthly brief email
+
+`portfolio_tracker.jobs.email_brief` emails the LLM-generated monthly brief
+to `BRIEF_EMAIL_RECIPIENT`. It's designed to run on a **weekly Saturday**
+trigger and self-gates: it only actually sends on the **first Saturday of the
+month** (use `--force` for an off-cadence send). By default it emails the
+brief for the prior (just-completed) month, generating it first if one doesn't
+exist yet.
+
+## One-time setup — Gmail OAuth
+
+Sending uses the Gmail API with an OAuth "Desktop app" client (the same pattern
+as the `date-suggester` project — you can reuse its `credentials.json`).
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), enable the
+   **Gmail API** and create an **OAuth client ID** of type **Desktop app**
+   (or reuse an existing one). Download it as `credentials.json`.
+2. Drop `credentials.json` at the repo root (it's gitignored).
+3. Set the recipient in `.env`:
+   ```
+   BRIEF_EMAIL_RECIPIENT=you@example.com
+   ```
+4. Run the one-time consent flow (mints `token.json`, also gitignored):
+   ```
+   .venv\Scripts\python -m portfolio_tracker.jobs.email_brief --authorize
+   ```
+   It prints a URL — open it, consent to the single `gmail.send` scope, done.
+5. Smoke-test without scheduling, then for real:
+   ```
+   .venv\Scripts\python -m portfolio_tracker.jobs.email_brief --force --dry-run
+   .venv\Scripts\python -m portfolio_tracker.jobs.email_brief --force
+   ```
+
+## Schedule it (Windows Task Scheduler)
+
+From an elevated PowerShell in the main checkout:
+
+```powershell
+.\scripts\install-email-brief-task.ps1            # Saturdays at 09:00
+.\scripts\install-email-brief-task.ps1 -At 08:30  # custom time
+```
+
+This registers a weekly-Saturday task pointing at `scripts/run_email_brief.bat`
+(which unsets `ANTHROPIC_API_KEY` so any brief regeneration bills the Claude
+subscription, and logs to `scripts/logs/email_brief_<date>.log`). The job's
+guard handles the "first Saturday only" rule. To run while logged off, flip the
+task's **"Run whether user is logged on or not"** as described above.
