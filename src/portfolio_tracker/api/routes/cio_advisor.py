@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from collections.abc import AsyncIterator
 from datetime import date
 from typing import Annotated, Any
 
@@ -199,7 +200,7 @@ async def post_turn_stream(
     except ValueError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
 
-    async def event_gen() -> Any:
+    async def event_gen() -> AsyncIterator[str]:
         # Tell the client the persisted user-turn id so it can key the
         # in-progress user bubble correctly before the final cache invalidate.
         yield f"data: {json.dumps({'user_turn_id': user_turn.turn_id})}\n\n"

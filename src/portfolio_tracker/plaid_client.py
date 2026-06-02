@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import Any, cast
 
 import plaid
 from plaid.api import plaid_api
@@ -30,7 +31,7 @@ from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchan
 from plaid.model.link_token_create_request import LinkTokenCreateRequest
 from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
 from plaid.model.products import Products
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from portfolio_tracker.config import PlaidEnvironment, get_settings
 
@@ -96,7 +97,7 @@ class InvestmentsTransactionsResponse(BaseModel):
 
     accounts: list[PlaidAccount]
     securities: list[PlaidSecurity]
-    transactions: list[PlaidInvestmentTransaction] = Field(default_factory=list)
+    transactions: list[PlaidInvestmentTransaction] = []
     total_transactions: int
 
 
@@ -129,24 +130,27 @@ def get_client() -> plaid_api.PlaidApi:
 
 def create_link_token(client_user_id: str) -> str:
     settings = get_settings()
-    products = [Products(p) for p in settings.plaid_products_list]
-    countries = [CountryCode(c) for c in settings.plaid_country_codes_list]
-    request = LinkTokenCreateRequest(
-        user=LinkTokenCreateRequestUser(client_user_id=client_user_id),
-        client_name="Portfolio Tracker",
-        products=products,
-        country_codes=countries,
-        language="en",
+    products: list[Any] = [Products(p) for p in settings.plaid_products_list]
+    countries: list[Any] = [CountryCode(c) for c in settings.plaid_country_codes_list]
+    request = cast(
+        Any,
+        LinkTokenCreateRequest(
+            user=LinkTokenCreateRequestUser(client_user_id=client_user_id),
+            client_name="Portfolio Tracker",
+            products=products,
+            country_codes=countries,
+            language="en",
+        ),
     )
-    response = get_client().link_token_create(request)
-    return response.link_token
+    response = cast(Any, get_client().link_token_create(request))
+    return str(response.link_token)
 
 
 def exchange_public_token(public_token: str) -> tuple[str, str]:
     """Exchange a Link `public_token` for `(access_token, item_id)`."""
-    request = ItemPublicTokenExchangeRequest(public_token=public_token)
-    response = get_client().item_public_token_exchange(request)
-    return response.access_token, response.item_id
+    request = cast(Any, ItemPublicTokenExchangeRequest(public_token=public_token))
+    response = cast(Any, get_client().item_public_token_exchange(request))
+    return str(response.access_token), str(response.item_id)
 
 
 def _to_plaid_dict(raw: object) -> dict[str, object]:
@@ -162,15 +166,16 @@ def _to_plaid_dict(raw: object) -> dict[str, object]:
     if callable(to_dict):
         result = to_dict()
         if isinstance(result, dict):
-            return result
+            return cast("dict[str, object]", result)
     raise TypeError(f"Plaid object {type(raw)!r} has no callable to_dict()")
 
 
 def _account_from_plaid(raw: object) -> PlaidAccount:
     data = _to_plaid_dict(raw)
-    balances = data.get("balances") or {}
-    if not isinstance(balances, dict):
-        balances = {}
+    raw_balances = data.get("balances")
+    balances: dict[str, object] = (
+        cast("dict[str, object]", raw_balances) if isinstance(raw_balances, dict) else {}
+    )
     return PlaidAccount(
         plaid_account_id=str(data["account_id"]),
         name=str(data["name"]),
@@ -258,8 +263,8 @@ def _opt_date(value: object) -> date | None:
 
 
 def get_holdings(access_token: str) -> HoldingsResponse:
-    request = InvestmentsHoldingsGetRequest(access_token=access_token)
-    response = get_client().investments_holdings_get(request)
+    request = cast(Any, InvestmentsHoldingsGetRequest(access_token=access_token))
+    response = cast(Any, get_client().investments_holdings_get(request))
     item_dict = _to_plaid_dict(response.item)
     return HoldingsResponse(
         accounts=[_account_from_plaid(a) for a in response.accounts],
@@ -280,17 +285,20 @@ def get_investment_transactions(
     all_tx: list[PlaidInvestmentTransaction] = []
     accounts: list[PlaidAccount] = []
     securities: list[PlaidSecurity] = []
-    total = 0
+    total: int = 0
     offset = 0
     client = get_client()
     while True:
-        request = InvestmentsTransactionsGetRequest(
-            access_token=access_token,
-            start_date=start_date,
-            end_date=end_date,
-            options=InvestmentsTransactionsGetRequestOptions(count=page_size, offset=offset),
+        request = cast(
+            Any,
+            InvestmentsTransactionsGetRequest(
+                access_token=access_token,
+                start_date=start_date,
+                end_date=end_date,
+                options=InvestmentsTransactionsGetRequestOptions(count=page_size, offset=offset),
+            ),
         )
-        response = client.investments_transactions_get(request)
+        response = cast(Any, client.investments_transactions_get(request))
         if offset == 0:
             accounts = [_account_from_plaid(a) for a in response.accounts]
             securities = [_security_from_plaid(s) for s in response.securities]

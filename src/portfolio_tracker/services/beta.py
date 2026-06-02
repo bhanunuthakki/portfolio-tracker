@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import PolicyWeight
 from portfolio_tracker.services.performance import (
-    _benchmark_series,
+    _benchmark_series,  # pyright: ignore[reportPrivateUsage]
 )
 from portfolio_tracker.services.position_alpha import compute_position_alpha
 

@@ -47,6 +47,7 @@ import argparse
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -95,7 +96,7 @@ def run(
         plaid_accounts = list(
             session.execute(select(Account).where(Account.item_id == item.item_id)).scalars().all()
         )
-        plaid_masks = {_normalize_mask(a.mask) for a in plaid_accounts if a.mask}
+        plaid_masks = {m for a in plaid_accounts if a.mask and (m := _normalize_mask(a.mask))}
 
         print(f"Plaid item {item.item_id}: {item.institution_name}")
         for a in plaid_accounts:
@@ -123,14 +124,20 @@ def run(
         )
 
         # ---- 3. Verify mask coverage on SnapTrade --------------------
-        snaptrade_account_rows = session.execute(
-            select(Account, Item)
-            .join(Item, Item.item_id == Account.item_id)
-            .where(Item.source == ItemSource.SNAPTRADE.value)
-        ).all()
-        snaptrade_masks: dict[str, Account] = {
-            _normalize_mask(a.mask): a for a, _ in snaptrade_account_rows if a.mask is not None
-        }
+        snaptrade_account_rows = (
+            session.execute(
+                select(Account, Item)
+                .join(Item, Item.item_id == Account.item_id)
+                .where(Item.source == ItemSource.SNAPTRADE.value)
+            )
+            .tuples()
+            .all()
+        )
+        snaptrade_masks: dict[str, Account] = {}
+        for a, _ in snaptrade_account_rows:
+            norm = _normalize_mask(a.mask)
+            if norm is not None:
+                snaptrade_masks[norm] = a
         unmatched = plaid_masks - set(snaptrade_masks.keys())
         if unmatched:
             raise RuntimeError(
@@ -283,7 +290,7 @@ def _backup_plaid_data(
     return path
 
 
-def _row_to_dict(row) -> dict:
+def _row_to_dict(row: Any) -> dict[str, object]:
     return {c.name: getattr(row, c.name) for c in row.__table__.columns}
 
 

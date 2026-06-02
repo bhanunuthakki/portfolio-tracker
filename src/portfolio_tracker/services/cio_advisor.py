@@ -49,12 +49,12 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict, cast
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -109,7 +109,7 @@ def _claude_cli_dir() -> str | None:
     return get_settings().claude_cli_dir
 
 
-def _import_claude() -> callable:
+def _import_claude() -> Callable[..., str]:
     """Lazy import so module-import doesn't fail if the wrapper dir is
     unset or missing. The CLI wrapper raises clearly if its prerequisites
     aren't met (ANTHROPIC_API_KEY set, claude CLI missing, etc.)."""
@@ -118,10 +118,10 @@ def _import_claude() -> callable:
         sys.path.insert(0, cli_dir)
     from claude_cli import call_claude  # type: ignore
 
-    return call_claude
+    return cast("Callable[..., str]", call_claude)
 
 
-def _import_claude_stream() -> callable:
+def _import_claude_stream() -> Callable[..., Iterator[str]]:
     """Lazy import of the streaming variant (sync generator yielding
     text chunks). Same rationale as `_import_claude`."""
     cli_dir = _claude_cli_dir()
@@ -129,7 +129,7 @@ def _import_claude_stream() -> callable:
         sys.path.insert(0, cli_dir)
     from claude_cli import call_claude_stream  # type: ignore
 
-    return call_claude_stream
+    return cast("Callable[..., Iterator[str]]", call_claude_stream)
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +216,17 @@ class FactsSnapshot:
 
     as_of: str
     portfolio_total_value: int  # USD, rounded
-    positions: list[dict]  # each position's `value_usd` is int USD
-    recent_decisions: list[dict]
-    coaching_findings: dict
+    positions: list[dict[str, object]]  # each position's `value_usd` is int USD
+    recent_decisions: list[dict[str, object]]
+    coaching_findings: dict[str, object]
     persona_excerpt: str = field(default="")
+
+
+class _AggRow(TypedDict):
+    ticker: str
+    name: str | None
+    qty: Decimal
+    value: Decimal
 
 
 def build_facts_snapshot(session: Session) -> FactsSnapshot:
@@ -239,7 +246,7 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
     accts = active_account_ids(session)
     today_iso = date.today().isoformat()
 
-    positions: list[dict] = []
+    positions: list[dict[str, object]] = []
     portfolio_total = Decimal(0)
     if accts:
         # Pin to the latest snapshot date — without this filter we'd sum
@@ -251,20 +258,22 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
                 HoldingSnapshot.account_id.in_(accts)
             )
         ).scalar_one_or_none()
-        latest = (
-            session.execute(
-                select(HoldingSnapshot, Security)
-                .join(Security, Security.security_id == HoldingSnapshot.security_id)
-                .where(HoldingSnapshot.account_id.in_(accts))
-                .where(HoldingSnapshot.snapshot_date == latest_date)
-                .where(Security.is_cash_equivalent.is_(False))
-                .where(Security.ticker.is_not(None))
-            ).all()
-            if latest_date is not None
-            else []
-        )
+        latest: list[tuple[HoldingSnapshot, Security]] = []
+        if latest_date is not None:
+            latest = list(
+                session.execute(
+                    select(HoldingSnapshot, Security)
+                    .join(Security, Security.security_id == HoldingSnapshot.security_id)
+                    .where(HoldingSnapshot.account_id.in_(accts))
+                    .where(HoldingSnapshot.snapshot_date == latest_date)
+                    .where(Security.is_cash_equivalent.is_(False))
+                    .where(Security.ticker.is_not(None))
+                )
+                .tuples()
+                .all()
+            )
         # Roll up across accounts for a clean per-ticker view.
-        agg: dict[str, dict] = {}
+        agg: dict[str, _AggRow] = {}
         for h, s in latest:
             t = (s.ticker or "").upper()
             if not t:
@@ -302,7 +311,7 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
         .scalars()
         .all()
     )
-    recent_decisions = [
+    recent_decisions: list[dict[str, object]] = [
         {
             "decision_date": d.decision_date.isoformat(),
             "ticker": d.ticker,
@@ -317,7 +326,7 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
     ]
 
     coaching = generate_coaching_tips(session)
-    coaching_findings = {
+    coaching_findings: dict[str, object] = {
         "rubric_summary": coaching.rubric_summary,
         "rubric": coaching.rubric.model_dump(),
         "positions_evaluated": coaching.positions_evaluated,
@@ -978,7 +987,8 @@ def _parse_brief_sections(raw: str) -> dict[str, str]:
                 f"<pre style='white-space:pre-wrap'>{_escape(raw)}</pre>"
             ),
         }
-    return {k: str(v) for k, v in parsed.items() if k in dict(_BRIEF_SECTIONS)}
+    typed_sections = cast("dict[str, object]", parsed)
+    return {k: str(v) for k, v in typed_sections.items() if k in dict(_BRIEF_SECTIONS)}
 
 
 def _render_brief_html(period_yyyymm: str, snap: FactsSnapshot, sections: dict[str, str]) -> str:

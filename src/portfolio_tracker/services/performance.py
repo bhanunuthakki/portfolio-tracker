@@ -509,8 +509,6 @@ def _daily_internal_index_cashflows(
     )
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
     for tx in rows:
-        if tx.amount is None:
-            continue
         magnitude = abs(Decimal(tx.amount))
         # SELL of an index → cash returns to the active bucket (inflow).
         # BUY of an index → cash leaves the active bucket (outflow).
@@ -1366,8 +1364,6 @@ def _reverse_transaction_cash_delta(
     position to represent internal margin-sweeps; they sum to zero in
     theory but leak in practice).
     """
-    if tx.amount is None:
-        return Decimal(0)
     amount = Decimal(tx.amount)
     magnitude = abs(amount)
 

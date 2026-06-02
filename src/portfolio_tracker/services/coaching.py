@@ -727,7 +727,7 @@ def _bucket_weights_by_ticker(session: Session) -> dict[str, dict[str, Decimal]]
     return out
 
 
-def _bucket_weights_for_ticker(ticker: str, session: Session) -> dict[str, Decimal]:
+def _bucket_weights_for_ticker(ticker: str, session: Session) -> dict[str, Decimal]:  # pyright: ignore[reportUnusedFunction]
     """Single-ticker convenience over `_bucket_weights_by_ticker`.
 
     Kept for callers that need only one lookup; the full-portfolio path
