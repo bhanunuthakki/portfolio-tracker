@@ -460,6 +460,47 @@ class TickerOverride(Base):
     )
 
 
+class SecurityClassification(Base):
+    """Sector + coarse region for a security — backs the Holdings positioning view.
+
+    Two cuts the broker feeds don't supply: a GICS-style `sector` and a
+    coarse `region` (`US` / `International`). `jobs.classify_securities`
+    fills these from yfinance `.info` for individual equities and writes
+    `source='auto'`. Funds/ETFs have no single sector, so the job stamps
+    `sector='ETF/Fund'` and leaves `region` NULL (the user can override a
+    broad-international fund like VXUS). Crypto gets `sector='Crypto'`.
+
+    `source` mirrors `CostBasisOverride`'s convention so a later enrichment
+    run never clobbers a human edit:
+      * `auto`   — written by the enrichment job from yfinance
+      * `manual` — user-entered via the API/UI; the job skips these rows
+
+    One row per security. `sector` / `region` are independently nullable so
+    a partial classification (sector known, region unknown) is representable.
+    The positioning service treats a missing row — or a NULL field — as the
+    explicit "Unclassified" / "Unknown" bucket rather than dropping the
+    position, so every dollar still lands in some slice.
+    """
+
+    __tablename__ = "security_classifications"
+
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.security_id", ondelete="CASCADE"), primary_key=True
+    )
+    sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="auto", server_default="auto"
+    )
+    notes: Mapped[str | None] = mapped_column(String, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class TradeDecision(Base):
     """Pre-trade thesis log — written BEFORE clicking buy/sell.
 
