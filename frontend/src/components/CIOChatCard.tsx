@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
 import {
@@ -29,10 +30,13 @@ import type { ChatSessionOut, ChatTurnOut } from "@/types";
  * are replaced by the persisted rows.
  */
 export function CIOChatCard(): JSX.Element {
+  // `?ask=<question>` lets other surfaces (e.g. a cockpit item's "Discuss")
+  // deep-link in with the question pre-filled. Seed the draft once on mount.
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [newThreadTitle, setNewThreadTitle] = useState("");
-  const [draftMessage, setDraftMessage] = useState("");
+  const [draftMessage, setDraftMessage] = useState(() => searchParams.get("ask") ?? "");
   const [sendError, setSendError] = useState<string | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
 
