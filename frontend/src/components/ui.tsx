@@ -1,24 +1,26 @@
 /**
- * Tiny design-system primitives.
+ * Tiny design-system primitives — "paper on monochrome" editorial style.
+ *
+ * Ported from the Earnings Summary workspace renderer: a warm paper canvas,
+ * white panels, hairline rules, a single blue accent, mono figures + mono
+ * uppercase "eyebrow" labels, and disciplined gain/loss/warn semantics.
  *
  * Every page should use these instead of inlining one-off Tailwind classes.
- * The goal is visual consistency: one card style, one button style per
- * intent, one table-cell rhythm. Add new variants here, not in pages.
+ * The goal is visual consistency: one panel style, one button per intent,
+ * one table-cell rhythm. Add new variants here, not in pages.
  *
- * Type system:
- *   12 → text-[11px] uppercase tracking-wider     (stat labels)
- *   xs → text-xs                                   (help, captions)
- *   sm → text-sm                                   (body / table cells)
- *   md → text-base font-medium                     (section titles)
- *   lg → text-lg font-semibold tabular-nums        (stat values)
+ * Color tokens (all theme-aware via CSS variables — see index.css):
+ *   surface · paper · canvas          backgrounds (card / inset / page)
+ *   ink · ink-soft · body · muted · faint   text, darkest → lightest
+ *   line · line-strong · hairline      borders, faint → strong
+ *   accent (+ soft / strong)           the single editorial blue
+ *   gain · loss · warn (+ soft/strong) P&L + status semantics
  *
- * Color palette (via Tailwind):
- *   text:    slate-900 (primary), slate-700 (body), slate-500 (muted)
- *   border:  slate-200 (cards/inputs), slate-100 (dividers)
- *   bg:      white (cards), slate-50 (page, tables)
- *   accent:  slate-900 → slate-700 hover (primary action)
- *   gain:    emerald-700
- *   loss:    red-700
+ * Type scale:
+ *   eyebrow → mono 10.5px uppercase tracked   (labels, kickers)
+ *   xs → text-xs                              (help, captions)
+ *   sm → text-sm                              (body / table cells)
+ *   figure → font-mono tabular-nums           (every number)
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -35,9 +37,9 @@ export const CLASSIFICATION_LABELS: Record<TxClassification, string> = {
 };
 
 export const CLASSIFICATION_CHIP_CLASSES: Record<TxClassification, string> = {
-  external_in: "bg-emerald-100 text-emerald-800",
-  external_out: "bg-rose-100 text-rose-800",
-  internal: "bg-slate-200 text-slate-700",
+  external_in: "bg-gain-soft text-gain-strong",
+  external_out: "bg-loss-soft text-loss-strong",
+  internal: "bg-paper-2 text-body",
 };
 
 // ---- containers ---------------------------------------------------------
@@ -52,7 +54,7 @@ export function Card({
   return (
     <div
       className={[
-        "rounded-lg border border-slate-200 bg-white",
+        "rounded-lg border border-line bg-surface shadow-card",
         className ?? "",
       ].join(" ")}
     >
@@ -61,20 +63,113 @@ export function Card({
   );
 }
 
+/**
+ * Editorial panel with a hairline-ruled header. Use for any titled section
+ * (chart, table, list). `eyebrow` renders the mono kicker above the title;
+ * `actions` sits flush-right in the header; `footer` gets the paper-toned
+ * note strip at the bottom.
+ */
+export function Panel({
+  title,
+  eyebrow,
+  sub,
+  actions,
+  footer,
+  children,
+  className,
+  bodyClassName,
+}: {
+  title?: ReactNode;
+  eyebrow?: ReactNode;
+  sub?: ReactNode;
+  actions?: ReactNode;
+  footer?: ReactNode;
+  children: ReactNode;
+  className?: string;
+  bodyClassName?: string;
+}): JSX.Element {
+  return (
+    <Card className={["overflow-hidden", className ?? ""].join(" ")}>
+      {(title || actions || eyebrow) && (
+        <header className="flex flex-col gap-3 border-b border-hairline px-4 py-3 sm:flex-row sm:items-baseline sm:justify-between">
+          <div className="min-w-0">
+            {eyebrow && <div className="eyebrow mb-1">{eyebrow}</div>}
+            {title && (
+              <h2 className="text-sm font-semibold tracking-tight text-ink">
+                {title}
+              </h2>
+            )}
+            {sub && <p className="mt-0.5 text-xs text-muted">{sub}</p>}
+          </div>
+          {actions && (
+            <div className="flex flex-wrap items-center gap-2">{actions}</div>
+          )}
+        </header>
+      )}
+      <div className={bodyClassName}>{children}</div>
+      {footer && (
+        <div className="border-t border-hairline bg-paper px-4 py-2.5 text-xs leading-relaxed text-muted">
+          {footer}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export function PageHeader({
   title,
+  eyebrow,
   actions,
 }: {
   title: string;
+  eyebrow?: string;
   actions?: ReactNode;
 }): JSX.Element {
   return (
-    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <h2 className="text-base font-semibold text-slate-900">{title}</h2>
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        {eyebrow && <div className="eyebrow mb-1.5">{eyebrow}</div>}
+        <h2 className="text-xl font-semibold tracking-tight text-ink">
+          {title}
+        </h2>
+      </div>
       {actions && (
         <div className="flex flex-wrap items-center gap-2">{actions}</div>
       )}
     </div>
+  );
+}
+
+// ---- typography ---------------------------------------------------------
+
+/** Mono uppercase kicker that sits above a title or stat. */
+export function Eyebrow({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): JSX.Element {
+  return <div className={["eyebrow", className ?? ""].join(" ")}>{children}</div>;
+}
+
+/** Large editorial section title (sans, tight tracking). */
+export function SectionTitle({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}): JSX.Element {
+  return (
+    <h2
+      className={[
+        "text-2xl font-semibold tracking-tight text-ink",
+        className ?? "",
+      ].join(" ")}
+    >
+      {children}
+    </h2>
   );
 }
 
@@ -98,7 +193,7 @@ export function PrimaryButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+      className="rounded-md bg-ink px-3 py-1.5 text-sm font-medium text-canvas transition-colors hover:bg-ink-soft disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
@@ -116,7 +211,7 @@ export function SecondaryButton({
       type={type}
       onClick={onClick}
       disabled={disabled}
-      className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+      className="rounded-md border border-line-strong bg-surface px-3 py-1.5 text-sm font-medium text-ink-soft transition-colors hover:border-line-strong hover:bg-paper disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
@@ -134,15 +229,59 @@ export function DangerLink({
     <button
       type="button"
       onClick={onClick}
-      className="text-xs text-red-600 hover:text-red-800"
+      className="text-xs text-loss transition-colors hover:text-loss-strong"
     >
       {children}
     </button>
   );
 }
 
+// ---- pills / chips ------------------------------------------------------
+
+type PillTone = "accent" | "neutral" | "muted" | "warn" | "gain" | "loss";
+
+const PILL_TONE: Record<PillTone, string> = {
+  accent: "bg-accent-soft text-accent border-accent/30",
+  neutral: "bg-paper text-ink-soft border-line",
+  muted: "bg-paper text-muted border-line",
+  warn: "bg-tone-warn text-warn-strong border-warn/30",
+  gain: "bg-gain-soft text-gain-strong border-gain/30",
+  loss: "bg-tone-neg text-loss-strong border-loss/30",
+};
+
+/** Small mono status pill. */
+export function Pill({
+  children,
+  tone = "neutral",
+  className,
+  title,
+}: {
+  children: ReactNode;
+  tone?: PillTone;
+  className?: string;
+  title?: string;
+}): JSX.Element {
+  return (
+    <span
+      title={title}
+      className={[
+        "inline-flex items-center gap-1 rounded border px-2 py-0.5 font-mono text-[10.5px] font-medium tracking-wide",
+        PILL_TONE[tone],
+        className ?? "",
+      ].join(" ")}
+    >
+      {children}
+    </span>
+  );
+}
+
 // ---- stats --------------------------------------------------------------
 
+/**
+ * KPI tile — mono figure over a mono-uppercase label. `mono` flags a long
+ * value (e.g. a date range) that should render a notch smaller so it fits
+ * on one line; the figure is always mono + tabular.
+ */
 export function Stat({
   label,
   value,
@@ -153,14 +292,12 @@ export function Stat({
   mono?: boolean;
 }): JSX.Element {
   return (
-    <Card className="px-4 py-3">
-      <div className="text-[11px] uppercase tracking-wider text-slate-500">
-        {label}
-      </div>
+    <Card className="px-5 py-4">
+      <div className="eyebrow min-h-[26px] leading-[1.3]">{label}</div>
       <div
         className={[
-          "mt-1 truncate font-semibold tabular-nums text-slate-900",
-          mono ? "font-mono text-sm" : "text-lg",
+          "mt-1.5 truncate font-mono font-medium tracking-tight tabular-nums text-ink",
+          mono ? "text-[15px]" : "text-2xl",
         ].join(" ")}
         title={value}
       >
@@ -183,7 +320,7 @@ export function Th({
     <th
       scope="col"
       className={[
-        "px-4 py-2 text-xs font-medium uppercase tracking-wide text-slate-500",
+        "px-4 py-2.5 text-[10.5px] font-medium uppercase tracking-[0.06em] text-muted",
         align === "right" ? "text-right" : "text-left",
       ].join(" ")}
     >
@@ -207,8 +344,8 @@ export function Td({
     <td
       title={title}
       className={[
-        "px-4 py-2 text-sm text-slate-700",
-        align === "right" ? "text-right" : "text-left",
+        "px-4 py-2.5 text-sm text-body",
+        align === "right" ? "text-right tabular-nums" : "text-left",
         className ?? "",
       ].join(" ")}
     >
@@ -221,7 +358,7 @@ export function Td({
 
 export function EmptyState({ children }: { children: ReactNode }): JSX.Element {
   return (
-    <div className="rounded-lg border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">
+    <div className="rounded-lg border border-dashed border-line-strong bg-surface p-8 text-center text-sm text-muted">
       {children}
     </div>
   );
@@ -229,7 +366,7 @@ export function EmptyState({ children }: { children: ReactNode }): JSX.Element {
 
 export function ErrorBanner({ children }: { children: ReactNode }): JSX.Element {
   return (
-    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+    <div className="rounded-md border border-loss/30 bg-tone-neg px-3 py-2 text-sm text-loss-strong">
       {children}
     </div>
   );
@@ -237,7 +374,7 @@ export function ErrorBanner({ children }: { children: ReactNode }): JSX.Element 
 
 export function InfoBanner({ children }: { children: ReactNode }): JSX.Element {
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+    <div className="rounded-md border border-line bg-paper px-3 py-2 text-sm text-body">
       {children}
     </div>
   );
@@ -251,9 +388,11 @@ export function WarningBanner({
   children: ReactNode;
 }): JSX.Element {
   return (
-    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+    <div className="rounded-md border border-warn/30 bg-tone-warn px-3 py-2 text-sm text-warn-strong">
       {title && <div className="font-medium">{title}</div>}
-      <div className={title ? "mt-1 text-xs leading-relaxed" : ""}>{children}</div>
+      <div className={title ? "mt-1 text-xs leading-relaxed" : ""}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -314,7 +453,7 @@ export function InfoButton({
         aria-label={`What is ${label}?`}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-slate-300 text-[9px] font-bold normal-case text-slate-500 hover:border-slate-500 hover:text-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-slate-700"
+        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full border border-line-strong text-[9px] font-bold normal-case text-muted transition-colors hover:border-muted hover:text-ink"
       >
         ?
       </button>
@@ -322,25 +461,21 @@ export function InfoButton({
         <div
           role="dialog"
           aria-label={`${label} explainer`}
-          className="absolute left-0 top-full z-20 mt-1.5 w-80 max-w-[calc(100vw-2rem)] rounded-md border border-slate-200 bg-white p-3 text-left text-xs normal-case tracking-normal text-slate-700 shadow-lg"
+          className="absolute left-0 top-full z-20 mt-1.5 w-80 max-w-[calc(100vw-2rem)] rounded-md border border-line bg-surface p-3 text-left text-xs normal-case tracking-normal text-body shadow-pop"
         >
-          <div className="text-sm font-semibold text-slate-900">{label}</div>
+          <div className="text-sm font-semibold text-ink">{label}</div>
           <p className="mt-1.5 leading-relaxed">{explainer.definition}</p>
           {explainer.formula && (
             <div className="mt-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Formula
-              </div>
-              <div className="mt-1 rounded bg-slate-50 px-2 py-1 font-mono text-[11px] text-slate-800">
+              <div className="eyebrow">Formula</div>
+              <div className="mt-1 rounded bg-paper px-2 py-1 font-mono text-[11px] text-ink-soft">
                 {explainer.formula}
               </div>
             </div>
           )}
           {explainer.interpretation && (
             <div className="mt-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Reading it
-              </div>
+              <div className="eyebrow">Reading it</div>
               <p className="mt-1 leading-relaxed">{explainer.interpretation}</p>
             </div>
           )}
@@ -367,13 +502,15 @@ export function MethodologyNote({
   return (
     <details
       open={defaultOpen}
-      className="group rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2 text-xs text-slate-600"
+      className="group rounded-md border border-line bg-paper/60 px-3 py-2 text-xs text-muted"
     >
-      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-700">
-        <span className="text-slate-400 transition-transform group-open:rotate-90">▸</span>
-        {title}
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 [&::-webkit-details-marker]:hidden">
+        <span className="font-mono text-faint transition-transform group-open:rotate-90">
+          ▸
+        </span>
+        <span className="eyebrow">{title}</span>
       </summary>
-      <div className="mt-2 leading-relaxed">{children}</div>
+      <div className="mt-2 leading-relaxed text-body">{children}</div>
     </details>
   );
 }
@@ -383,8 +520,8 @@ export function MethodologyNote({
 /** Tailwind class for positive/negative tabular numbers. */
 export function pnlClass(value: number | null): string {
   if (value === null) return "";
-  if (value > 0) return "text-emerald-700";
-  if (value < 0) return "text-red-700";
+  if (value > 0) return "text-gain";
+  if (value < 0) return "text-loss";
   return "";
 }
 
