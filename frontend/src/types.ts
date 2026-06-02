@@ -550,3 +550,63 @@ export interface MonthlyBriefJobOut {
   brief_id: number | null;
   error: string | null;
 }
+
+// Positioning (Holdings positioning section)
+
+export interface PositioningBucketOut {
+  label: string;
+  value: string;
+  weight_pct: string;
+  count: number;
+}
+
+export interface ConcentrationOut {
+  num_positions: number;
+  top1_weight_pct: string | null;
+  top5_weight_pct: string | null;
+  top10_weight_pct: string | null;
+  hhi: number | null;
+  effective_holdings: number | null;
+}
+
+export interface PositionCorrelationRow {
+  security_id: number;
+  ticker: string | null;
+  name: string | null;
+  value: string;
+  weight_pct: string;
+  sample_size: number;
+  correlation_spy: number | null;
+  beta_spy: number | null;
+  correlation_qqq: number | null;
+  beta_qqq: number | null;
+  correlation_policy: number | null;
+  beta_policy: number | null;
+}
+
+export interface PositioningOut {
+  snapshot_date: string;
+  start_date: string;
+  end_date: string;
+  total_value: string;
+  by_asset_type: PositioningBucketOut[];
+  by_sector: PositioningBucketOut[];
+  by_region: PositioningBucketOut[];
+  by_account_type: PositioningBucketOut[];
+  concentration: ConcentrationOut;
+  correlations: PositionCorrelationRow[];
+  weighted_avg_correlation_spy: number | null;
+  has_policy: boolean;
+  notes: string[];
+}
+
+export interface SecurityClassificationOut {
+  security_id: number;
+  ticker: string | null;
+  security_name: string | null;
+  sector: string | null;
+  region: string | null;
+  source: string;
+  notes: string | null;
+  updated_at: string;
+}
