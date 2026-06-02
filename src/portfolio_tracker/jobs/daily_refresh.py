@@ -158,6 +158,24 @@ def run() -> int:
         print("[daily_refresh]   earnings_calendar: FAILED")
         traceback.print_exc()
 
+    # 7. Security classification — sector/region enrichment for the positioning
+    #    view. `only_missing=True` so the daily path only hits yfinance for
+    #    securities never classified before (a no-op on a steady book); a full
+    #    refetch is a manual `python -m portfolio_tracker.jobs.classify_securities`.
+    #    Imported lazily to keep yfinance off the critical path, like the legs above.
+    try:
+        from portfolio_tracker.jobs import classify_securities
+
+        counts = classify_securities.run(only_missing=True)
+        print(
+            f"[daily_refresh]   classify_securities: "
+            f"classified={counts['classified']} no_data={counts['no_data']}"
+        )
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   classify_securities: FAILED")
+        traceback.print_exc()
+
     status = "OK" if failures == 0 else f"{failures} step(s) FAILED"
     print(f"[daily_refresh] {today} done: {status}")
     return failures

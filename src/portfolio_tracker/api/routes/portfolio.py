@@ -29,11 +29,13 @@ from portfolio_tracker.schemas import (
     HoldingOut,
     InvestmentTransactionOut,
     PerformanceSeries,
+    PositioningOut,
 )
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import position_alpha as position_alpha_service
+from portfolio_tracker.services import positioning as positioning_service
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
 from portfolio_tracker.services import trade_timeline as trade_timeline_service
 from portfolio_tracker.services.active_items import active_account_ids
@@ -607,6 +609,27 @@ def beta_endpoint(
         exclude_index_etfs,
         Decimal(str(reserve_amount)),
     )
+
+
+@router.get("/positioning", response_model=PositioningOut)
+def positioning_endpoint(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> PositioningOut:
+    """Portfolio positioning — how the latest book splits across asset type,
+    sector, region, and account tax-treatment, plus concentration stats and a
+    per-ticker correlation/beta table vs SPY, QQQ, and the policy mix.
+
+    Breakdowns are value-weighted over current market value. The correlation
+    window defaults to the trailing year (the beta default); sector/region
+    come from `security_classifications` (yfinance-enriched, user-overridable).
+    """
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    return positioning_service.compute_positioning(session, start_date, end_date)
 
 
 @router.get("/data-quality", response_model=DataQualityReportOut)
