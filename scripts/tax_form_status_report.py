@@ -1,15 +1,15 @@
 """Show imported 1099 status: per-broker/per-year totals, top P&L per ticker,
 and per-ticker augmentation columns."""
+
 from __future__ import annotations
 
 import os
 import sys
-from collections import defaultdict
 from decimal import Decimal
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import engine
@@ -27,25 +27,50 @@ def main() -> None:
         print("=" * 100)
         print("IMPORTED 1099 INVENTORY")
         print("=" * 100)
-        imports = session.execute(
-            select(TaxFormImport).order_by(TaxFormImport.broker, TaxFormImport.tax_year)
-        ).scalars().all()
+        imports = (
+            session.execute(
+                select(TaxFormImport).order_by(TaxFormImport.broker, TaxFormImport.tax_year)
+            )
+            .scalars()
+            .all()
+        )
         if not imports:
             print("\n  (no imports)")
         else:
-            print(f"\n  {'id':<4} {'broker':<14} {'year':<6} {'acct mask':<14} {'recipient':<20} {'form types':<28} {'imported'}")
+            print(
+                f"\n  {'id':<4} {'broker':<14} {'year':<6} {'acct mask':<14} {'recipient':<20} {'form types':<28} {'imported'}"
+            )
             for imp in imports:
-                lots_n = session.execute(
-                    select(func.count()).select_from(TaxFormRealizedLot).where(TaxFormRealizedLot.import_id == imp.import_id)
-                ).scalar() or 0
-                divs_n = session.execute(
-                    select(func.count()).select_from(TaxFormDividend).where(TaxFormDividend.import_id == imp.import_id)
-                ).scalar() or 0
-                int_n = session.execute(
-                    select(func.count()).select_from(TaxFormInterest).where(TaxFormInterest.import_id == imp.import_id)
-                ).scalar() or 0
-                print(f"  {imp.import_id:<4} {imp.broker:<14} {imp.tax_year:<6} {imp.account_mask or '':<14} {(imp.recipient_name or '')[:19]:<20} {(imp.form_types or '')[:27]:<28} {str(imp.imported_at)[:19]}")
-                print(f"       {lots_n} realized lots, {divs_n} dividend rows, {int_n} interest rows")
+                lots_n = (
+                    session.execute(
+                        select(func.count())
+                        .select_from(TaxFormRealizedLot)
+                        .where(TaxFormRealizedLot.import_id == imp.import_id)
+                    ).scalar()
+                    or 0
+                )
+                divs_n = (
+                    session.execute(
+                        select(func.count())
+                        .select_from(TaxFormDividend)
+                        .where(TaxFormDividend.import_id == imp.import_id)
+                    ).scalar()
+                    or 0
+                )
+                int_n = (
+                    session.execute(
+                        select(func.count())
+                        .select_from(TaxFormInterest)
+                        .where(TaxFormInterest.import_id == imp.import_id)
+                    ).scalar()
+                    or 0
+                )
+                print(
+                    f"  {imp.import_id:<4} {imp.broker:<14} {imp.tax_year:<6} {imp.account_mask or '':<14} {(imp.recipient_name or '')[:19]:<20} {(imp.form_types or '')[:27]:<28} {str(imp.imported_at)[:19]}"
+                )
+                print(
+                    f"       {lots_n} realized lots, {divs_n} dividend rows, {int_n} interest rows"
+                )
 
         # === 2. Realized P&L summary per year ===
         print("\n" + "=" * 100)
@@ -65,9 +90,13 @@ def main() -> None:
             .group_by(TaxFormImport.tax_year, TaxFormImport.broker, TaxFormRealizedLot.term)
             .order_by(TaxFormImport.tax_year, TaxFormImport.broker, TaxFormRealizedLot.term)
         ).all()
-        print(f"\n  {'year':<6} {'broker':<14} {'term':<8} {'lots':>5} {'proceeds':>14} {'cost':>14} {'gain/loss':>14}")
+        print(
+            f"\n  {'year':<6} {'broker':<14} {'term':<8} {'lots':>5} {'proceeds':>14} {'cost':>14} {'gain/loss':>14}"
+        )
         for r in rows:
-            print(f"  {r.tax_year:<6} {r.broker:<14} {r.term:<8} {r.n:>5} {Decimal(r.proceeds or 0):>14,.2f} {Decimal(r.cost or 0):>14,.2f} {Decimal(r.gain or 0):>14,.2f}")
+            print(
+                f"  {r.tax_year:<6} {r.broker:<14} {r.term:<8} {r.n:>5} {Decimal(r.proceeds or 0):>14,.2f} {Decimal(r.cost or 0):>14,.2f} {Decimal(r.gain or 0):>14,.2f}"
+            )
 
         # === 3. Top winners + losers per year ===
         for yr in sorted({i.tax_year for i in imports}):
@@ -83,13 +112,13 @@ def main() -> None:
                 .group_by(TaxFormRealizedLot.symbol)
                 .order_by(func.sum(TaxFormRealizedLot.net_gain_loss).desc())
             ).all()
-            print(f"  Winners (top 10):")
+            print("  Winners (top 10):")
             for r in symbol_gain[:10]:
                 g = Decimal(r.gain or 0)
                 if g <= 0:
                     break
                 print(f"    {(r.symbol or '?'):<32} {r.n:>3} lot(s)  net gain ${g:>12,.2f}")
-            print(f"  Losers (bottom 5):")
+            print("  Losers (bottom 5):")
             for r in reversed(symbol_gain):
                 g = Decimal(r.gain or 0)
                 if g >= 0:
@@ -117,7 +146,9 @@ def main() -> None:
             if r.tax_year != cur_year:
                 print(f"\n  {r.tax_year}:")
                 cur_year = r.tax_year
-            print(f"    {(r.symbol or '?'):<8} {r.n:>3} payment(s)  total ${Decimal(r.total or 0):>10,.2f}")
+            print(
+                f"    {(r.symbol or '?'):<8} {r.n:>3} payment(s)  total ${Decimal(r.total or 0):>10,.2f}"
+            )
 
 
 if __name__ == "__main__":
