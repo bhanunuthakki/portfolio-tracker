@@ -14,10 +14,12 @@ ordering — the owner weights thesis/valuation health above concentration.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections import defaultdict
 from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import cast
 
@@ -26,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.config import get_settings
-from portfolio_tracker.models import HoldingSnapshot, Security
+from portfolio_tracker.models import ActionQueueItem, HoldingSnapshot, Security
 from portfolio_tracker.services import earnings_summary as es
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.coaching import CoachingTip, generate_coaching_tips
@@ -522,3 +524,199 @@ def _opus_caller() -> Callable[[str], str] | None:
         return str(fn(prompt, model=RANKING_MODEL, timeout_seconds=300))
 
     return _call
+
+
+# ---------------------------------------------------------------------------
+# Persistence + lifecycle (P3, slice 3)
+#
+# The ranked queue is snapshotted into the `action_queue` table so accept /
+# dismiss / snooze survive regeneration. Each item's stable `signature`
+# (ticker + its signal kinds, hashed) keys the upsert: a refresh updates the
+# same row and a dismissal/snooze sticks. Open/snoozed items whose signal no
+# longer appears are marked 'resolved'; accepted/dismissed rows are kept as a
+# decision record.
+# ---------------------------------------------------------------------------
+
+_ACTIVE_STATUSES = ("open", "accepted")
+
+
+class QueueItemOut(BaseModel):
+    """A persisted action-queue row, as served to the cockpit."""
+
+    id: int
+    signature: str
+    ticker: str
+    name: str | None
+    tier: str
+    action: str
+    rank: int
+    headline: str
+    rationale: str
+    suggested_action: str
+    weight_pct: float
+    evidence: dict[str, str]
+    signal_kinds: list[str]
+    llm_ranked: bool
+    status: str
+    snooze_until: date | None
+    accepted_at: datetime | None
+    dismissed_at: datetime | None
+
+
+def _signature(item: ActionItem) -> str:
+    raw = item.ticker.upper() + "|" + "+".join(sorted(item.signal_kinds))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def refresh_queue(session: Session, *, use_llm: bool = True) -> list[QueueItemOut]:
+    """Regenerate the ranked queue and upsert it into `action_queue`,
+    preserving the accept/dismiss/snooze state of items that persist."""
+    ranked = rank_signals(gather_signals(session), use_llm=use_llm)
+    now = datetime.now(UTC)
+    today = now.date()
+
+    existing = {row.signature: row for row in session.execute(select(ActionQueueItem)).scalars()}
+    current: set[str] = set()
+
+    for idx, item in enumerate(ranked, 1):
+        sig = _signature(item)
+        current.add(sig)
+        row = existing.get(sig)
+        if row is None:
+            row = ActionQueueItem(signature=sig, status="open")
+            session.add(row)
+        _apply_display(row, item, rank=idx, now=now)
+        if row.status == "resolved":
+            row.status = "open"  # the concern came back
+        elif row.status == "snoozed" and row.snooze_until is not None and row.snooze_until <= today:
+            row.status = "open"
+            row.snooze_until = None
+
+    # Open/snoozed items whose signal cleared -> resolved. Decisions are kept.
+    for sig, row in existing.items():
+        if sig not in current and row.status in ("open", "snoozed"):
+            row.status = "resolved"
+            row.updated_at = now
+
+    session.commit()
+    return list_queue(session)
+
+
+def _apply_display(row: ActionQueueItem, item: ActionItem, *, rank: int, now: datetime) -> None:
+    row.ticker = item.ticker
+    row.name = item.name
+    row.tier = item.tier
+    row.action = item.action
+    row.rank = rank
+    row.headline = item.headline
+    row.rationale = item.rationale
+    row.suggested_action = item.suggested_action
+    row.weight_pct = Decimal(str(round(item.weight_pct, 4)))
+    row.evidence_json = json.dumps(item.evidence)
+    row.signal_kinds_json = json.dumps(item.signal_kinds)
+    row.llm_ranked = item.llm_ranked
+    row.last_seen_at = now
+    row.updated_at = now
+
+
+def list_queue(session: Session, *, include_resolved: bool = False) -> list[QueueItemOut]:
+    """Active queue (open + accepted), open first, then by tier and rank.
+    Snoozed-until-future, dismissed, and resolved items are hidden by default."""
+    today = date.today()
+    visible = [
+        row
+        for row in session.execute(select(ActionQueueItem)).scalars()
+        if _is_visible(row, today, include_resolved=include_resolved)
+    ]
+    visible.sort(key=lambda r: (0 if r.status == "open" else 1, _TIER_RANK.get(r.tier, 9), r.rank))
+    return [_to_out(r) for r in visible]
+
+
+def _is_visible(row: ActionQueueItem, today: date, *, include_resolved: bool) -> bool:
+    if row.status in _ACTIVE_STATUSES:
+        return True
+    if row.status == "snoozed" and row.snooze_until is not None and row.snooze_until <= today:
+        return True
+    return include_resolved and row.status in ("dismissed", "resolved")
+
+
+def accept_item(session: Session, item_id: int) -> QueueItemOut:
+    row = _require_item(session, item_id)
+    now = datetime.now(UTC)
+    row.status = "accepted"
+    row.accepted_at = now
+    row.updated_at = now
+    row.commitment_json = json.dumps(
+        {"action": row.action, "ticker": row.ticker, "weight_pct_at_accept": float(row.weight_pct)}
+    )
+    session.commit()
+    return _to_out(row)
+
+
+def dismiss_item(session: Session, item_id: int) -> QueueItemOut:
+    row = _require_item(session, item_id)
+    now = datetime.now(UTC)
+    row.status = "dismissed"
+    row.dismissed_at = now
+    row.updated_at = now
+    session.commit()
+    return _to_out(row)
+
+
+def snooze_item(session: Session, item_id: int, *, days: int = 7) -> QueueItemOut:
+    row = _require_item(session, item_id)
+    row.status = "snoozed"
+    row.snooze_until = date.today() + timedelta(days=max(1, days))
+    row.updated_at = datetime.now(UTC)
+    session.commit()
+    return _to_out(row)
+
+
+def _require_item(session: Session, item_id: int) -> ActionQueueItem:
+    row = session.get(ActionQueueItem, item_id)
+    if row is None:
+        raise ValueError(f"action_queue item {item_id} not found")
+    return row
+
+
+def _to_out(row: ActionQueueItem) -> QueueItemOut:
+    return QueueItemOut(
+        id=row.id,
+        signature=row.signature,
+        ticker=row.ticker,
+        name=row.name,
+        tier=row.tier,
+        action=row.action,
+        rank=row.rank,
+        headline=row.headline,
+        rationale=row.rationale,
+        suggested_action=row.suggested_action,
+        weight_pct=float(row.weight_pct),
+        evidence=_loads_dict(row.evidence_json),
+        signal_kinds=_loads_list(row.signal_kinds_json),
+        llm_ranked=row.llm_ranked,
+        status=row.status,
+        snooze_until=row.snooze_until,
+        accepted_at=row.accepted_at,
+        dismissed_at=row.dismissed_at,
+    )
+
+
+def _loads_dict(raw: str) -> dict[str, str]:
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in cast(dict[object, object], data).items()}
+
+
+def _loads_list(raw: str) -> list[str]:
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(x) for x in cast(list[object], data)]
