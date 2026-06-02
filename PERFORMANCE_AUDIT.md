@@ -11,26 +11,26 @@ read carefully — anything else is bookkeeping.
 
 ---
 
-## 0. Top-line on H2 2025
+## 0. Illustrative top-line
 
-For a 1Y window (May 18 2025 → May 18 2026), with the latest broker
-data refreshed:
+For a 1-year window the endpoint returns a structure like the table
+below. **These numbers are illustrative** — round placeholders, not from
+any real account:
 
 | | Value |
 |---|---|
-| V_start (positions only, no cash) | $[redacted] |
-| V_end | $[redacted] |
-| Total Actual P&L | +$[redacted] |
-| SPY counterfactual P&L | +$[redacted] |
-| QQQ counterfactual P&L | +$[redacted] |
-| Policy counterfactual P&L | +$[redacted] |
-| **Alpha vs SPY** | **+$[redacted]** |
-| Alpha vs QQQ | −$[redacted] |
-| Alpha vs Policy | +$[redacted] |
+| V_start (positions only, no cash) | $100,000 |
+| V_end | $120,000 |
+| Total Actual P&L | +$20,000 |
+| SPY counterfactual P&L | +$18,000 |
+| QQQ counterfactual P&L | +$25,000 |
+| Policy counterfactual P&L | +$17,000 |
+| **Alpha vs SPY** | **+$2,000** |
+| Alpha vs QQQ | −$5,000 |
+| Alpha vs Policy | +$3,000 |
 
-For a 2Y window (May 18 2024 → May 18 2026), V_start re-anchors to
-$[redacted], total alpha vs SPY is +$[redacted]. Switching the chart window
-re-baselines V_start to the value at that window's start date.
+Switching the chart window re-baselines V_start to the value at that
+window's start date.
 
 ---
 
@@ -121,22 +121,23 @@ Precedence in `services/performance.py:_signed_cashflow`:
 3. **Subtype heuristic** — final fallback. See the source for the
    full subtype map.
 
-The user has applied ~120 overrides covering withdrawals (treated as
-external_out unless reinvested within 30 days), 401(k) contributions
-(external_in), DRIP buys (internal), and the Dec 23 2025 transfer
-(external_in, per the user's intent).
+Overrides are applied case-by-case — e.g. withdrawals treated as
+external_out unless reinvested within 30 days, 401(k) contributions as
+external_in, DRIP buys as internal, and any ambiguous large transfer
+classified per the user's stated intent.
 
 ---
 
 ## 3. Known faults — what could go wrong with position-alpha
 
-### F1 — Zero broker snapshots before 2026-05-09 [SEVERE for old dates]
+### F1 — No broker snapshots before the anchor date [SEVERE for old dates]
 
-Every chart point before May 9 2026 is reconstructed via walk-back.
-There is no broker-verified V on any historical date.
+Every chart point before your earliest broker snapshot (the "anchor"
+date) is reconstructed via walk-back. There is no broker-verified V on
+those historical dates.
 
 `qty_at_start` for a pre-anchor date comes from walking transactions
-backward from the May-9-anchor. Errors compound when:
+backward from the anchor. Errors compound when:
 - The transaction log is incomplete (missing pre-window buys → can't
   reconstruct the original lot)
 - Quantity sign conventions disagree across aggregators (handled
@@ -181,9 +182,10 @@ admin UI to surface tickers with no price history.
 Items with `is_data_active=0` are excluded from every query. If you
 disable an item later, its history disappears retroactively.
 
-Current state: only Schwab (item 7, manual) is inactive, with 0
-transactions — so this is not currently biting your data. Future risk
-if you disable an active item.
+Only disable items that are truly redundant (e.g. the same brokerage
+reachable through a second aggregator, or a placeholder with no
+transactions). Disabling an item that carries real history silently
+drops that history from every window.
 
 ### F5 — Broker sign convention disagreement [LARGELY MITIGATED]
 
@@ -195,16 +197,16 @@ distort the calculation.
 
 ### F6 — Risk Metrics alpha disagrees with position-alpha [SUBSTANTIAL]
 
-The `RiskMetricsCard` shows alpha-annualized in the range of
-−16% to −30% depending on toggles. Position-alpha shows dollar
-alpha of +$4-10k for the same windows.
+The `RiskMetricsCard` can show a sizeable negative alpha-annualized
+(tens of percent, depending on toggles) while position-alpha shows a
+small positive dollar alpha for the same windows.
 
 **Why they disagree**: the Risk Metrics card runs an OLS regression
 on **daily returns** computed from `_daily_portfolio_value` (which
-includes cash, the SGOV reserve, broad-index ETFs, and the walk-back
+includes cash, the cash reserve, broad-index ETFs, and the walk-back
 `cash_adj` term). When the same regression is run on the
-position-alpha V series instead, alpha is +0.70% annualized — close to
-zero, consistent with the dollar number.
+position-alpha V series instead, alpha is near zero annualized —
+consistent with the dollar number.
 
 The Risk Metrics calculation is mathematically correct given its
 inputs, but its daily-return series is noisy from cashflow attribution
@@ -242,17 +244,17 @@ Dashboard's position-alpha card still reports total windowed economic
 P&L per ticker.
 
 Code: `services/trade_analysis.py:analyze_trades` (the P&L methodology
-block). Verification: cross-checking the 12 currently-open positions,
+block). Verification: cross-checking the currently-open positions,
 Trade Analysis `pnl_dollars` equals Holdings `unrealized_pnl` to the
 cent on every row.
 
 ### F8 — Snapshots include cash equivalents but position-alpha skips them [BY DESIGN]
 
 Position-alpha skips `_CASH_EQUIV_TICKERS = {SGOV, FDRXX, SHV,
-SPAXX, CUR:USD, VMFXX}`. SGOV is a short-term Treasury ETF that the
-user holds as an emergency reserve.
+SPAXX, CUR:USD, VMFXX}`. SGOV is a short-term Treasury ETF commonly
+held as an emergency cash reserve.
 
-Consequence: the **"Excl. $30k SGOV reserve" toggle is a no-op for
+Consequence: the **"Exclude cash reserve" toggle is a no-op for
 position-alpha** because SGOV is already excluded. The toggle still
 affects the legacy performance/Risk-Metrics queries; tooltip on the
 dashboard reflects this.
@@ -270,11 +272,11 @@ A sanity check on the live data, run with the latest broker refresh:
 ```bash
 # 1Y window, full portfolio
 curl 'http://localhost:8000/api/portfolio/position-alpha?start_date=2025-05-18&end_date=2026-05-18'
-# expect: total_alpha around +$9k, total_alpha_vs_qqq negative, total_alpha_vs_policy slightly positive
+# inspect: total_alpha, total_alpha_vs_qqq, total_alpha_vs_policy
 
-# 1Y window, active picks only
+# 1Y window, active picks only (broad-index ETFs excluded)
 curl 'http://localhost:8000/api/portfolio/position-alpha?start_date=2025-05-18&end_date=2026-05-18&exclude_broad_index=true'
-# expect: smaller V_start (~$167k), about same alpha sign
+# expect: smaller V_start, about the same alpha sign
 ```
 
 ## 5. Legacy methodology (Modified Dietz)
@@ -292,10 +294,11 @@ R(d) = (V(d) − V_start − Σ_{i: d_i ≤ d} C_i)
 
 Critical weakness: the denominator is contribution-weighted, which
 makes the return % very sensitive to cashflow magnitudes. For a 1Y
-window with $79k of contributions on a $537k base, the denominator
-inflates ~$30-40k worth, dragging return percentages by several pp
-even when actual dollar performance is small. The user spent several
-sessions confused by this — leading to the position-alpha rewrite.
+window with heavy contributions on a large base, the denominator
+inflates by a meaningful fraction of those contributions, dragging
+return percentages by several pp even when actual dollar performance
+is small. That sensitivity is what motivated the position-alpha
+rewrite.
 
 ---
 
@@ -308,4 +311,4 @@ sessions confused by this — leading to the position-alpha rewrite.
 | **Position alpha** | (V_end + sold − bought) − (V_end_spy + sold − bought) = V_end − V_end_spy |
 | **Counterfactual** | "If your money had been in SPY/QQQ/Policy instead, applying the same per-trade $ flows" |
 | **Walk-back** | Reverse-chronological reconstruction of historical quantities (not values) from the latest broker snapshot |
-| **Anchor** | The earliest broker-verified `holdings_snapshots` row (currently 2026-05-09) |
+| **Anchor** | The earliest broker-verified `holdings_snapshots` row |
