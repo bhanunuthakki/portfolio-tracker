@@ -5,6 +5,13 @@
  * The goal is visual consistency: one card style, one button style per
  * intent, one table-cell rhythm. Add new variants here, not in pages.
  *
+ * TABLE CONVENTION: every data table is sortable on every column, asc +
+ * desc. Use <SortableTh> (below) backed by a useTableSort() controller for
+ * headers — never a bespoke clickable <th>. This is a standing requirement
+ * for all current and future tables. Editable config grids (PolicyEditor,
+ * HumanCapitalEditor) are the only exception — their rows are inputs, not
+ * data, so a plain <Th> is correct there.
+ *
  * Type system:
  *   12 → text-[11px] uppercase tracking-wider     (stat labels)
  *   xs → text-xs                                   (help, captions)
@@ -214,6 +221,91 @@ export function Td({
     >
       {children}
     </td>
+  );
+}
+
+/**
+ * Minimal sort state a <SortableTh> needs. The object returned by
+ * `useTableSort` satisfies this structurally, so pass it straight through:
+ *
+ *   const sort = useTableSort(rows, "date", "desc", accessors);
+ *   <SortableTh column="date" sort={sort}>Date</SortableTh>
+ */
+export interface SortControl {
+  sortKey: string;
+  sortDir: "asc" | "desc";
+  toggle: (key: string) => void;
+}
+
+/**
+ * Clickable, keyboard-operable column header with an asc/desc indicator.
+ *
+ * THE canonical sortable header — see the TABLE CONVENTION note at the top
+ * of this file. Renders the label inside a <button> (so it's reachable by
+ * keyboard) and sets `aria-sort` for screen readers. Inactive columns show
+ * a faint ↕ so it's obvious every column is sortable.
+ *
+ * `pad` matches the header padding to the table's body cells: "normal"
+ * (px-4) aligns with <Td>; "tight" (px-3) aligns with the denser
+ * `text-xs` tables. `aside` renders OUTSIDE the sort button (e.g. an
+ * <InfoButton>) so its own click doesn't trigger a sort — and so we never
+ * nest a <button> inside a <button>.
+ */
+export function SortableTh({
+  column,
+  children,
+  sort,
+  align = "left",
+  pad = "normal",
+  aside,
+}: {
+  column: string;
+  children: ReactNode;
+  sort: SortControl;
+  align?: "left" | "right";
+  pad?: "normal" | "tight";
+  aside?: ReactNode;
+}): JSX.Element {
+  const active = sort.sortKey === column;
+  const arrow = !active ? "↕" : sort.sortDir === "asc" ? "↑" : "↓";
+  const label = typeof children === "string" ? children : column;
+  return (
+    <th
+      scope="col"
+      aria-sort={
+        active ? (sort.sortDir === "asc" ? "ascending" : "descending") : "none"
+      }
+      className={[
+        pad === "tight" ? "px-3 py-2" : "px-4 py-2",
+        "text-xs font-medium uppercase tracking-wide text-slate-500",
+      ].join(" ")}
+    >
+      <span
+        className={[
+          "flex w-full items-center gap-1",
+          align === "right" ? "justify-end" : "justify-start",
+        ].join(" ")}
+      >
+        <button
+          type="button"
+          onClick={() => sort.toggle(column)}
+          aria-label={`Sort by ${label}`}
+          className="inline-flex select-none items-center gap-1 rounded uppercase tracking-wide hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-slate-700"
+        >
+          {children}
+          <span
+            aria-hidden="true"
+            className={[
+              "text-[10px]",
+              active ? "text-slate-700" : "text-slate-300",
+            ].join(" ")}
+          >
+            {arrow}
+          </span>
+        </button>
+        {aside}
+      </span>
+    </th>
   );
 }
 

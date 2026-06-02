@@ -109,6 +109,15 @@ src/portfolio_tracker/                  frontend/src/
 alembic/        DB migrations
 ```
 
+**Table convention**: every data table is sortable on every column, ascending
+and descending. Headers use the shared `<SortableTh>` primitive
+(`frontend/src/components/ui.tsx`) backed by the `useTableSort` hook — never a
+bespoke clickable `<th>`. This holds for all current data tables (Holdings,
+Transactions, Contributions, Trade analysis, Trade timeline, the Dashboard's
+per-position alpha) and is a standing requirement for any table added later.
+The two editable config grids (policy weights, human-capital buckets) are the
+deliberate exception — their rows are inputs, not data.
+
 ## How the V series actually gets built
 
 Neither Plaid nor SnapTrade returns a true time series of past portfolio
