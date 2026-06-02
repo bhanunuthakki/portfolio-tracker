@@ -325,9 +325,9 @@ export function Dashboard(): JSX.Element {
               <div className="mb-1">Benchmark lines</div>
               <div className="flex gap-1">
                 {([
-                  { k: "spy", label: "SPY", color: "#2563eb" },
-                  { k: "qqq", label: "QQQ", color: "#9333ea" },
-                  { k: "policy", label: "Policy", color: "#0d9488" },
+                  { k: "spy", label: "SPY", color: "#1d4ed8" },
+                  { k: "qqq", label: "QQQ", color: "#6d4ed6" },
+                  { k: "policy", label: "Policy", color: "#0f7a6b" },
                 ] as const).map((b) => {
                   const active = visibleBenchmarks.has(b.k);
                   const disabled = b.k === "policy" && positionAlpha.data && !positionAlpha.data.has_policy;
@@ -366,8 +366,8 @@ export function Dashboard(): JSX.Element {
                 data={positionAlpha.data}
                 visibleBenchmarks={visibleBenchmarks}
               />
-              <div className="mt-3 text-xs text-slate-500 leading-relaxed">
-                <strong>Method:</strong> each position held on{" "}
+              <div className="mt-3 font-serif text-[12.5px] leading-relaxed text-muted">
+                <strong className="font-sans font-semibold text-ink-soft">Method:</strong> each position held on{" "}
                 {positionAlpha.data.start_date} starts the window at{" "}
                 qty × that day's close. Each benchmark counterfactual invests
                 the same starting capital in the benchmark at that day's close,
