@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     snaptrade_client_id: str | None = Field(alias="SNAPTRADE_CLIENT_ID", default=None)
     snaptrade_consumer_key: str | None = Field(alias="SNAPTRADE_CONSUMER_KEY", default=None)
 
+    # Optional. Directory containing the out-of-repo `claude_cli.py` wrapper
+    # used by the CIO advisor (routes Claude calls through the user's Pro/Max
+    # subscription, not the metered API). If unset, the advisor's LLM features
+    # raise a clear ImportError when invoked; the rest of the app is unaffected.
+    claude_cli_dir: str | None = Field(alias="CLAUDE_CLI_DIR", default=None)
+
     database_url: str = Field(alias="DATABASE_URL", default="sqlite:///./portfolio.db")
 
     cors_origins: str = Field(alias="CORS_ORIGINS", default="http://localhost:5173")
