@@ -12,6 +12,7 @@ import {
   CLASSIFICATION_LABELS,
   EmptyState,
   ErrorBanner,
+  SortableTh,
 } from "@/components/ui";
 import type { InvestmentTransactionOut, TxClassification } from "@/types";
 
@@ -118,12 +119,8 @@ export function Transactions(): JSX.Element {
     [],
   );
 
-  const { sortedRows, toggle, sortIndicator } = useTableSort(
-    searchFiltered,
-    "date",
-    "desc",
-    accessors,
-  );
+  const sort = useTableSort(searchFiltered, "date", "desc", accessors);
+  const { sortedRows } = sort;
 
   const allVisibleIds = useMemo(
     () => sortedRows.map((t) => t.plaid_investment_transaction_id),
@@ -237,30 +234,30 @@ export function Transactions(): JSX.Element {
                     aria-label="Select all visible"
                   />
                 </th>
-                <Sh onClick={() => toggle("date")}>
-                  Date{sortIndicator("date")}
-                </Sh>
-                <Sh onClick={() => toggle("account")}>
-                  Account{sortIndicator("account")}
-                </Sh>
-                <Sh onClick={() => toggle("type")}>
-                  Type{sortIndicator("type")}
-                </Sh>
-                <Sh onClick={() => toggle("ticker")}>
-                  Ticker{sortIndicator("ticker")}
-                </Sh>
-                <Sh onClick={() => toggle("name")}>
-                  Description{sortIndicator("name")}
-                </Sh>
-                <Sh align="right" onClick={() => toggle("quantity")}>
-                  Quantity{sortIndicator("quantity")}
-                </Sh>
-                <Sh align="right" onClick={() => toggle("amount")}>
-                  Amount{sortIndicator("amount")}
-                </Sh>
-                <Sh onClick={() => toggle("classification")}>
-                  Counted as{sortIndicator("classification")}
-                </Sh>
+                <SortableTh column="date" sort={sort} pad="tight">
+                  Date
+                </SortableTh>
+                <SortableTh column="account" sort={sort} pad="tight">
+                  Account
+                </SortableTh>
+                <SortableTh column="type" sort={sort} pad="tight">
+                  Type
+                </SortableTh>
+                <SortableTh column="ticker" sort={sort} pad="tight">
+                  Ticker
+                </SortableTh>
+                <SortableTh column="name" sort={sort} pad="tight">
+                  Description
+                </SortableTh>
+                <SortableTh column="quantity" align="right" sort={sort} pad="tight">
+                  Quantity
+                </SortableTh>
+                <SortableTh column="amount" align="right" sort={sort} pad="tight">
+                  Amount
+                </SortableTh>
+                <SortableTh column="classification" sort={sort} pad="tight">
+                  Counted as
+                </SortableTh>
               </tr>
             </thead>
             <tbody>
@@ -540,24 +537,3 @@ function ClassificationCell({
   );
 }
 
-function Sh({
-  children,
-  align,
-  onClick,
-}: {
-  children: React.ReactNode;
-  align?: "left" | "right";
-  onClick: () => void;
-}): JSX.Element {
-  return (
-    <th
-      onClick={onClick}
-      className={[
-        "cursor-pointer select-none px-3 py-2 text-xs font-medium uppercase tracking-wide text-slate-600 hover:bg-slate-100",
-        align === "right" ? "text-right" : "text-left",
-      ].join(" ")}
-    >
-      {children}
-    </th>
-  );
-}

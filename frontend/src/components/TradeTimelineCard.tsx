@@ -2,7 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
-import { Card, Td, Th, fmtSignedUSD, fmtUSD, pnlClass } from "@/components/ui";
+import { Card, SortableTh, Td, fmtSignedUSD, fmtUSD, pnlClass } from "@/components/ui";
+import type { SortControl } from "@/components/ui";
+import { useTableSort } from "@/components/useTableSort";
 import type { TimelineRow, YearSummary } from "@/types";
 
 /**
@@ -12,18 +14,16 @@ import type { TimelineRow, YearSummary } from "@/types";
  * snapshot), we compare the realized/unrealized gain to what SPY would have
  * returned over the same holding window. Alpha = excess vs SPY.
  *
- * Sort modes:
- *   - "recent"     — disposed_date desc (default; "what did I do lately")
- *   - "best-alpha" — alpha desc          ("my biggest wins vs index")
- *   - "worst-alpha"— alpha asc           ("which trades cost me")
+ * Every column is click-sortable (asc/desc) via useTableSort + SortableTh.
+ * The chips above the table are quick presets that jump the shared sort
+ * state to a common view: Recent (disposed_date desc), Best alpha (alpha
+ * desc), Worst alpha (alpha asc).
  */
-type SortMode = "recent" | "best-alpha" | "worst-alpha";
 
 const PAGE_SIZE = 25;
 
 export function TradeTimelineCard(): JSX.Element {
   const [year, setYear] = useState<number | "all">("all");
-  const [sortMode, setSortMode] = useState<SortMode>("recent");
   const [showAll, setShowAll] = useState<boolean>(false);
 
   // Fetch the full timeline once; year filter is client-side so the chip
@@ -33,24 +33,38 @@ export function TradeTimelineCard(): JSX.Element {
     queryFn: () => api.tradeTimeline({ includeOpen: true }),
   });
 
-  const sortedRows = useMemo<TimelineRow[]>(() => {
+  const filteredRows = useMemo<TimelineRow[]>(() => {
     if (!data) return [];
-    const rows = data.rows.filter((r) => {
+    return data.rows.filter((r) => {
       if (year === "all") return true;
       // Open positions only show when "All" is selected — they don't belong
       // to any single tax year.
       if (r.row_kind === "open") return false;
       return r.tax_year === year;
     });
-    if (sortMode === "recent") {
-      rows.sort((a, b) => b.disposed_date.localeCompare(a.disposed_date));
-    } else if (sortMode === "best-alpha") {
-      rows.sort((a, b) => parseAlpha(b) - parseAlpha(a));
-    } else {
-      rows.sort((a, b) => parseAlpha(a) - parseAlpha(b));
-    }
-    return rows;
-  }, [data, sortMode, year]);
+  }, [data, year]);
+
+  const accessors = useMemo(
+    () => ({
+      disposed_date: (r: TimelineRow) => r.disposed_date,
+      ticker: (r: TimelineRow) => r.ticker ?? "",
+      source: (r: TimelineRow) => formatSource(r),
+      held: (r: TimelineRow) => r.holding_days,
+      cost: (r: TimelineRow) => parseFloat(r.cost_basis),
+      pnl: (r: TimelineRow) => parseFloat(r.realized_gain),
+      return: (r: TimelineRow) => r.return_pct,
+      spy: (r: TimelineRow) =>
+        r.spy_counterfactual_dollars !== null
+          ? parseFloat(r.spy_counterfactual_dollars)
+          : null,
+      alpha: (r: TimelineRow) =>
+        r.alpha_dollars !== null ? parseFloat(r.alpha_dollars) : null,
+    }),
+    [],
+  );
+  // Default: most recently disposed first ("what did I do lately").
+  const sort = useTableSort(filteredRows, "disposed_date", "desc", accessors);
+  const sortedRows = sort.sortedRows;
 
   const visibleRows = showAll ? sortedRows : sortedRows.slice(0, PAGE_SIZE);
 
@@ -130,20 +144,23 @@ export function TradeTimelineCard(): JSX.Element {
 
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2 text-xs">
             <div className="flex items-center gap-1">
+              <span className="mr-1 text-slate-400">Jump to:</span>
               <SortChip
                 label="Recent"
-                active={sortMode === "recent"}
-                onClick={() => setSortMode("recent")}
+                active={
+                  sort.sortKey === "disposed_date" && sort.sortDir === "desc"
+                }
+                onClick={() => sort.setSort("disposed_date", "desc")}
               />
               <SortChip
                 label="Best alpha"
-                active={sortMode === "best-alpha"}
-                onClick={() => setSortMode("best-alpha")}
+                active={sort.sortKey === "alpha" && sort.sortDir === "desc"}
+                onClick={() => sort.setSort("alpha", "desc")}
               />
               <SortChip
                 label="Worst alpha"
-                active={sortMode === "worst-alpha"}
-                onClick={() => setSortMode("worst-alpha")}
+                active={sort.sortKey === "alpha" && sort.sortDir === "asc"}
+                onClick={() => sort.setSort("alpha", "asc")}
               />
             </div>
             <span className="text-slate-500">
@@ -151,7 +168,7 @@ export function TradeTimelineCard(): JSX.Element {
             </span>
           </div>
 
-          <TimelineTable rows={visibleRows} />
+          <TimelineTable rows={visibleRows} sort={sort} />
 
           {sortedRows.length > PAGE_SIZE && (
             <div className="border-t border-slate-100 px-4 py-2 text-center">
@@ -182,8 +199,12 @@ export function TradeTimelineCard(): JSX.Element {
   );
 }
 
-function parseAlpha(r: TimelineRow): number {
-  return r.alpha_dollars === null ? 0 : parseFloat(r.alpha_dollars);
+/** Human-readable "Source" label — shared by the column accessor (so sort
+ *  matches what's shown) and the row renderer. */
+function formatSource(row: TimelineRow): string {
+  if (row.row_kind === "open") return "Open";
+  if (row.broker) return `${row.broker} ${row.tax_year}`;
+  return `1099 ${row.tax_year ?? ""}`;
 }
 
 function SummaryStrip({
@@ -225,7 +246,13 @@ function SummaryStrip({
   );
 }
 
-function TimelineTable({ rows }: { rows: TimelineRow[] }): JSX.Element {
+function TimelineTable({
+  rows,
+  sort,
+}: {
+  rows: TimelineRow[];
+  sort: SortControl;
+}): JSX.Element {
   if (rows.length === 0) {
     return (
       <div className="px-4 py-6 text-xs text-slate-500">No rows to show.</div>
@@ -236,15 +263,15 @@ function TimelineTable({ rows }: { rows: TimelineRow[] }): JSX.Element {
       <table className="w-full text-xs">
         <thead className="bg-slate-50 text-slate-600">
           <tr>
-            <Th>Sold</Th>
-            <Th>Ticker</Th>
-            <Th>Source</Th>
-            <Th align="right">Held</Th>
-            <Th align="right">Cost</Th>
-            <Th align="right">P&amp;L</Th>
-            <Th align="right">Return</Th>
-            <Th align="right">SPY P&amp;L</Th>
-            <Th align="right">Alpha</Th>
+            <SortableTh column="disposed_date" sort={sort}>Sold</SortableTh>
+            <SortableTh column="ticker" sort={sort}>Ticker</SortableTh>
+            <SortableTh column="source" sort={sort}>Source</SortableTh>
+            <SortableTh column="held" align="right" sort={sort}>Held</SortableTh>
+            <SortableTh column="cost" align="right" sort={sort}>Cost</SortableTh>
+            <SortableTh column="pnl" align="right" sort={sort}>P&amp;L</SortableTh>
+            <SortableTh column="return" align="right" sort={sort}>Return</SortableTh>
+            <SortableTh column="spy" align="right" sort={sort}>SPY P&amp;L</SortableTh>
+            <SortableTh column="alpha" align="right" sort={sort}>Alpha</SortableTh>
           </tr>
         </thead>
         <tbody>
@@ -265,11 +292,7 @@ function TimelineTableRow({ row }: { row: TimelineRow }): JSX.Element {
     : null;
   const alpha = row.alpha_dollars ? parseFloat(row.alpha_dollars) : null;
   const isOpen = row.row_kind === "open";
-  const sourceLabel = isOpen
-    ? "Open"
-    : row.broker
-      ? `${row.broker} ${row.tax_year}`
-      : `1099 ${row.tax_year ?? ""}`;
+  const sourceLabel = formatSource(row);
   const fmtDays = (days: number): string =>
     days >= 365 ? `${(days / 365).toFixed(1)}y` : `${days}d`;
   const heldText = fmtDays(row.holding_days);
