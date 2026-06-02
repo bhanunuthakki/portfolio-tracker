@@ -1544,21 +1544,3 @@ def _benchmark_series(
     for symbol, bench_date, close in rows:
         out[symbol][bench_date] = Decimal(close)
     return dict(out)
-
-
-def _first_available(series: dict[date, Decimal], target_date: date) -> Decimal | None:
-    candidates = [d for d in series if d >= target_date]
-    if not candidates:
-        return None
-    return series[min(candidates)]
-
-
-def _index_value(
-    series: dict[date, Decimal], target_date: date, base: Decimal | None
-) -> Decimal | None:
-    if base is None or base == 0:
-        return None
-    last = _last_known_price(series, target_date)
-    if last is None:
-        return None
-    return (last / base) * _NORMALIZATION_BASE
