@@ -24,6 +24,22 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import type { TxClassification } from "@/types";
+
+// ---- cashflow classification (shared by Transactions + Contributions) ---
+
+export const CLASSIFICATION_LABELS: Record<TxClassification, string> = {
+  external_in: "Contribution",
+  external_out: "Withdrawal",
+  internal: "Internal",
+};
+
+export const CLASSIFICATION_CHIP_CLASSES: Record<TxClassification, string> = {
+  external_in: "bg-emerald-100 text-emerald-800",
+  external_out: "bg-rose-100 text-rose-800",
+  internal: "bg-slate-200 text-slate-700",
+};
+
 // ---- containers ---------------------------------------------------------
 
 export function Card({
@@ -42,21 +58,6 @@ export function Card({
     >
       {children}
     </div>
-  );
-}
-
-export function SectionHeader({
-  title,
-  actions,
-}: {
-  title: string;
-  actions?: ReactNode;
-}): JSX.Element {
-  return (
-    <header className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-      <h2 className="text-sm font-semibold text-slate-900">{title}</h2>
-      {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
-    </header>
   );
 }
 

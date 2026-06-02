@@ -37,11 +37,11 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
-    PolicyWeight,
     Price,
     Security,
 )
 from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.policy import load_policy_weights
 
 
 # Skip these from the per-ticker view — they're cash-equivalent vehicles
@@ -226,7 +226,7 @@ def compute_position_alpha(
     # 4. Benchmark closes (SPY, QQQ, and policy basket)
     spy_closes = _benchmark_closes_with_lookback(session, "SPY", start_date, end_date)
     qqq_closes = _benchmark_closes_with_lookback(session, "QQQ", start_date, end_date)
-    policy_weights = _load_policy_weights(session)
+    policy_weights = load_policy_weights(session)
     has_policy = bool(policy_weights)
     policy_closes_per_ticker: dict[str, dict[date, Decimal]] = {}
     if has_policy:
@@ -460,11 +460,6 @@ def _basket_value_at(
         shares = (capital * renormed_w) / p_buy
         value += shares * p_eval
     return value
-
-
-def _load_policy_weights(session: Session) -> dict[str, Decimal]:
-    rows = session.execute(select(PolicyWeight)).scalars().all()
-    return {r.ticker: Decimal(r.weight_bps) / Decimal(10000) for r in rows if r.weight_bps > 0}
 
 
 def _compute_alpha_series(
