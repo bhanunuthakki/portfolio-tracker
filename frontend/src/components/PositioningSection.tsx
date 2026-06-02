@@ -231,24 +231,24 @@ function CorrelationTable({
                 Weight
               </SortableTh>
               <SortableTh column="corr_spy" align="right" sort={sort} pad="tight">
-                ρ SPY
+                Corr SPY
               </SortableTh>
               <SortableTh column="beta_spy" align="right" sort={sort} pad="tight">
-                β SPY
+                Beta SPY
               </SortableTh>
               <SortableTh column="corr_qqq" align="right" sort={sort} pad="tight">
-                ρ QQQ
+                Corr QQQ
               </SortableTh>
               <SortableTh column="beta_qqq" align="right" sort={sort} pad="tight">
-                β QQQ
+                Beta QQQ
               </SortableTh>
               {hasPolicy && (
                 <>
                   <SortableTh column="corr_policy" align="right" sort={sort} pad="tight">
-                    ρ Policy
+                    Corr Policy
                   </SortableTh>
                   <SortableTh column="beta_policy" align="right" sort={sort} pad="tight">
-                    β Policy
+                    Beta Policy
                   </SortableTh>
                 </>
               )}
@@ -364,7 +364,7 @@ export function PositioningSection(): JSX.Element | null {
         />
         <Stat label="Top-5 weight" value={fmtPct(c.top5_weight_pct)} />
         <Stat label="Positions" value={String(c.num_positions)} />
-        <Stat label="Avg ρ to SPY" value={fmtRatio(data.weighted_avg_correlation_spy)} />
+        <Stat label="Avg corr to SPY" value={fmtRatio(data.weighted_avg_correlation_spy)} />
       </div>
 
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
