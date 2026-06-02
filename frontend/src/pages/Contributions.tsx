@@ -12,6 +12,7 @@ import {
   CLASSIFICATION_LABELS as CLASSIFICATION_LABEL,
   fmtSignedUSD,
   pnlClass,
+  SortableTh,
 } from "@/components/ui";
 import type { InvestmentTransactionOut } from "@/types";
 
@@ -91,12 +92,8 @@ export function Contributions(): JSX.Element {
     [],
   );
 
-  const { sortedRows, toggle, sortIndicator } = useTableSort(
-    filtered,
-    "abs",
-    "desc",
-    accessors,
-  );
+  const sort = useTableSort(filtered, "abs", "desc", accessors);
+  const { sortedRows } = sort;
 
   const stats = useMemo(() => {
     let inflow = 0,
@@ -193,24 +190,24 @@ export function Contributions(): JSX.Element {
               <table className="w-full text-xs">
                 <thead className="bg-slate-50 text-slate-600">
                   <tr>
-                    <Sh onClick={() => toggle("date")}>
-                      Date{sortIndicator("date")}
-                    </Sh>
-                    <Sh onClick={() => toggle("account")}>
-                      Account{sortIndicator("account")}
-                    </Sh>
-                    <Sh onClick={() => toggle("type")}>
-                      Type{sortIndicator("type")}
-                    </Sh>
-                    <Sh onClick={() => toggle("name")}>
-                      Description{sortIndicator("name")}
-                    </Sh>
-                    <Sh align="right" onClick={() => toggle("abs")}>
-                      Amount{sortIndicator("abs")}
-                    </Sh>
-                    <Sh onClick={() => toggle("classification")}>
-                      Counted as{sortIndicator("classification")}
-                    </Sh>
+                    <SortableTh column="date" sort={sort} pad="tight">
+                      Date
+                    </SortableTh>
+                    <SortableTh column="account" sort={sort} pad="tight">
+                      Account
+                    </SortableTh>
+                    <SortableTh column="type" sort={sort} pad="tight">
+                      Type
+                    </SortableTh>
+                    <SortableTh column="name" sort={sort} pad="tight">
+                      Description
+                    </SortableTh>
+                    <SortableTh column="abs" align="right" sort={sort} pad="tight">
+                      Amount
+                    </SortableTh>
+                    <SortableTh column="classification" sort={sort} pad="tight">
+                      Counted as
+                    </SortableTh>
                   </tr>
                 </thead>
                 <tbody>
@@ -281,28 +278,6 @@ export function Contributions(): JSX.Element {
         )}
       </Card>
     </div>
-  );
-}
-
-function Sh({
-  children,
-  align,
-  onClick,
-}: {
-  children: React.ReactNode;
-  align?: "left" | "right";
-  onClick: () => void;
-}): JSX.Element {
-  return (
-    <th
-      onClick={onClick}
-      className={[
-        "cursor-pointer select-none px-3 py-2 text-xs font-medium uppercase tracking-wide text-slate-600 hover:bg-slate-100",
-        align === "right" ? "text-right" : "text-left",
-      ].join(" ")}
-    >
-      {children}
-    </th>
   );
 }
 
