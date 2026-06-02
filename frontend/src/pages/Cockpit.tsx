@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "@/api/client";
 import {
@@ -156,17 +157,25 @@ function QueueRow({ item }: { item: QueueItem }): JSX.Element {
         </div>
       )}
 
-      {!accepted && (
-        <div className="mt-3 flex items-center gap-3">
-          <PrimaryButton onClick={() => accept.mutate()} disabled={busy}>
-            Accept
-          </PrimaryButton>
-          <SecondaryButton onClick={() => snooze.mutate()} disabled={busy}>
-            Snooze 7d
-          </SecondaryButton>
-          <DangerLink onClick={() => dismiss.mutate()}>Dismiss</DangerLink>
-        </div>
-      )}
+      <div className="mt-3 flex items-center gap-3">
+        {!accepted && (
+          <>
+            <PrimaryButton onClick={() => accept.mutate()} disabled={busy}>
+              Accept
+            </PrimaryButton>
+            <SecondaryButton onClick={() => snooze.mutate()} disabled={busy}>
+              Snooze 7d
+            </SecondaryButton>
+            <DangerLink onClick={() => dismiss.mutate()}>Dismiss</DangerLink>
+          </>
+        )}
+        <Link
+          to={`/advisor?ask=${encodeURIComponent(`Why ${item.action} ${item.ticker}? ${item.headline}`)}`}
+          className="text-xs text-accent hover:underline"
+        >
+          Discuss
+        </Link>
+      </div>
     </div>
   );
 }

@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { Accounts } from "./pages/Accounts";
+import { Advisor } from "./pages/Advisor";
 import { Cockpit } from "./pages/Cockpit";
 import { Contributions } from "./pages/Contributions";
 import { Dashboard } from "./pages/Dashboard";
 import { Earnings } from "./pages/Earnings";
 import { Holdings } from "./pages/Holdings";
+import { Review } from "./pages/Review";
 import { Scorecard } from "./pages/Scorecard";
 import { ThesisHealth } from "./pages/ThesisHealth";
 import { TradeAnalysis } from "./pages/TradeAnalysis";
@@ -15,14 +17,16 @@ import { Transactions } from "./pages/Transactions";
 
 const navItems: { to: string; label: string }[] = [
   { to: "/", label: "Cockpit" },
-  { to: "/dashboard", label: "Dashboard" },
-  { to: "/holdings", label: "Holdings" },
   { to: "/thesis", label: "Thesis health" },
-  { to: "/transactions", label: "Transactions" },
-  { to: "/contributions", label: "Contributions" },
+  { to: "/holdings", label: "Holdings" },
+  { to: "/dashboard", label: "Performance" },
   { to: "/trade-analysis", label: "Trade analysis" },
   { to: "/trade-timeline", label: "Trade timeline" },
   { to: "/scorecard", label: "Scorecard" },
+  { to: "/review", label: "Review" },
+  { to: "/advisor", label: "Advisor" },
+  { to: "/contributions", label: "Contributions" },
+  { to: "/transactions", label: "Transactions" },
   { to: "/earnings", label: "Earnings" },
   { to: "/accounts", label: "Accounts" },
 ];
@@ -139,6 +143,8 @@ export function App(): JSX.Element {
             <Route path="/trade-analysis" element={<TradeAnalysis />} />
             <Route path="/trade-timeline" element={<TradeTimeline />} />
             <Route path="/scorecard" element={<Scorecard />} />
+            <Route path="/review" element={<Review />} />
+            <Route path="/advisor" element={<Advisor />} />
             <Route path="/earnings" element={<Earnings />} />
             <Route path="/accounts" element={<Accounts />} />
           </Routes>
