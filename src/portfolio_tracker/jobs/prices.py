@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import Any, cast
 
 import httpx
 import typer
@@ -87,7 +88,7 @@ def _yfinance_history(ticker: str, start_date: date, end_date: date) -> dict[dat
     if history.empty:
         return {}
     out: dict[date, Decimal] = {}
-    for ts, row in history.iterrows():
+    for ts, row in cast(Any, history.iterrows()):
         bar_date = ts.date() if hasattr(ts, "date") else ts
         close = row.get("Close")
         if close is None or _is_nan(close):

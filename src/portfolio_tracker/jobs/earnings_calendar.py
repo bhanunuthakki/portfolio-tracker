@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, cast
 
 import yfinance as yf
 from sqlalchemy import select
@@ -81,7 +82,7 @@ def _held_tickers(session: Session) -> list[str]:
     return sorted({t for t in rows if t})
 
 
-def _fetch_for_ticker(ticker: str) -> list[dict]:
+def _fetch_for_ticker(ticker: str) -> list[dict[str, object]]:
     """Hit yfinance for past + upcoming earnings rows.
 
     yfinance's `earnings_dates` returns a pandas DataFrame indexed by
@@ -89,7 +90,7 @@ def _fetch_for_ticker(ticker: str) -> list[dict]:
     `Surprise(%)`. We project to the columns the DB cares about and
     coerce types defensively — yfinance is lossy on edge cases.
     """
-    out: list[dict] = []
+    out: list[dict[str, object]] = []
     yt = yf.Ticker(ticker)
     df = None
     try:
@@ -100,7 +101,7 @@ def _fetch_for_ticker(ticker: str) -> list[dict]:
         return out
 
     # Normalize: pandas gives us a DataFrame; coerce to plain dicts.
-    for raw_idx, row in df.iterrows():
+    for raw_idx, row in cast(Any, df.iterrows()):
         # raw_idx is a Timestamp in the broker's tz; we only persist the
         # date portion since "earnings on Tuesday" is what matters for
         # the calendar surface.
@@ -128,13 +129,13 @@ def _fetch_for_ticker(ticker: str) -> list[dict]:
     return out
 
 
-def _coerce_decimal(v) -> Decimal | None:
+def _coerce_decimal(v: object) -> Decimal | None:
     """Best-effort cast: yfinance gives floats, NaNs, occasional strings."""
     if v is None:
         return None
     try:
         # NaN check via float; Decimal.NaN is its own special case.
-        f = float(v)
+        f = float(cast(Any, v))
     except (TypeError, ValueError):
         return None
     if f != f:  # NaN
@@ -142,7 +143,7 @@ def _coerce_decimal(v) -> Decimal | None:
     return Decimal(str(round(f, 4)))
 
 
-def _upsert(session: Session, row: dict) -> None:
+def _upsert(session: Session, row: dict[str, object]) -> None:
     stmt = sqlite_insert(EarningsCalendar).values(**row, fetched_at=datetime.now(UTC))
     stmt = stmt.on_conflict_do_update(
         index_elements=[EarningsCalendar.ticker, EarningsCalendar.earnings_date],

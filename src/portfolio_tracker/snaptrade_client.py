@@ -162,7 +162,7 @@ def login_url(creds: SnapTradeUserCredentials, custom_redirect: str | None = Non
         kwargs["custom_redirect"] = custom_redirect
     response = get_client().authentication.login_snap_trade_user(**kwargs)
     body = _body(response)
-    redirect = body.get("redirectURI") if isinstance(body, dict) else body
+    redirect = cast(object, body.get("redirectURI") if isinstance(body, dict) else body)
     if not isinstance(redirect, str):
         raise RuntimeError(f"unexpected SnapTrade login response shape: {body!r}")
     return redirect
@@ -175,13 +175,13 @@ def list_brokerage_authorizations(
         user_id=creds.user_id, user_secret=creds.user_secret
     )
     body = _body(response)
-    items = body if isinstance(body, list) else body.get("data", [])
+    items = cast("list[Any]", body if isinstance(body, list) else body.get("data", []))
     out: list[SnapTradeBrokerageAuthorization] = []
     for raw in items:
         out.append(
             SnapTradeBrokerageAuthorization(
                 authorization_id=str(raw["id"]),
-                brokerage_name=_dig(raw, ["brokerage", "name"]),
+                brokerage_name=_opt_str(_dig(raw, ["brokerage", "name"])),
             )
         )
     return out
@@ -200,7 +200,7 @@ def list_user_accounts(
         user_id=creds.user_id, user_secret=creds.user_secret
     )
     body = _body(response)
-    rows = body if isinstance(body, list) else body.get("data", [])
+    rows = cast("list[Any]", body if isinstance(body, list) else body.get("data", []))
     out: list[tuple[str, PlaidAccount]] = []
     for raw in rows:
         if (
@@ -244,22 +244,23 @@ def get_account_activities(
     start_date: date,
     end_date: date,
 ) -> SnapTradeTransactionsResponse:
-    response = get_client().account_information.get_account_activities(
-        user_id=creds.user_id,
-        user_secret=creds.user_secret,
-        account_id=snaptrade_account_id,
-        start_date=start_date.isoformat(),
-        end_date=end_date.isoformat(),
-    )
+    activity_kwargs: dict[str, Any] = {
+        "user_id": creds.user_id,
+        "user_secret": creds.user_secret,
+        "account_id": snaptrade_account_id,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+    }
+    response = get_client().account_information.get_account_activities(**activity_kwargs)
     body = _body(response)
-    rows = body if isinstance(body, list) else body.get("data", [])
+    rows = cast("list[Any]", body if isinstance(body, list) else body.get("data", []))
     securities: dict[str, PlaidSecurity] = {}
     transactions: list[PlaidInvestmentTransaction] = []
     for raw in rows:
         symbol_payload = raw.get("symbol") or raw.get("option_symbol")
         plaid_security_id: str | None = None
         if isinstance(symbol_payload, dict):
-            sec = _security_from_snaptrade(symbol_payload)
+            sec = _security_from_snaptrade(cast("dict[str, Any]", symbol_payload))
             securities[sec.plaid_security_id] = sec
             plaid_security_id = sec.plaid_security_id
         tx = _transaction_from_snaptrade(raw, snaptrade_account_id, plaid_security_id)
@@ -291,8 +292,8 @@ def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
 
 
 def _security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
-    symbol = raw.get("symbol") if isinstance(raw, dict) else None
-    symbol_dict = symbol if isinstance(symbol, dict) else raw
+    symbol = raw.get("symbol")
+    symbol_dict = cast("dict[str, Any]", symbol if isinstance(symbol, dict) else raw)
     symbol_id = str(symbol_dict.get("id") or symbol_dict.get("symbol") or "unknown")
     return PlaidSecurity(
         plaid_security_id=f"snaptrade:{symbol_id}",
@@ -419,7 +420,7 @@ def _dig(payload: object, path: list[str]) -> object | None:
     for key in path:
         if not isinstance(current, dict):
             return None
-        current = current.get(key)
+        current = cast("dict[str, object]", current).get(key)
         if current is None:
             return None
     return current

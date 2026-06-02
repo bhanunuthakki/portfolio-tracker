@@ -47,9 +47,9 @@ from portfolio_tracker.schemas import (
 )
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import (
-    _benchmark_daily_returns,
-    _benchmark_daily_returns_for,
-    _ols,
+    _benchmark_daily_returns,  # pyright: ignore[reportPrivateUsage]
+    _benchmark_daily_returns_for,  # pyright: ignore[reportPrivateUsage]
+    _ols,  # pyright: ignore[reportPrivateUsage]
 )
 
 

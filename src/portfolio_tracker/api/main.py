@@ -46,7 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(cio_advisor.router)
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
+    def health() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
         return {"status": "ok"}
 
     return app

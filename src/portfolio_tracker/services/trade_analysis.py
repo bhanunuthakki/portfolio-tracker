@@ -48,6 +48,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+from typing import TypedDict
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -62,6 +63,31 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services.active_items import active_account_ids
+
+
+class _TradeAgg(TypedDict):
+    name: str | None
+    first_buy: date | None
+    last_action: date | None
+    bought: Decimal
+    sold: Decimal
+    bought_qty: Decimal
+    sold_qty: Decimal
+    trade_count: int
+
+
+def _new_trade_agg() -> _TradeAgg:
+    return {
+        "name": None,
+        "first_buy": None,
+        "last_action": None,
+        "bought": Decimal(0),
+        "sold": Decimal(0),
+        "bought_qty": Decimal(0),
+        "sold_qty": Decimal(0),
+        "trade_count": 0,
+    }
+
 
 # Tickers below this combined buy+sell notional are dropped from the
 # per-ticker breakdown. They're noise — small one-off trades that don't
@@ -183,18 +209,7 @@ def analyze_trades(
         .where(Security.ticker.is_not(None))
     ).all()
 
-    by_ticker: dict[str, dict] = defaultdict(
-        lambda: {
-            "name": None,
-            "first_buy": None,
-            "last_action": None,
-            "bought": Decimal(0),
-            "sold": Decimal(0),
-            "bought_qty": Decimal(0),
-            "sold_qty": Decimal(0),
-            "trade_count": 0,
-        }
-    )
+    by_ticker: defaultdict[str, _TradeAgg] = defaultdict(_new_trade_agg)
     for _sid, ticker, name, tx_date, tx_type, amount, quantity in rows:
         if amount is None:
             continue
