@@ -77,6 +77,20 @@ class Settings(BaseSettings):
         default="../earnings-summary/output",
     )
 
+    # Recipient for the scheduled monthly-brief email (jobs.email_brief).
+    # PII — lives in `.env` only, never committed. If unset, the email job
+    # refuses to send with a clear error; the rest of the app is unaffected.
+    brief_email_recipient: str | None = Field(alias="BRIEF_EMAIL_RECIPIENT", default=None)
+
+    # Google OAuth artifacts for Gmail send. Defaults resolve to the repo root
+    # (both gitignored). Reuse the same credentials.json as other Google-API
+    # projects on this machine; the token is minted per-project per-scope by
+    # `python -m portfolio_tracker.jobs.email_brief --authorize`.
+    google_credentials_path: str = Field(
+        alias="GOOGLE_CREDENTIALS_PATH", default="credentials.json"
+    )
+    google_token_path: str = Field(alias="GOOGLE_TOKEN_PATH", default="token.json")
+
     @property
     def resolved_earnings_summary_db_path(self) -> Path:
         p = Path(self.earnings_summary_db_path)
@@ -87,6 +101,20 @@ class Settings(BaseSettings):
     @property
     def resolved_earnings_summary_output_dir(self) -> Path:
         p = Path(self.earnings_summary_output_dir)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        return p.resolve()
+
+    @property
+    def resolved_google_credentials_path(self) -> Path:
+        p = Path(self.google_credentials_path)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        return p.resolve()
+
+    @property
+    def resolved_google_token_path(self) -> Path:
+        p = Path(self.google_token_path)
         if not p.is_absolute():
             p = PROJECT_ROOT / p
         return p.resolve()
