@@ -14,12 +14,18 @@ ordering — the owner weights thesis/valuation health above concentration.
 
 from __future__ import annotations
 
+import json
+import sys
+from collections import defaultdict
+from collections.abc import Callable
 from decimal import Decimal
+from typing import cast
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from portfolio_tracker.config import get_settings
 from portfolio_tracker.models import HoldingSnapshot, Security
 from portfolio_tracker.services import earnings_summary as es
 from portfolio_tracker.services.active_items import active_account_ids
@@ -266,3 +272,253 @@ def _value_by_ticker(session: Session) -> tuple[dict[str, Decimal], dict[str, st
         value[ticker] = value.get(ticker, Decimal(0)) + market_value
         names.setdefault(ticker, security.name)
     return value, names
+
+
+# ---------------------------------------------------------------------------
+# Action queue ranking (P3, slice 2)
+#
+# Opus ranks the grounded signals into an advisory action queue. Hybrid
+# grounding: a ranked item must reference a ticker present in the signals
+# (hallucinated tickers are dropped), high-severity deterministic signals are
+# re-injected if the model omits them, and if the LLM is unavailable or returns
+# unparseable output we fall back to a deterministic queue built straight from
+# the signals. Tone is advisory with an explicit suggested action.
+# ---------------------------------------------------------------------------
+
+RANKING_MODEL = "claude-opus-4-7"
+
+_TIER_FROM_SEVERITY = {"high": "act", "warning": "watch", "info": "fine"}
+_TIER_RANK = {"act": 0, "watch": 1, "fine": 2}
+
+# Default advisory verb per signal-kind prefix (the LLM may override).
+_ACTION_BY_KIND_PREFIX: list[tuple[str, str]] = [
+    ("thesis_verdict", "audit"),
+    ("valuation", "review"),
+    ("es_alert:", "review"),
+    ("coaching:concentration", "trim"),
+    ("coaching:irr_below_bar", "review"),
+    ("coaching:drawdown_audit", "audit"),
+    ("coaching:thesis_stale", "audit"),
+    ("coaching:multiples_detachment", "trim"),
+    ("coverage_gap", "research"),
+]
+
+
+class ActionItem(BaseModel):
+    """One ranked, advisory entry in the cockpit action queue."""
+
+    rank: int
+    ticker: str
+    name: str | None
+    tier: str  # act | watch | fine
+    action: str  # advisory verb: trim | add | hold | exit | audit | review | research
+    headline: str
+    rationale: str
+    suggested_action: str
+    weight_pct: float
+    evidence: dict[str, str] = Field(default_factory=dict)
+    signal_kinds: list[str] = Field(default_factory=list)
+    llm_ranked: bool = True  # False => deterministic fallback or re-injected
+
+
+def rank_signals(
+    signals: list[Signal],
+    *,
+    llm: Callable[[str], str] | None = None,
+    use_llm: bool = True,
+) -> list[ActionItem]:
+    """Rank grounded signals into an advisory action queue.
+
+    `llm` is injectable for tests; the production default routes an Opus call
+    through the subscription-billed claude_cli wrapper. Falls back to a
+    deterministic queue when `use_llm` is False, the LLM is unavailable, or it
+    returns unparseable JSON.
+    """
+    if not signals:
+        return []
+    if not use_llm:
+        return _deterministic_items(signals)
+    caller = llm or _opus_caller()
+    if caller is None:
+        return _deterministic_items(signals)
+    try:
+        raw = caller(_build_ranking_prompt(signals))
+    except Exception:  # any LLM/subprocess failure -> safe deterministic queue
+        return _deterministic_items(signals)
+    return _parse_ranking(raw, signals)
+
+
+def _deterministic_items(signals: list[Signal]) -> list[ActionItem]:
+    """1:1 signal -> ActionItem; the no-LLM fallback and re-injection source.
+    Sorted act -> watch -> fine, then by exposure."""
+    items = [_item_from_signal(s, llm_ranked=False) for s in signals]
+    items.sort(key=lambda i: (_TIER_RANK.get(i.tier, 9), -i.weight_pct, i.ticker))
+    for idx, item in enumerate(items, 1):
+        item.rank = idx
+    return items
+
+
+def _item_from_signal(s: Signal, *, llm_ranked: bool) -> ActionItem:
+    return ActionItem(
+        rank=0,
+        ticker=s.ticker,
+        name=s.name,
+        tier=_TIER_FROM_SEVERITY.get(s.severity, "fine"),
+        action=_action_for_kind(s.kind),
+        headline=s.headline,
+        rationale=s.detail,
+        suggested_action=_default_suggested_action(s),
+        weight_pct=s.weight_pct,
+        evidence=dict(s.evidence),
+        signal_kinds=[s.kind],
+        llm_ranked=llm_ranked,
+    )
+
+
+def _action_for_kind(kind: str) -> str:
+    for prefix, action in _ACTION_BY_KIND_PREFIX:
+        if kind.startswith(prefix):
+            return action
+    return "review"
+
+
+def _default_suggested_action(s: Signal) -> str:
+    return f"Review {s.ticker}: {s.headline}"
+
+
+def _build_ranking_prompt(signals: list[Signal]) -> str:
+    payload = json.dumps([s.model_dump() for s in signals], indent=2)
+    return (
+        "You are the analytical assistant to a long-horizon, concentrated equity "
+        "investor (a 'Rational Bull' CIO). Below is a list of GROUNDED signals about "
+        "the current portfolio; each already carries the real numbers and the "
+        "position's dollar weight (weight_pct).\n\n"
+        "Produce a RANKED action queue, most-urgent first. Rules:\n"
+        "1. Only reference tickers that appear in the signals. Invent nothing.\n"
+        "2. Ground every rationale in the provided numbers (cite them).\n"
+        "3. Weight THESIS health and VALUATION far above concentration.\n"
+        "4. Consolidate a ticker's multiple signals into ONE item.\n"
+        "5. Tone: advisory, with an explicit suggested action (not a command).\n"
+        "6. Assign tier: 'act' (needs attention now), 'watch', or 'fine'.\n\n"
+        "Respond with ONLY a JSON object, no prose:\n"
+        '{"items": [{"ticker": "NU", "tier": "act", '
+        '"action": "trim|add|hold|exit|audit|review|research", "headline": "short", '
+        '"rationale": "advisory, cites the numbers", "suggested_action": "explicit but advisory"}]}\n\n'
+        f"SIGNALS:\n{payload}\n"
+    )
+
+
+def _parse_ranking(raw: str, signals: list[Signal]) -> list[ActionItem]:
+    by_ticker: dict[str, list[Signal]] = defaultdict(list)
+    for s in signals:
+        by_ticker[s.ticker.upper()].append(s)
+
+    parsed = _safe_json(raw)
+    if not isinstance(parsed, dict):
+        return _deterministic_items(signals)
+    entries = cast(dict[str, object], parsed).get("items")
+    if not isinstance(entries, list):
+        return _deterministic_items(signals)
+
+    items: list[ActionItem] = []
+    seen: set[str] = set()
+    for order, entry in enumerate(cast(list[object], entries)):
+        if not isinstance(entry, dict):
+            continue
+        e = cast(dict[str, object], entry)
+        ticker = str(e.get("ticker", "")).upper()
+        sigs = by_ticker.get(ticker)
+        if not sigs or ticker in seen:
+            continue  # ungrounded ticker or duplicate -> drop
+        items.append(_item_from_entry(e, sigs, order))
+        seen.add(ticker)
+
+    if not items:
+        return _deterministic_items(signals)
+
+    # Hybrid grounding: never silently drop a high-severity signal.
+    for s in signals:
+        if s.severity == "high" and s.ticker.upper() not in seen:
+            items.append(_item_from_signal(s, llm_ranked=False))
+            seen.add(s.ticker.upper())
+
+    items.sort(key=lambda i: (_TIER_RANK.get(i.tier, 9), i.rank))
+    for idx, item in enumerate(items, 1):
+        item.rank = idx
+    return items
+
+
+def _item_from_entry(entry: dict[str, object], sigs: list[Signal], order: int) -> ActionItem:
+    evidence: dict[str, str] = {}
+    kinds: list[str] = []
+    weight = 0.0
+    name: str | None = None
+    for s in sigs:
+        evidence.update(s.evidence)
+        kinds.append(s.kind)
+        weight = max(weight, s.weight_pct)
+        name = name or s.name
+    return ActionItem(
+        rank=order,
+        ticker=sigs[0].ticker,
+        name=name,
+        tier=_norm_tier(entry.get("tier")) or _highest_tier(sigs),
+        action=_opt_text(entry.get("action")) or _action_for_kind(kinds[0]),
+        headline=_opt_text(entry.get("headline")) or sigs[0].headline,
+        rationale=_opt_text(entry.get("rationale")) or sigs[0].detail,
+        suggested_action=_opt_text(entry.get("suggested_action")) or _default_suggested_action(sigs[0]),
+        weight_pct=weight,
+        evidence=evidence,
+        signal_kinds=kinds,
+        llm_ranked=True,
+    )
+
+
+def _norm_tier(v: object) -> str | None:
+    tier = str(v).lower().strip() if v is not None else ""
+    return tier if tier in _TIER_RANK else None
+
+
+def _highest_tier(sigs: list[Signal]) -> str:
+    return min(
+        (_TIER_FROM_SEVERITY.get(s.severity, "fine") for s in sigs),
+        key=lambda t: _TIER_RANK[t],
+    )
+
+
+def _opt_text(v: object) -> str:
+    return str(v).strip() if v is not None else ""
+
+
+def _safe_json(raw: str) -> object:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return {}
+    try:
+        return json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _opus_caller() -> Callable[[str], str] | None:
+    """A callable that runs an Opus prompt via the subscription-billed
+    claude_cli wrapper, or None if CLAUDE_CLI_DIR isn't configured."""
+    cli_dir = get_settings().claude_cli_dir
+    if not cli_dir:
+        return None
+    if cli_dir not in sys.path:
+        sys.path.insert(0, cli_dir)
+    import claude_cli  # pyright: ignore[reportMissingImports]
+
+    fn = cast("Callable[..., object]", claude_cli.call_claude)
+
+    def _call(prompt: str) -> str:
+        return str(fn(prompt, model=RANKING_MODEL, timeout_seconds=300))
+
+    return _call
