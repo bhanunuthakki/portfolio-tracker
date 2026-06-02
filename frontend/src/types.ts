@@ -149,6 +149,28 @@ export interface CoachingResult {
   };
 }
 
+// ---- Cockpit (P3 action queue) ----
+export interface QueueItem {
+  id: number;
+  signature: string;
+  ticker: string;
+  name: string | null;
+  tier: "act" | "watch" | "fine";
+  action: string;
+  rank: number;
+  headline: string;
+  rationale: string;
+  suggested_action: string;
+  weight_pct: number;
+  evidence: Record<string, string>;
+  signal_kinds: string[];
+  llm_ranked: boolean;
+  status: string;
+  snooze_until: string | null;
+  accepted_at: string | null;
+  dismissed_at: string | null;
+}
+
 export interface HumanCapitalBucketWeightOut {
   bucket: string;
   weight_pct: string;

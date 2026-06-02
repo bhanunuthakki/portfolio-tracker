@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { Accounts } from "./pages/Accounts";
+import { Cockpit } from "./pages/Cockpit";
 import { Contributions } from "./pages/Contributions";
 import { Dashboard } from "./pages/Dashboard";
 import { Earnings } from "./pages/Earnings";
@@ -11,7 +12,8 @@ import { TradeTimeline } from "./pages/TradeTimeline";
 import { Transactions } from "./pages/Transactions";
 
 const navItems: { to: string; label: string }[] = [
-  { to: "/", label: "Dashboard" },
+  { to: "/", label: "Cockpit" },
+  { to: "/dashboard", label: "Dashboard" },
   { to: "/holdings", label: "Holdings" },
   { to: "/transactions", label: "Transactions" },
   { to: "/contributions", label: "Contributions" },
@@ -124,7 +126,8 @@ export function App(): JSX.Element {
       <main className="flex-1">
         <div className="mx-auto max-w-7xl px-6 py-7">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<Cockpit />} />
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/holdings" element={<Holdings />} />
             <Route path="/transactions" element={<Transactions />} />
             <Route path="/contributions" element={<Contributions />} />
