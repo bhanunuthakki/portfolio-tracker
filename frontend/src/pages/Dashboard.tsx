@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
 import { CIOChatCard } from "@/components/CIOChatCard";
@@ -81,6 +82,17 @@ function presetToDates(
 }
 
 export function Dashboard(): JSX.Element {
+  // Deep-link support: /?ticker=NU auto-expands the per-position alpha
+  // table and scrolls to the matching row. Mirrors the Holdings +
+  // TradeAnalysis + TradeTimeline pattern so any ticker chip across
+  // the app navigates consistently.
+  const [searchParams] = useSearchParams();
+  const focusTicker = (searchParams.get("ticker") ?? "").toUpperCase();
+  // `<details>` is uncontrolled by default and ignores subsequent prop
+  // changes after mount, so we control its open state explicitly via
+  // useState + onToggle. Auto-open when the deep-linked ticker actually
+  // exists in the loaded data; user can still collapse manually.
+  const [perPositionOpen, setPerPositionOpen] = useState(false);
   const [preset, setPreset] = useState<RangePreset>("1Y");
   // End-date anchor — defaults to today but the user can set it to any
   // past date to view the dashboard "as of" that date. All presets
@@ -146,6 +158,18 @@ export function Dashboard(): JSX.Element {
     queryKey: ["holdings"],
     queryFn: () => api.latestHoldings(),
   });
+
+  // When data loads and the URL has a ?ticker= for a ticker present in
+  // the position-alpha rows, auto-expand the per-position table once.
+  // We never auto-collapse — once the user has navigated to a ticker,
+  // keep their preferred panel state intact for the rest of the session.
+  useEffect(() => {
+    if (!focusTicker || !positionAlpha.data) return;
+    const hit = positionAlpha.data.rows.some(
+      (r) => r.ticker.toUpperCase() === focusTicker,
+    );
+    if (hit) setPerPositionOpen(true);
+  }, [focusTicker, positionAlpha.data]);
 
   const totalValue = holdings.data
     ? holdings.data.reduce(
@@ -381,10 +405,20 @@ export function Dashboard(): JSX.Element {
 
       {positionAlpha.data && positionAlpha.data.rows.length > 0 && (
         <Card className="overflow-hidden">
-          <details>
+          {/* Controlled details: native `<details open={...}>` is
+              uncontrolled by default — the prop only seeds the initial
+              state, then the browser owns the open flag and ignores
+              re-renders. We need to react to ?ticker= AFTER the data
+              query resolves, so wire onToggle + perPositionOpen state. */}
+          <details
+            open={perPositionOpen}
+            onToggle={(e) => setPerPositionOpen(e.currentTarget.open)}
+          >
             <summary className="cursor-pointer border-b border-slate-100 px-4 py-3 hover:bg-slate-50 list-none [&::-webkit-details-marker]:hidden">
               <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                <span className="text-slate-400 text-xs">▸</span>
+                <span className="text-slate-400 text-xs">
+                  {perPositionOpen ? "▾" : "▸"}
+                </span>
                 Per-position alpha vs SPY
                 <span className="text-xs font-normal text-slate-500">
                   ({positionAlpha.data.rows.length} positions · click to expand)
@@ -394,6 +428,7 @@ export function Dashboard(): JSX.Element {
             <PositionAlphaTable
               data={positionAlpha.data}
               holdings={holdings.data ?? []}
+              focusTicker={focusTicker || undefined}
             />
           </details>
         </Card>
