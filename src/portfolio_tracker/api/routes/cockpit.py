@@ -19,12 +19,14 @@ from portfolio_tracker.db import get_session
 from portfolio_tracker.services.cockpit import (
     QueueItemOut,
     Signal,
+    ThesisHealthRow,
     accept_item,
     dismiss_item,
     gather_signals,
     list_queue,
     refresh_queue,
     snooze_item,
+    thesis_health,
 )
 
 router = APIRouter(prefix="/api/cockpit", tags=["cockpit"])
@@ -34,6 +36,12 @@ router = APIRouter(prefix="/api/cockpit", tags=["cockpit"])
 def get_signals(db: Annotated[Session, Depends(get_session)]) -> list[Signal]:
     """Grounded, dollar-weighted signals for the current portfolio."""
     return gather_signals(db)
+
+
+@router.get("/thesis-health", response_model=list[ThesisHealthRow])
+def get_thesis_health(db: Annotated[Session, Depends(get_session)]) -> list[ThesisHealthRow]:
+    """Per-holding thesis/fundamental health, dollar-weighted + attention-sorted."""
+    return thesis_health(db)
 
 
 @router.get("/queue", response_model=list[QueueItemOut])
