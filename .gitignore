@@ -68,3 +68,12 @@ backups/
 # Source tax PDFs — contain SSN digits, full account numbers, addresses
 tax_forms/
 *.bak
+
+# Personal / portfolio-specific files — kept LOCAL, never committed. The repo
+# ships generic templates (CIO_CONTEXT.example.md, scripts/import_1099_example.py);
+# your real names, account numbers, tax detail, and persona live in these.
+# See README "Privacy — what stays local".
+scripts/private/
+CIO_CONTEXT.md
+CIO_CONTEXT.local.md
+*.local.md

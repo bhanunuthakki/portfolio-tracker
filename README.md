@@ -152,6 +152,29 @@ protect against losing data:
    `python -m portfolio_tracker.jobs.backup --keep 365` writes a
    transactionally-consistent copy and prunes old ones.
 
+## Privacy — what stays local
+
+This repo is meant to be shareable **without exposing anyone's personal
+financial data**. The application code is generic; your portfolio-specific
+data and one-off scripts stay on your machine, gitignored.
+
+Kept local (never committed):
+
+- **`.env`** — Plaid/SnapTrade credentials, Fernet key. Template: `.env.example`.
+- **`portfolio.db`**, **`backups/`** — your holdings, transactions, balances.
+- **`tax_forms/`** — source 1099 PDFs (SSN digits, account numbers, addresses).
+- **`CIO_CONTEXT.local.md`** — your CIO persona (name, employer, income).
+  Template: `CIO_CONTEXT.example.md`. The advisor reads
+  `CIO_CONTEXT.local.md` → `CIO_CONTEXT.md` → `CIO_CONTEXT.example.md`, so a
+  fresh clone works on the generic example until you add your own.
+- **`scripts/private/`** — one-shot importers hardcoded to your accounts
+  (e.g. broker 1099 transcriptions). Template: `scripts/import_1099_example.py`.
+
+Rule of thumb for any change: no real names, addresses, account
+numbers/masks, dollar balances tied to a person, or local machine paths in
+tracked files. CUSIPs (public security IDs) and illustrative round numbers
+are fine.
+
 ## One-time setup
 
 ### 1. Backend
