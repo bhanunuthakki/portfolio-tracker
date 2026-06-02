@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from portfolio_tracker.api.routes import (
     cio_advisor,
     coaching,
+    cockpit,
     decision_support,
     earnings_summary,
     human_capital,
@@ -42,11 +43,12 @@ def create_app() -> FastAPI:
     app.include_router(decision_support.router)
     app.include_router(earnings_summary.router)
     app.include_router(coaching.router)
+    app.include_router(cockpit.router)
     app.include_router(human_capital.router)
     app.include_router(cio_advisor.router)
 
     @app.get("/api/health")
-    def health() -> dict[str, str]:
+    def health() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
         return {"status": "ok"}
 
     return app
