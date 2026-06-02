@@ -38,9 +38,7 @@ from portfolio_tracker.schemas import (
     TransactionOverrideOut,
 )
 
-_VALID_TX_CLASSIFICATIONS: frozenset[str] = frozenset(
-    {"external_in", "external_out", "internal"}
-)
+_VALID_TX_CLASSIFICATIONS: frozenset[str] = frozenset({"external_in", "external_out", "internal"})
 
 router = APIRouter(prefix="/api/overrides", tags=["overrides"])
 
@@ -81,9 +79,7 @@ def upsert_cost_basis_override(
     session: Annotated[Session, Depends(get_session)],
 ) -> CostBasisOverrideOut:
     if body.total_cost_basis < 0:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "total_cost_basis must be non-negative"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "total_cost_basis must be non-negative")
     account = session.get(Account, body.account_id)
     security = session.get(Security, body.security_id)
     if account is None or security is None:
@@ -179,9 +175,7 @@ def upsert_ticker_override(
 
     existing = session.get(TickerOverride, body.security_id)
     if existing is None:
-        existing = TickerOverride(
-            security_id=body.security_id, ticker=ticker, notes=body.notes
-        )
+        existing = TickerOverride(security_id=body.security_id, ticker=ticker, notes=body.notes)
         session.add(existing)
     else:
         existing.ticker = ticker
@@ -262,34 +256,34 @@ def list_transaction_overrides(
 
 @router.put("/transactions", response_model=TransactionOverrideOut)
 def upsert_transaction_override(
-    input: TransactionOverrideIn,
+    payload: TransactionOverrideIn,
     session: Annotated[Session, Depends(get_session)],
 ) -> TransactionOverrideOut:
-    if input.classification not in _VALID_TX_CLASSIFICATIONS:
+    if payload.classification not in _VALID_TX_CLASSIFICATIONS:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"classification must be one of "
-                f"{sorted(_VALID_TX_CLASSIFICATIONS)}; got '{input.classification}'"
+                f"{sorted(_VALID_TX_CLASSIFICATIONS)}; got '{payload.classification}'"
             ),
         )
-    tx = session.get(InvestmentTransaction, input.plaid_investment_transaction_id)
+    tx = session.get(InvestmentTransaction, payload.plaid_investment_transaction_id)
     if tx is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            detail=f"No transaction with id={input.plaid_investment_transaction_id}",
+            detail=f"No transaction with id={payload.plaid_investment_transaction_id}",
         )
-    existing = session.get(TransactionOverride, input.plaid_investment_transaction_id)
+    existing = session.get(TransactionOverride, payload.plaid_investment_transaction_id)
     if existing is None:
         existing = TransactionOverride(
-            plaid_investment_transaction_id=input.plaid_investment_transaction_id,
-            classification=input.classification,
-            notes=input.notes,
+            plaid_investment_transaction_id=payload.plaid_investment_transaction_id,
+            classification=payload.classification,
+            notes=payload.notes,
         )
         session.add(existing)
     else:
-        existing.classification = input.classification
-        existing.notes = input.notes
+        existing.classification = payload.classification
+        existing.notes = payload.notes
     session.commit()
     session.refresh(existing)
     account = session.get(Account, tx.account_id) if tx else None

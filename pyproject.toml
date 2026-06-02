@@ -47,7 +47,30 @@ extend-exclude = ["alembic/versions", "frontend"]
 select = ["E", "F", "I", "N", "UP", "B", "A", "RET", "SIM", "RUF"]
 ignore = [
     "E501",   # line length — handled by formatter
+    # Ambiguous-unicode rules. This project deliberately uses typographic
+    # symbols (e.g. ×, −, –, σ) in human-facing strings, docstrings, and
+    # explanatory comments. Exempt all three rather than ASCII-ifying
+    # meaningful notation (extends the pre-existing RUF002 decision).
+    "RUF001", # ambiguous unicode in strings
     "RUF002", # ambiguous unicode in docstrings
+    "RUF003", # ambiguous unicode in comments
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's parameter/dependency markers are sentinel factories that are
+# safe and idiomatic to call in argument defaults (they are not mutable
+# shared state). Without this, B008 flags every `param = Query(...)` in a
+# route signature.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Security",
 ]
 
 [tool.ruff.lint.per-file-ignores]

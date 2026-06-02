@@ -37,11 +37,15 @@ router = APIRouter(prefix="/api/human-capital", tags=["human-capital"])
 def list_overlaps(
     session: Annotated[Session, Depends(get_session)],
 ) -> HumanCapitalOverlapsOut:
-    rows = session.execute(
-        select(HumanCapitalOverlap).order_by(
-            HumanCapitalOverlap.ticker, HumanCapitalOverlap.bucket
+    rows = (
+        session.execute(
+            select(HumanCapitalOverlap).order_by(
+                HumanCapitalOverlap.ticker, HumanCapitalOverlap.bucket
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     by_ticker: dict[str, list[HumanCapitalBucketWeightOut]] = {}
     for r in rows:
@@ -53,9 +57,7 @@ def list_overlaps(
                 updated_at=r.updated_at,
             )
         )
-    overlaps = [
-        HumanCapitalOverlapOut(ticker=t, buckets=bs) for t, bs in by_ticker.items()
-    ]
+    overlaps = [HumanCapitalOverlapOut(ticker=t, buckets=bs) for t, bs in by_ticker.items()]
     return HumanCapitalOverlapsOut(
         overlaps=overlaps,
         bucket_caps_pct={b: Decimal(c) for b, c in _BUCKET_CAPS.items()},
@@ -76,18 +78,14 @@ def upsert_overlap(
     """
     ticker = body.ticker.strip().upper()
     if not ticker:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "ticker must be non-empty"
-        )
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "ticker must be non-empty")
 
     seen: set[str] = set()
     cleaned: list[tuple[str, Decimal, str | None]] = []
     for row in body.buckets:
         bucket = row.bucket.strip()
         if not bucket:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "bucket must be non-empty"
-            )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "bucket must be non-empty")
         if bucket in seen:
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
@@ -101,9 +99,7 @@ def upsert_overlap(
         seen.add(bucket)
         cleaned.append((bucket, row.weight_pct, row.notes))
 
-    session.execute(
-        delete(HumanCapitalOverlap).where(HumanCapitalOverlap.ticker == ticker)
-    )
+    session.execute(delete(HumanCapitalOverlap).where(HumanCapitalOverlap.ticker == ticker))
     for bucket, weight_pct, notes in cleaned:
         session.add(
             HumanCapitalOverlap(
@@ -115,11 +111,15 @@ def upsert_overlap(
         )
     session.commit()
 
-    rows = session.execute(
-        select(HumanCapitalOverlap)
-        .where(HumanCapitalOverlap.ticker == ticker)
-        .order_by(HumanCapitalOverlap.bucket)
-    ).scalars().all()
+    rows = (
+        session.execute(
+            select(HumanCapitalOverlap)
+            .where(HumanCapitalOverlap.ticker == ticker)
+            .order_by(HumanCapitalOverlap.bucket)
+        )
+        .scalars()
+        .all()
+    )
     return HumanCapitalOverlapOut(
         ticker=ticker,
         buckets=[
@@ -146,9 +146,7 @@ def delete_overlap(
     upper = ticker.strip().upper()
     if not upper:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "ticker required")
-    result = session.execute(
-        delete(HumanCapitalOverlap).where(HumanCapitalOverlap.ticker == upper)
-    )
+    result = session.execute(delete(HumanCapitalOverlap).where(HumanCapitalOverlap.ticker == upper))
     if result.rowcount == 0:
         raise HTTPException(status.HTTP_404_NOT_FOUND)
     session.commit()

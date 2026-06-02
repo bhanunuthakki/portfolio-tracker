@@ -187,7 +187,9 @@ class HoldingSnapshot(Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     # 'broker' = pass-through of Plaid/SnapTrade snapshot; 'manual' = synthesized
     # by the app to smooth over a known data gap. See migration 0009.
-    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="broker", server_default="broker")
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="broker", server_default="broker"
+    )
 
 
 class InvestmentTransaction(Base):
@@ -222,7 +224,9 @@ class InvestmentTransaction(Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     # 'broker' = pass-through of Plaid/SnapTrade tx; 'manual' = synthesized by
     # the app (typically ACATS in/out matching pair). See migration 0009.
-    origin: Mapped[str] = mapped_column(String(16), nullable=False, default="broker", server_default="broker")
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="broker", server_default="broker"
+    )
 
 
 class Price(Base):
@@ -456,8 +460,6 @@ class TickerOverride(Base):
     )
 
 
-
-
 class TradeDecision(Base):
     """Pre-trade thesis log — written BEFORE clicking buy/sell.
 
@@ -598,9 +600,7 @@ class TaxFormRealizedLot(Base):
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
     proceeds: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     cost_basis: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
-    wash_sale_loss_disallowed: Mapped[Decimal | None] = mapped_column(
-        Numeric(20, 6), nullable=True
-    )
+    wash_sale_loss_disallowed: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     net_gain_loss: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     # 'short' | 'long' | 'undetermined'
     term: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -658,9 +658,7 @@ class TaxFormRetirementDistribution(Base):
     """1099-R: retirement distributions, rollovers, conversions."""
 
     __tablename__ = "tax_form_retirement_distributions"
-    __table_args__ = (
-        Index("ix_tax_form_retirement_distributions_import_id", "import_id"),
-    )
+    __table_args__ = (Index("ix_tax_form_retirement_distributions_import_id", "import_id"),)
 
     dist_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     import_id: Mapped[int] = mapped_column(
@@ -729,9 +727,7 @@ class ChatTurn(Base):
     """
 
     __tablename__ = "chat_turns"
-    __table_args__ = (
-        Index("ix_chat_turns_session", "session_id", "turn_id"),
-    )
+    __table_args__ = (Index("ix_chat_turns_session", "session_id", "turn_id"),)
 
     turn_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[int] = mapped_column(
@@ -759,9 +755,7 @@ class MonthlyBrief(Base):
     """
 
     __tablename__ = "monthly_briefs"
-    __table_args__ = (
-        UniqueConstraint("period_yyyymm", name="uq_monthly_briefs_period"),
-    )
+    __table_args__ = (UniqueConstraint("period_yyyymm", name="uq_monthly_briefs_period"),)
 
     brief_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     period_yyyymm: Mapped[str] = mapped_column(String(7), nullable=False)
@@ -811,9 +805,7 @@ class MonthlyBriefJob(Base):
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     brief_id: Mapped[int | None] = mapped_column(
         ForeignKey("monthly_briefs.brief_id", ondelete="SET NULL"), nullable=True
     )

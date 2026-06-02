@@ -27,8 +27,8 @@ def status_endpoint() -> JSONResponse:
     return JSONResponse(
         content={
             "available": svc.is_available(),
-            "db_path": str(svc._db_path()),  # noqa: SLF001 — read-only debug field
-            "output_dir": str(svc._output_dir()),  # noqa: SLF001
+            "db_path": str(svc._db_path()),  # read-only debug field
+            "output_dir": str(svc._output_dir()),
         }
     )
 

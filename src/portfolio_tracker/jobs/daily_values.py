@@ -80,9 +80,7 @@ def run(
         return rows_written
 
 
-def _resolve_start(
-    session: Session, start_date: date | None, bootstrap: bool, today: date
-) -> date:
+def _resolve_start(session: Session, start_date: date | None, bootstrap: bool, today: date) -> date:
     """Pick a start date when the caller didn't pin one.
 
     * Explicit `start_date` wins.
@@ -99,15 +97,17 @@ def _resolve_start(
     return today - timedelta(days=_BOOTSTRAP_MAX_LOOKBACK_DAYS)
 
 
-def _dates_with_snapshots(
-    session: Session, start_date: date, end_date: date
-) -> set[date]:
-    rows = session.execute(
-        select(HoldingSnapshot.snapshot_date)
-        .where(HoldingSnapshot.snapshot_date >= start_date)
-        .where(HoldingSnapshot.snapshot_date <= end_date)
-        .distinct()
-    ).scalars().all()
+def _dates_with_snapshots(session: Session, start_date: date, end_date: date) -> set[date]:
+    rows = (
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date >= start_date)
+            .where(HoldingSnapshot.snapshot_date <= end_date)
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
     return set(rows)
 
 
@@ -177,6 +177,5 @@ if __name__ == "__main__":
     span = (args.start, args.end or date.today())
     # Plain ASCII so the message survives the Windows cp1252 console.
     print(
-        f"daily_values complete: {written} rows written "
-        f"for {span[0] or 'auto-start'} -> {span[1]}"
+        f"daily_values complete: {written} rows written for {span[0] or 'auto-start'} -> {span[1]}"
     )

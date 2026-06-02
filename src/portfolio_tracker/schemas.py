@@ -105,10 +105,10 @@ class EarningsEnrichment(BaseModel):
     All fields nullable so the dashboard degrades cleanly when the companion
     project isn't available."""
 
-    tracked: bool = False                     # in earnings-summary's watchlist?
-    list_type: str | None = None              # "portfolio" | "watchlist"
+    tracked: bool = False  # in earnings-summary's watchlist?
+    list_type: str | None = None  # "portfolio" | "watchlist"
     next_earnings_date: date | None = None
-    thesis_status: str | None = None          # "ok" | "breach" | ...
+    thesis_status: str | None = None  # "ok" | "breach" | ...
     thesis_summary: str | None = None
     has_brief: bool = False
     latest_brief_iso_date: str | None = None

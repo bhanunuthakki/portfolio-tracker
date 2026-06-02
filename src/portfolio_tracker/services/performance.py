@@ -58,7 +58,7 @@ _ABNORMAL_DAILY_RETURN: Decimal = Decimal("0.30")
 # Plaid signals the difference via `subtype`.
 _INTERNAL_TRANSFER_SUBTYPES: frozenset[str] = frozenset(
     {
-        "assignment",       # option exercise / assignment
+        "assignment",  # option exercise / assignment
         "exercise",
         "merger",
         "spin off",
@@ -132,9 +132,7 @@ _SHARE_MOVING_CASH_SUBTYPES: frozenset[str] = frozenset(
 #
 # Excludes QQQ deliberately — it's already used as a benchmark line. Add
 # total-market mutual-fund tickers if the user holds them (VTSAX, FXAIX).
-_BROAD_INDEX_ETF_TICKERS: frozenset[str] = frozenset(
-    {"VTI", "VOO", "SPY", "IVV", "RSP"}
-)
+_BROAD_INDEX_ETF_TICKERS: frozenset[str] = frozenset({"VTI", "VOO", "SPY", "IVV", "RSP"})
 
 
 def compute_performance_series(
@@ -197,12 +195,9 @@ def compute_performance_series(
     if exclude_index_etfs:
         index_sids = _broad_index_security_ids(session)
         if index_sids:
-            daily_index_value = _daily_subset_value(
-                session, start_date, end_date, index_sids
-            )
+            daily_index_value = _daily_subset_value(session, start_date, end_date, index_sids)
             daily_value_active = {
-                d: daily_value[d] - daily_index_value.get(d, Decimal(0))
-                for d in daily_value
+                d: daily_value[d] - daily_index_value.get(d, Decimal(0)) for d in daily_value
             }
             internal_flows = _daily_internal_index_cashflows(
                 session, start_date, end_date, index_sids
@@ -243,15 +238,21 @@ def compute_performance_series(
     portfolio_returns = _modified_dietz_series(
         sorted_dates, daily_value_adj, daily_cashflow, base_value_adj
     )
-    spy_returns = _modified_dietz_series(
-        sorted_dates, spy_equivalent, daily_cashflow, base_value_adj
-    ) if spy_equivalent else {}
-    qqq_returns = _modified_dietz_series(
-        sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj
-    ) if qqq_equivalent else {}
-    policy_returns = _modified_dietz_series(
-        sorted_dates, policy_equivalent, daily_cashflow, base_value_adj
-    ) if policy_equivalent else {}
+    spy_returns = (
+        _modified_dietz_series(sorted_dates, spy_equivalent, daily_cashflow, base_value_adj)
+        if spy_equivalent
+        else {}
+    )
+    qqq_returns = (
+        _modified_dietz_series(sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj)
+        if qqq_equivalent
+        else {}
+    )
+    policy_returns = (
+        _modified_dietz_series(sorted_dates, policy_equivalent, daily_cashflow, base_value_adj)
+        if policy_equivalent
+        else {}
+    )
 
     points: list[PerformancePoint] = []
     for current_date in sorted_dates:
@@ -288,11 +289,13 @@ def _broad_index_security_ids(session: Session) -> frozenset[int]:
     SnapTrade) and ended up with slight metadata differences. We want the
     union of all of them.
     """
-    rows = session.execute(
-        select(Security.security_id).where(
-            Security.ticker.in_(_BROAD_INDEX_ETF_TICKERS)
+    rows = (
+        session.execute(
+            select(Security.security_id).where(Security.ticker.in_(_BROAD_INDEX_ETF_TICKERS))
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return frozenset(rows)
 
 
@@ -316,13 +319,9 @@ def _daily_subset_value(
     earliest_known = min(forward.keys()) if forward else None
     if earliest_known is None or earliest_known > start_date:
         backfill_end = (
-            earliest_known - timedelta(days=1)
-            if earliest_known is not None
-            else end_date
+            earliest_known - timedelta(days=1) if earliest_known is not None else end_date
         )
-        backfill = _backfill_subset_values(
-            session, start_date, backfill_end, security_ids
-        )
+        backfill = _backfill_subset_values(session, start_date, backfill_end, security_ids)
         for d, v in backfill.items():
             forward.setdefault(d, v)
     return forward
@@ -392,14 +391,18 @@ def _backfill_subset_values(
     for sid, qty in rows:
         rolling[sid] += Decimal(qty)
 
-    backward_tx = session.execute(
-        select(InvestmentTransaction)
-        .where(InvestmentTransaction.security_id.in_(security_ids))
-        .where(InvestmentTransaction.account_id.in_(accts))
-        .where(InvestmentTransaction.date < anchor_date)
-        .where(InvestmentTransaction.date >= start_date)
-        .order_by(InvestmentTransaction.date.desc())
-    ).scalars().all()
+    backward_tx = (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.security_id.in_(security_ids))
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.date < anchor_date)
+            .where(InvestmentTransaction.date >= start_date)
+            .order_by(InvestmentTransaction.date.desc())
+        )
+        .scalars()
+        .all()
+    )
 
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     cursor_date = anchor_date - timedelta(days=1)
@@ -417,9 +420,7 @@ def _backfill_subset_values(
         cursor_date -= timedelta(days=1)
         daily_quantities[cursor_date] = dict(rolling)
 
-    return _value_subset_with_prices(
-        session, daily_quantities, security_ids, start_date, end_date
-    )
+    return _value_subset_with_prices(session, daily_quantities, security_ids, start_date, end_date)
 
 
 def _value_subset_with_prices(
@@ -437,9 +438,11 @@ def _value_subset_with_prices(
     if not relevant_dates:
         return {}
 
-    securities = session.execute(
-        select(Security).where(Security.security_id.in_(security_ids))
-    ).scalars().all()
+    securities = (
+        session.execute(select(Security).where(Security.security_id.in_(security_ids)))
+        .scalars()
+        .all()
+    )
     sec_meta: dict[int, Security] = {s.security_id: s for s in securities}
 
     price_rows = session.execute(
@@ -493,13 +496,17 @@ def _daily_internal_index_cashflows(
     accts = active_account_ids(session)
     if not accts:
         return {}
-    rows = session.execute(
-        select(InvestmentTransaction)
-        .where(InvestmentTransaction.security_id.in_(security_ids))
-        .where(InvestmentTransaction.account_id.in_(accts))
-        .where(InvestmentTransaction.date >= start_date)
-        .where(InvestmentTransaction.date <= end_date)
-    ).scalars().all()
+    rows = (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.security_id.in_(security_ids))
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.date >= start_date)
+            .where(InvestmentTransaction.date <= end_date)
+        )
+        .scalars()
+        .all()
+    )
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
     for tx in rows:
         if tx.amount is None:
@@ -549,9 +556,7 @@ def _policy_matched_value(
 
     # Initial lot at start_date: split base_value across priceable tickers,
     # renormalized to sum to 1.
-    initial_lot = _build_lot_renormalized(
-        base_value, weights, benchmark_series, start_date
-    )
+    initial_lot = _build_lot_renormalized(base_value, weights, benchmark_series, start_date)
     if not initial_lot:
         return {}
     lots: list[dict[str, Decimal]] = [initial_lot]
@@ -560,9 +565,7 @@ def _policy_matched_value(
     for current_date in sorted_dates:
         cf = daily_cashflow.get(current_date, Decimal(0))
         if cf != 0:
-            cf_lot = _build_lot_renormalized(
-                cf, weights, benchmark_series, current_date
-            )
+            cf_lot = _build_lot_renormalized(cf, weights, benchmark_series, current_date)
             if cf_lot:
                 lots.append(cf_lot)
 
@@ -570,9 +573,7 @@ def _policy_matched_value(
         total = Decimal(0)
         for lot in lots:
             for ticker, qty in lot.items():
-                price_today = _last_known_price(
-                    benchmark_series.get(ticker, {}), current_date
-                )
+                price_today = _last_known_price(benchmark_series.get(ticker, {}), current_date)
                 if price_today is None:
                     continue
                 total += qty * price_today
@@ -705,21 +706,18 @@ def _modified_dietz_series(
     return out
 
 
-def _earliest_observed_date(
-    session: Session, start_date: date, end_date: date
-) -> date | None:
+def _earliest_observed_date(session: Session, start_date: date, end_date: date) -> date | None:
     """First date in the window with an actual `holdings_snapshots` row.
 
     Earlier values (if any) come from transaction-walk reconstruction, which
     is what we warn about. Returns None if no forward snapshot lives in the
     window — the entire chart is then modeled.
     """
-    earliest = session.execute(
+    return session.execute(
         select(func.min(HoldingSnapshot.snapshot_date))
         .where(HoldingSnapshot.snapshot_date >= start_date)
         .where(HoldingSnapshot.snapshot_date <= end_date)
     ).scalar_one_or_none()
-    return earliest
 
 
 def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
@@ -1133,9 +1131,7 @@ def _daily_portfolio_value(
     return merged
 
 
-def _cached_daily_values(
-    session: Session, start_date: date, end_date: date
-) -> dict[date, Decimal]:
+def _cached_daily_values(session: Session, start_date: date, end_date: date) -> dict[date, Decimal]:
     rows = session.execute(
         select(PortfolioValueDaily.date, PortfolioValueDaily.total_value)
         .where(PortfolioValueDaily.date >= start_date)
@@ -1206,21 +1202,25 @@ def _backfill_values_from_transactions(
 
     positions = _anchor_positions(session, anchor_date)
     cash_equivalent_security_ids = frozenset(
-        session.execute(
-            select(Security.security_id).where(Security.is_cash_equivalent.is_(True))
-        ).scalars().all()
+        session.execute(select(Security.security_id).where(Security.is_cash_equivalent.is_(True)))
+        .scalars()
+        .all()
     )
     tx_overrides = _load_transaction_overrides(session)
     # Walk EVERY transaction in window — pure-cash ones (no security_id)
     # are needed for the cash-adjustment series even though they don't
     # affect positions.
-    backward_tx = session.execute(
-        select(InvestmentTransaction)
-        .where(InvestmentTransaction.account_id.in_(accts))
-        .where(InvestmentTransaction.date < anchor_date)
-        .where(InvestmentTransaction.date >= start_date)
-        .order_by(InvestmentTransaction.date.desc())
-    ).scalars().all()
+    backward_tx = (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.date < anchor_date)
+            .where(InvestmentTransaction.date >= start_date)
+            .order_by(InvestmentTransaction.date.desc())
+        )
+        .scalars()
+        .all()
+    )
 
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     daily_cash_adj: dict[date, Decimal] = {}
@@ -1378,9 +1378,7 @@ def _reverse_transaction_cash_delta(
         return Decimal(0)
 
     if _is_external_cashflow(tx.type, tx.subtype, override=override, name=tx.name):
-        return -_signed_cashflow(
-            tx.type, tx.subtype, amount, override=override, name=tx.name
-        )
+        return -_signed_cashflow(tx.type, tx.subtype, amount, override=override, name=tx.name)
 
     if tx.type == InvestmentTransactionType.BUY.value:
         return magnitude
@@ -1441,9 +1439,11 @@ def _value_quantities_with_prices(
     if not security_ids:
         return {}
 
-    securities = session.execute(
-        select(Security).where(Security.security_id.in_(security_ids))
-    ).scalars().all()
+    securities = (
+        session.execute(select(Security).where(Security.security_id.in_(security_ids)))
+        .scalars()
+        .all()
+    )
     sec_meta: dict[int, Security] = {s.security_id: s for s in securities}
 
     # Snapshot-derived fallback price per security: most recent
@@ -1503,9 +1503,7 @@ def _value_quantities_with_prices(
     return totals
 
 
-def _last_known_price(
-    series: dict[date, Decimal], target_date: date
-) -> Decimal | None:
+def _last_known_price(series: dict[date, Decimal], target_date: date) -> Decimal | None:
     """Forward-fill: most recent price on or before `target_date`."""
     candidates = [d for d in series if d <= target_date]
     if not candidates:

@@ -32,9 +32,13 @@ def run() -> tuple[int, list[tuple[int, str | None]]]:
 
 
 def _delete_non_investment_accounts(session: Session) -> int:
-    to_delete = session.execute(
-        select(Account.account_id).where(Account.type.notin_(INVESTMENT_ACCOUNT_TYPES))
-    ).scalars().all()
+    to_delete = (
+        session.execute(
+            select(Account.account_id).where(Account.type.notin_(INVESTMENT_ACCOUNT_TYPES))
+        )
+        .scalars()
+        .all()
+    )
     if not to_delete:
         return 0
     session.execute(delete(Account).where(Account.account_id.in_(to_delete)))
@@ -58,6 +62,8 @@ if __name__ == "__main__":
         print(f"\n{len(empty_items)} Item(s) now have 0 investment accounts:")
         for item_id, name in empty_items:
             print(f"  - item_id={item_id}  institution={name or '<unknown>'}")
-        print("\nThese Items are still occupying Plaid Trial slots. Unlink via the UI to free them.")
+        print(
+            "\nThese Items are still occupying Plaid Trial slots. Unlink via the UI to free them."
+        )
     else:
         print("all linked Items still have at least one investment account.")

@@ -37,11 +37,6 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.models import PolicyWeight
 from portfolio_tracker.services.performance import (
     _benchmark_series,
-    _broad_index_security_ids,
-    _daily_external_cashflows,
-    _daily_internal_index_cashflows,
-    _daily_portfolio_value,
-    _daily_subset_value,
 )
 from portfolio_tracker.services.position_alpha import compute_position_alpha
 
@@ -116,7 +111,9 @@ def compute_beta(
     # forward, applies prices daily. This is the same series the dashboard's
     # main chart renders.
     pa_result = compute_position_alpha(
-        session, start_date, end_date,
+        session,
+        start_date,
+        end_date,
         exclude_broad_index=exclude_index_etfs,
     )
     daily_value: dict[date, Decimal] = {
@@ -159,9 +156,7 @@ def compute_beta(
     info_ratio, tracking_error = _information_ratio(paired_p, paired_m)
     p_vol = _annualized_volatility(paired_p)
     m_vol = _annualized_volatility(paired_m)
-    alpha_annual = (
-        alpha * _TRADING_DAYS_PER_YEAR * 100 if alpha is not None else None
-    )
+    alpha_annual = alpha * _TRADING_DAYS_PER_YEAR * 100 if alpha is not None else None
 
     if len(paired_p) < 30:
         notes.append(
@@ -254,9 +249,7 @@ def _policy_daily_returns(
         return {}
     component_returns: dict[str, dict[date, Decimal]] = {}
     for ticker in weights:
-        component_returns[ticker] = _benchmark_daily_returns(
-            benchmark_series.get(ticker, {})
-        )
+        component_returns[ticker] = _benchmark_daily_returns(benchmark_series.get(ticker, {}))
     all_dates: set[date] = set()
     for series in component_returns.values():
         all_dates.update(series)
@@ -330,7 +323,7 @@ def _ols(
         return (None, None, None, None)
     mean_p = sum(p) / n
     mean_m = sum(m) / n
-    cov = sum((pi - mean_p) * (mi - mean_m) for pi, mi in zip(p, m)) / n
+    cov = sum((pi - mean_p) * (mi - mean_m) for pi, mi in zip(p, m, strict=False)) / n
     var_m = sum((mi - mean_m) ** 2 for mi in m) / n
     var_p = sum((pi - mean_p) ** 2 for pi in p) / n
     if var_m == 0:
@@ -353,7 +346,7 @@ def _sharpe(returns: list[float], rf_daily: float) -> float | None:
     var = sum((r - mean) ** 2 for r in excess) / (n - 1)
     if var == 0:
         return None
-    return (mean / var ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+    return (mean / var**0.5) * (_TRADING_DAYS_PER_YEAR**0.5)
 
 
 def _sortino(returns: list[float], rf_daily: float) -> float | None:
@@ -367,12 +360,10 @@ def _sortino(returns: list[float], rf_daily: float) -> float | None:
     downside_var = sum(d * d for d in downside) / n
     if downside_var == 0:
         return None
-    return (mean / downside_var ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+    return (mean / downside_var**0.5) * (_TRADING_DAYS_PER_YEAR**0.5)
 
 
-def _information_ratio(
-    p: list[float], m: list[float]
-) -> tuple[float | None, float | None]:
+def _information_ratio(p: list[float], m: list[float]) -> tuple[float | None, float | None]:
     """IR = mean(R_p - R_b) / σ(R_p - R_b), annualized.
 
     Returns (ir, tracking_error_annualized). Tracking error is reported
@@ -380,13 +371,13 @@ def _information_ratio(
     """
     if len(p) < 2:
         return (None, None)
-    diff = [pi - mi for pi, mi in zip(p, m)]
+    diff = [pi - mi for pi, mi in zip(p, m, strict=False)]
     mean = sum(diff) / len(diff)
     var = sum((d - mean) ** 2 for d in diff) / (len(diff) - 1)
     if var == 0:
         return (None, 0.0)
-    te = var ** 0.5 * (_TRADING_DAYS_PER_YEAR ** 0.5)
-    ir = (mean / var ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+    te = var**0.5 * (_TRADING_DAYS_PER_YEAR**0.5)
+    ir = (mean / var**0.5) * (_TRADING_DAYS_PER_YEAR**0.5)
     return (ir, te)
 
 
@@ -396,4 +387,4 @@ def _annualized_volatility(returns: list[float]) -> float | None:
         return None
     mean = sum(returns) / n
     variance = sum((r - mean) ** 2 for r in returns) / (n - 1)
-    return (variance ** 0.5) * (_TRADING_DAYS_PER_YEAR ** 0.5)
+    return (variance**0.5) * (_TRADING_DAYS_PER_YEAR**0.5)
