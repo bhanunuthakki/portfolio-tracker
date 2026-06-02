@@ -545,8 +545,8 @@ class EarningsCalendar(Base):
 
 class TaxFormImport(Base):
     """One row per imported 1099 PDF. Parent record for all augmentative tax
-    data. Owner attribution is via `recipient_name` so future Elaine 1099s
-    fit the same schema without any change."""
+    data. Owner attribution is via `recipient_name`, so a second household
+    member's 1099s fit the same schema without any change."""
 
     __tablename__ = "tax_form_imports"
     __table_args__ = (Index("ix_tax_form_imports_broker_year", "broker", "tax_year"),)

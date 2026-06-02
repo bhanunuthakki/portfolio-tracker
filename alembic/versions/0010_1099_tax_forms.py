@@ -6,8 +6,8 @@ broker-sourced live data and tax-record data don't conflict, and so the UI
 can clearly attribute every piece of supplementary detail to its source 1099.
 
 Owner attribution is via `recipient_name` (free-text from the PDF header) on
-`tax_form_imports` — supports adding Elaine's future 1099s under the same
-schema without any change.
+`tax_form_imports` — supports adding a second household member's future 1099s
+under the same schema without any change.
 
 Tables:
   * tax_form_imports — one row per imported 1099 PDF (parent record)
