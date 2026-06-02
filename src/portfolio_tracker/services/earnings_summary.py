@@ -22,7 +22,6 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from datetime import date
-from functools import lru_cache
 from pathlib import Path
 
 from portfolio_tracker.config import get_settings
@@ -33,13 +32,13 @@ class TickerSummary:
     """One row's worth of enrichment from earnings-summary."""
 
     ticker: str
-    tracked: bool                       # is it in tracked_companies?
-    list_type: str | None               # "portfolio" | "watchlist" | None
-    next_earnings_date: date | None     # from expected_earnings
-    thesis_status: str | None           # "ok" | "breach" | etc.
-    thesis_summary: str | None          # short thesis text
-    latest_brief_iso_date: str | None   # "2026-05-13" — filename component
-    has_brief: bool                     # True if latest_brief_iso_date is set
+    tracked: bool  # is it in tracked_companies?
+    list_type: str | None  # "portfolio" | "watchlist" | None
+    next_earnings_date: date | None  # from expected_earnings
+    thesis_status: str | None  # "ok" | "breach" | etc.
+    thesis_summary: str | None  # short thesis text
+    latest_brief_iso_date: str | None  # "2026-05-13" — filename component
+    has_brief: bool  # True if latest_brief_iso_date is set
 
 
 def is_available() -> bool:
@@ -157,8 +156,7 @@ def _connect_readonly() -> sqlite3.Connection:
 def _tracked_companies(conn: sqlite3.Connection) -> dict[str, str]:
     """ticker -> list_type for every non-archived tracked company."""
     rows = conn.execute(
-        "SELECT ticker, list_type FROM tracked_companies "
-        "WHERE archived_at IS NULL"
+        "SELECT ticker, list_type FROM tracked_companies WHERE archived_at IS NULL"
     ).fetchall()
     return {t.upper(): lt for t, lt in rows}
 

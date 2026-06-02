@@ -121,7 +121,7 @@ class Settings(BaseSettings):
         prefix = "sqlite:///"
         if not url.startswith(prefix):
             return url
-        path_part = url[len(prefix):]
+        path_part = url[len(prefix) :]
         if path_part.startswith("./") or path_part.startswith(".\\"):
             absolute = (PROJECT_ROOT / path_part[2:]).as_posix()
             return f"{prefix}{absolute}"

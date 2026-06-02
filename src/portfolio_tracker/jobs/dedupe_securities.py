@@ -41,8 +41,7 @@ from portfolio_tracker.config import get_settings
 def find_duplicates(cur: sqlite3.Cursor) -> dict[str, list[int]]:
     """Group security_ids by ticker (only tickers with >1 row)."""
     cur.execute(
-        "SELECT ticker, security_id FROM securities "
-        "WHERE ticker IS NOT NULL AND TRIM(ticker) != ''"
+        "SELECT ticker, security_id FROM securities WHERE ticker IS NOT NULL AND TRIM(ticker) != ''"
     )
     by_ticker: dict[str, list[int]] = defaultdict(list)
     for ticker, sid in cur.fetchall():
@@ -185,9 +184,7 @@ def main() -> None:
             sids_to_drop.append(d)
             for k, v in counts.items():
                 total_aggregate[k] += v
-        print(
-            f"  {ticker}: canonical={canonical}  merged_dups={dup_sids}"
-        )
+        print(f"  {ticker}: canonical={canonical}  merged_dups={dup_sids}")
 
     # Drop duplicate rows last. With FKs satisfied (we repointed everyone),
     # this is safe.

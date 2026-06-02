@@ -25,9 +25,13 @@ from portfolio_tracker.models import Account, Item
 
 def active_account_ids(session: Session) -> frozenset[int]:
     """Return account_ids belonging to items where `is_data_active` is True."""
-    rows = session.execute(
-        select(Account.account_id)
-        .join(Item, Item.item_id == Account.item_id)
-        .where(Item.is_data_active.is_(True))
-    ).scalars().all()
+    rows = (
+        session.execute(
+            select(Account.account_id)
+            .join(Item, Item.item_id == Account.item_id)
+            .where(Item.is_data_active.is_(True))
+        )
+        .scalars()
+        .all()
+    )
     return frozenset(rows)

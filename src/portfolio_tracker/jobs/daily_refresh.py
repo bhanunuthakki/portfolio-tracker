@@ -55,6 +55,8 @@ def run() -> int:
     try:
         from portfolio_tracker.api.routes.snaptrade import (
             SnapTradeProfile,
+        )
+        from portfolio_tracker.api.routes.snaptrade import (
             sync as snaptrade_sync,
         )
 
@@ -72,10 +74,7 @@ def run() -> int:
             except HTTPException as exc:
                 # 404 = no SnapTrade user for this profile yet; that's fine.
                 if exc.status_code == 404:
-                    print(
-                        f"[daily_refresh]   snaptrade {profile.value}: "
-                        f"skipped (not configured)"
-                    )
+                    print(f"[daily_refresh]   snaptrade {profile.value}: skipped (not configured)")
                     continue
                 failures += 1
                 print(
@@ -108,8 +107,10 @@ def run() -> int:
     #    benchmarks AFTER snapshots/syncs so any newly-resolved symbols
     #    from today's transactions also flow into the pull list.
     try:
-        from datetime import date as _date, timedelta as _td
+        from datetime import timedelta as _td
+
         from portfolio_tracker.jobs import benchmarks
+
         # 30-day rolling pull is enough to keep the latest closes fresh
         # without re-fetching years of static history every day.
         rows = benchmarks.run(today - _td(days=30), today)
@@ -149,6 +150,7 @@ def run() -> int:
     #    the critical-path startup if we ever drop the dependency.
     try:
         from portfolio_tracker.jobs import earnings_calendar
+
         n = earnings_calendar.run()
         print(f"[daily_refresh]   earnings_calendar: {n} rows refreshed")
     except Exception:

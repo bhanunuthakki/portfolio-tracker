@@ -66,10 +66,8 @@ def _resolve_sqlite_path() -> Path:
     url = get_settings().resolved_database_url
     prefix = "sqlite:///"
     if not url.startswith(prefix):
-        raise ValueError(
-            f"backup job only supports SQLite (got DATABASE_URL prefix in {url!r})"
-        )
-    return Path(url[len(prefix):])
+        raise ValueError(f"backup job only supports SQLite (got DATABASE_URL prefix in {url!r})")
+    return Path(url[len(prefix) :])
 
 
 def _prune(backups_dir: Path, keep_days: int) -> None:
@@ -86,9 +84,7 @@ def _prune(backups_dir: Path, keep_days: int) -> None:
 
 
 def main(
-    keep: int | None = typer.Option(
-        None, help="If set, delete backup files older than KEEP days."
-    ),
+    keep: int | None = typer.Option(None, help="If set, delete backup files older than KEEP days."),
 ) -> None:
     target = run(keep_days=keep)
     size_mb = target.stat().st_size / (1024 * 1024)
