@@ -8,6 +8,15 @@ for trade decisions.
 Runs entirely on localhost. No multi-tenant auth, no cloud dependencies except
 your aggregator(s) and yfinance.
 
+> **Anonymized public template.** This repository is scrubbed of personal data
+> — no names, addresses, account numbers, balances, holdings, or tax records,
+> in either the current tree or its git history (history was rewritten to
+> purge it). All portfolio-specific data and one-off scripts live locally
+> (gitignored); the repo ships generic templates instead (`.env.example`,
+> `CIO_CONTEXT.example.md`, `scripts/import_1099_example.py`). See
+> **Privacy — what stays local** below. If you fork it, keep it that way —
+> never commit PII.
+
 ## What it does
 
 **Aggregation**
