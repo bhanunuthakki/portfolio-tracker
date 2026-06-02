@@ -36,7 +36,6 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
     "pyright>=1.1.380",
-    "basedpyright>=1.10",
 ]
 
 [tool.setuptools.packages.find]
@@ -85,18 +84,16 @@ extend-immutable-calls = [
 include = ["src"]
 exclude = ["frontend", "alembic/versions"]
 pythonVersion = "3.11"
+# Resolve third-party imports (fastapi, sqlalchemy, plaid, …) from the
+# project virtualenv so strict mode doesn't choke on unresolved deps.
+# Assumes the conventional `.venv` at the repo root; override on the CLI
+# with `--pythonpath <interpreter>` when the venv lives elsewhere (e.g.
+# git worktrees, where `.venv` only exists in the main checkout).
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
-
-[tool.basedpyright]
-include = ["src"]
-exclude = ["frontend", "alembic/versions"]
-pythonVersion = "3.11"
-typeCheckingMode = "all"
-reportMissingTypeStubs = false
-reportUnknownMemberType = false
-reportAny = false
 
 [tool.pytest.ini_options]
 # Put `src/` on the path so `pytest` works from a fresh clone without an

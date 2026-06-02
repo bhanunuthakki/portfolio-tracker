@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
@@ -41,9 +41,9 @@ from portfolio_tracker.services import trade_timeline as trade_timeline_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.performance import (
-    _is_external_cashflow,
-    _load_transaction_overrides,
-    _signed_cashflow,
+    _is_external_cashflow,  # pyright: ignore[reportPrivateUsage]
+    _load_transaction_overrides,  # pyright: ignore[reportPrivateUsage]
+    _signed_cashflow,  # pyright: ignore[reportPrivateUsage]
     effective_classification,
 )
 from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
@@ -503,23 +503,23 @@ def cashflow_audit(
         )
         start_date = earliest_tx or (end_date - timedelta(days=730))
 
-    rows = (
-        session.execute(
-            select(
-                InvestmentTransaction.type,
-                InvestmentTransaction.subtype,
-                func.count(InvestmentTransaction.plaid_investment_transaction_id),
-                func.sum(InvestmentTransaction.amount),
-            )
-            .where(InvestmentTransaction.date >= start_date)
-            .where(InvestmentTransaction.date <= end_date)
-            .where(InvestmentTransaction.account_id.in_(accts))
-            .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-            .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-        ).all()
-        if accts
-        else []
-    )
+    rows: list[Any] = []
+    if accts:
+        rows = list(
+            session.execute(
+                select(
+                    InvestmentTransaction.type,
+                    InvestmentTransaction.subtype,
+                    func.count(InvestmentTransaction.plaid_investment_transaction_id),
+                    func.sum(InvestmentTransaction.amount),
+                )
+                .where(InvestmentTransaction.date >= start_date)
+                .where(InvestmentTransaction.date <= end_date)
+                .where(InvestmentTransaction.account_id.in_(accts))
+                .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
+                .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
+            ).all()
+        )
 
     groups: list[CashflowGroupOut] = []
     net_in = Decimal(0)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any, cast
 
 import typer
 import yfinance as yf
@@ -50,7 +51,7 @@ def _fetch_symbol(session: Session, symbol: str, start_date: date, end_date: dat
     if history.empty:
         return 0
     rows_written = 0
-    for ts, row in history.iterrows():
+    for ts, row in cast(Any, history.iterrows()):
         bar_date = ts.date() if hasattr(ts, "date") else ts
         close = row.get("Close")
         if close is None or close != close:  # NaN check

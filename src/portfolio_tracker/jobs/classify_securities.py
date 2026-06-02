@@ -19,6 +19,7 @@ yfinance for securities it has never classified — a no-op on a steady book.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from typing import cast
 
 import typer
 import yfinance as yf
@@ -44,10 +45,10 @@ def _fetch_info(ticker: str) -> Mapping[str, object]:
     missing classification is non-fatal, so we swallow and report `no_data`.
     """
     try:
-        info = yf.Ticker(ticker).info
+        info = cast(object, yf.Ticker(ticker).info)
     except Exception:
         return {}
-    return info if isinstance(info, dict) else {}
+    return cast("dict[str, object]", info) if isinstance(info, dict) else {}
 
 
 def _classification_for(

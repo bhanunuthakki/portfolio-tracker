@@ -26,6 +26,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import TypedDict
 
 from pydantic import BaseModel
 from sqlalchemy import and_, func, select
@@ -219,9 +220,7 @@ def _closed_lot_rows(
         stmt = stmt.where(TaxFormImport.tax_year == year)
 
     out: list[TimelineRow] = []
-    for lot, imp in session.execute(stmt).all():
-        if lot.disposed_date is None:
-            continue  # broken row; skip
+    for lot, imp in session.execute(stmt).tuples().all():
         acquired = lot.acquired_date
         acquired_approx = lot.acquired_various or acquired is None
         if acquired_approx:
@@ -250,7 +249,7 @@ def _closed_lot_rows(
                 row_kind="closed",
                 ticker=lot.symbol,
                 name=None,
-                description=lot.description,
+                description=lot.description or "",
                 acquired_date=acquired,
                 disposed_date=lot.disposed_date,
                 acquired_approx=acquired_approx,
@@ -274,6 +273,24 @@ def _closed_lot_rows(
             )
         )
     return out
+
+
+class _OpenAgg(TypedDict):
+    qty: Decimal
+    value: Decimal
+    cost: Decimal
+    name: str | None
+    dated_overrides: list[tuple[int, Decimal, date]]
+
+
+def _new_open_agg() -> _OpenAgg:
+    return {
+        "qty": Decimal("0"),
+        "value": Decimal("0"),
+        "cost": Decimal("0"),
+        "name": None,
+        "dated_overrides": [],
+    }
 
 
 def _open_position_rows(
@@ -330,15 +347,7 @@ def _open_position_rows(
     # the matched-flow calc can fire a synthetic SPY buy PER override at
     # the override's own date, rather than collapsing to one ticker-wide
     # synthetic buy anchored to an aggregate fallback date.
-    by_ticker: dict[str, dict] = defaultdict(
-        lambda: {
-            "qty": Decimal("0"),
-            "value": Decimal("0"),
-            "cost": Decimal("0"),
-            "name": None,
-            "dated_overrides": [],
-        }
-    )
+    by_ticker: defaultdict[str, _OpenAgg] = defaultdict(_new_open_agg)
     for snap, sec in session.execute(stmt).all():
         if not sec.ticker:
             continue
@@ -673,7 +682,7 @@ def _matched_flow_open_position(
 
 def _first_buy_per_ticker(
     session: Session,
-    account_ids: list[int],
+    account_ids: frozenset[int],
     tickers: list[str],
 ) -> dict[str, date]:
     if not tickers:

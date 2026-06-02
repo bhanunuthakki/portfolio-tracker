@@ -51,7 +51,7 @@ def find_duplicates(cur: sqlite3.Cursor) -> dict[str, list[int]]:
 
 def pick_canonical(cur: sqlite3.Cursor, sids: list[int]) -> int:
     """Canonical = sid with most price rows. Tiebreak: lowest sid."""
-    candidates = []
+    candidates: list[tuple[int, int]] = []
     for sid in sids:
         cur.execute("SELECT COUNT(*) FROM prices WHERE security_id = ?", (sid,))
         candidates.append((sid, cur.fetchone()[0]))

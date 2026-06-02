@@ -31,9 +31,9 @@ from portfolio_tracker.models import (
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.performance import (
-    _ABNORMAL_DAILY_RETURN,
-    _daily_external_cashflows,
-    _daily_portfolio_value,
+    _ABNORMAL_DAILY_RETURN,  # pyright: ignore[reportPrivateUsage]
+    _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
+    _daily_portfolio_value,  # pyright: ignore[reportPrivateUsage]
 )
 
 # --- severity values --------------------------------------------------------

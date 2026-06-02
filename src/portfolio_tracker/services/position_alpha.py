@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import TypedDict
 
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -113,6 +114,17 @@ class PositionAlphaResult(BaseModel):
     has_policy: bool = False
 
 
+class _TickerAgg(TypedDict):
+    name: str | None
+    buys: list[tuple[date, Decimal]]
+    sells: list[tuple[date, Decimal]]
+    sid: int | None
+
+
+def _new_ticker_agg() -> _TickerAgg:
+    return {"name": None, "buys": [], "sells": [], "sid": None}
+
+
 def compute_position_alpha(
     session: Session,
     start_date: date,
@@ -175,9 +187,7 @@ def compute_position_alpha(
         .where(Security.is_cash_equivalent.is_(False))
     ).all()
 
-    by_ticker: dict[str, dict] = defaultdict(
-        lambda: {"name": None, "buys": [], "sells": [], "sid": None}
-    )
+    by_ticker: defaultdict[str, _TickerAgg] = defaultdict(_new_ticker_agg)
     for ticker, name, sid, tx_date, tx_type, amount in tx_rows:
         if amount is None or ticker is None:
             continue
@@ -413,7 +423,7 @@ def _counterfactual_pl(
     sold_sum: Decimal,
 ) -> Decimal:
     """Run the dollar-matched-cashflow counterfactual against one benchmark series."""
-    if start_price is None or start_price == 0 or end_price is None:
+    if start_price == 0:
         return Decimal(0)
     shares = (v_start / start_price) if v_start != 0 else Decimal(0)
     for d, a in buys:
@@ -594,7 +604,7 @@ def _compute_alpha_series(
             prices[t][d] = Decimal(c)
 
     # Group txs by date for walk-forward
-    txs_by_date: dict[date, list] = defaultdict(list)
+    txs_by_date: defaultdict[date, list[InvestmentTransaction]] = defaultdict(list)
     for tx in tx_rows:
         txs_by_date[tx.date].append(tx)
 
@@ -607,6 +617,8 @@ def _compute_alpha_series(
         # isolates market-driven moves from trade-driven qty changes.
         today_cashflow = Decimal(0)
         for tx in txs_by_date.get(cur, []):
+            if tx.security_id is None:
+                continue
             t = sid_to_ticker.get(tx.security_id)
             if t is None:
                 continue
@@ -616,8 +628,6 @@ def _compute_alpha_series(
                 px = _last_known_price(prices.get(t, {}), cur)
                 if px is not None:
                     today_cashflow += qty_delta * px
-            if tx.amount is None:
-                continue
             amt = abs(Decimal(tx.amount))
             if amt == 0:
                 continue
@@ -759,7 +769,7 @@ def _qty_from_snapshot_forward(
             .all()
         )
         for tx in forward_tx:
-            if tx.security_id is None or tx.quantity is None:
+            if tx.security_id is None:
                 continue
             delta = _forward_quantity_delta(tx)
             if delta is not None:
@@ -801,7 +811,7 @@ def _qty_walk_back(
         .all()
     )
     for tx in backward_tx:
-        if tx.security_id is None or tx.quantity is None:
+        if tx.security_id is None:
             continue
         delta = _reverse_quantity_delta(tx)
         if delta is not None:
@@ -830,8 +840,6 @@ def _qty_walk_back(
 
 
 def _forward_quantity_delta(tx: InvestmentTransaction) -> Decimal | None:
-    if tx.quantity is None:
-        return None
     magnitude = abs(Decimal(tx.quantity))
     if magnitude == 0:
         return None

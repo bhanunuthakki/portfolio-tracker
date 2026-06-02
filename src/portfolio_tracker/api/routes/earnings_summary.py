@@ -27,8 +27,8 @@ def status_endpoint() -> JSONResponse:
     return JSONResponse(
         content={
             "available": svc.is_available(),
-            "db_path": str(svc._db_path()),  # read-only debug field
-            "output_dir": str(svc._output_dir()),
+            "db_path": str(svc._db_path()),  # pyright: ignore[reportPrivateUsage]
+            "output_dir": str(svc._output_dir()),  # pyright: ignore[reportPrivateUsage]
         }
     )
 

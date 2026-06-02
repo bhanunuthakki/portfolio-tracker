@@ -38,7 +38,9 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import HoldingSnapshot, PortfolioValueDaily
-from portfolio_tracker.services.performance import _daily_portfolio_value
+from portfolio_tracker.services.performance import (
+    _daily_portfolio_value,  # pyright: ignore[reportPrivateUsage]
+)
 
 # Maximum bootstrap span — match Plaid's investment-transaction retention
 # so we don't try to reconstruct dates with no source data anyway.
