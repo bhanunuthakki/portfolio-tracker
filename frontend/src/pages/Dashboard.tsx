@@ -3,9 +3,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { api } from "@/api/client";
-import { CIOChatCard } from "@/components/CIOChatCard";
-import { DecisionLogCard } from "@/components/DecisionLogCard";
-import { LatestBriefCard } from "@/components/LatestBriefCard";
 import { PositionAlphaChart } from "@/components/PositionAlphaChart";
 import type { BenchmarkKey } from "@/components/PositionAlphaChart";
 import { PositionAlphaTable } from "@/components/PositionAlphaTable";
@@ -440,12 +437,6 @@ export function Dashboard(): JSX.Element {
         excludeIndexEtfs={excludeIndexEtfs}
         reserveAmount={reserveAmount}
       />
-
-      <CIOChatCard />
-
-      <LatestBriefCard />
-
-      <DecisionLogCard />
     </div>
   );
 }

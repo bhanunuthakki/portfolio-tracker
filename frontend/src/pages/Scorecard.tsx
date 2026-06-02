@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { api } from "@/api/client";
+import { DecisionLogCard } from "@/components/DecisionLogCard";
 import {
   Card,
   EmptyState,
@@ -118,6 +119,7 @@ export function Scorecard(): JSX.Element {
           </Panel>
         </>
       )}
+      <DecisionLogCard />
     </div>
   );
 }
