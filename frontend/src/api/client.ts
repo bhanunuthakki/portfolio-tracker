@@ -37,6 +37,7 @@ import type {
   TradeTagIn,
   TradeTagOut,
   EarningsRow,
+  QueueItem,
 } from "@/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -361,6 +362,22 @@ export const api = {
   },
 
   coachingTips: (): Promise<CoachingResult> => request("/api/coaching/tips"),
+
+  // ---- Cockpit (P3 action queue) --------------------------------------
+
+  cockpitQueue: (): Promise<QueueItem[]> => request("/api/cockpit/queue"),
+
+  cockpitRefresh: (useLlm: boolean): Promise<QueueItem[]> =>
+    request(`/api/cockpit/queue/refresh?use_llm=${useLlm}`, { method: "POST" }),
+
+  cockpitAccept: (id: number): Promise<QueueItem> =>
+    request(`/api/cockpit/items/${id}/accept`, { method: "POST" }),
+
+  cockpitDismiss: (id: number): Promise<QueueItem> =>
+    request(`/api/cockpit/items/${id}/dismiss`, { method: "POST" }),
+
+  cockpitSnooze: (id: number, days = 7): Promise<QueueItem> =>
+    request(`/api/cockpit/items/${id}/snooze?days=${days}`, { method: "POST" }),
 
   // ---- Human-capital overlap buckets ----------------------------------
 
