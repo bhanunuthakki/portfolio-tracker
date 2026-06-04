@@ -44,6 +44,11 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# `portfolio_tracker` lives under `src/`, so tell ruff where first-party code
+# is. Without this, ruff classifies `portfolio_tracker.*` imports as
+# third-party and collapses the blank line separating them from real
+# third-party imports (e.g. in alembic/env.py), breaking import grouping.
+src = ["src"]
 extend-exclude = ["alembic/versions", "frontend"]
 
 [tool.ruff.lint]
