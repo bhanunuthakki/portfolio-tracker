@@ -862,6 +862,13 @@ class ActionQueueItem(Base):
     a regeneration updates the same row instead of spawning a duplicate — and a
     dismissal or snooze sticks across refreshes. Status flow:
     `open` -> accepted | dismissed | snoozed; vanished open items -> `resolved`.
+
+    Once an item is accepted, the daily refresh reconciles the commitment against
+    the real position change via `execution_status`
+    (`pending` -> `executed` | `partial` | `not_executed`, or `n/a` for
+    non-position actions). `execution_overridden` records that the owner manually
+    set the status, so the fuzzy auto-matcher leaves that row alone on the next
+    refresh.
     """
 
     __tablename__ = "action_queue"
@@ -891,6 +898,14 @@ class ActionQueueItem(Base):
     commitment_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Execution reconciliation (0020): did the accepted trade actually happen?
+    execution_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    executed_weight_pct: Mapped[Decimal | None] = mapped_column(Numeric(9, 4), nullable=True)
+    execution_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_overridden: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
