@@ -380,6 +380,11 @@ export const api = {
   cockpitSnooze: (id: number, days = 7): Promise<QueueItem> =>
     request(`/api/cockpit/items/${id}/snooze?days=${days}`, { method: "POST" }),
 
+  cockpitSetExecution: (id: number, status: string): Promise<QueueItem> =>
+    request(`/api/cockpit/items/${id}/execution?status=${status}`, {
+      method: "POST",
+    }),
+
   thesisHealth: (): Promise<ThesisHealthRow[]> =>
     request("/api/cockpit/thesis-health"),
 
