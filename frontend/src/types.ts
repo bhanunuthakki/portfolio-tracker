@@ -169,7 +169,19 @@ export interface QueueItem {
   snooze_until: string | null;
   accepted_at: string | null;
   dismissed_at: string | null;
+  execution_status: ExecutionStatus;
+  executed_at: string | null;
+  executed_weight_pct: number | null;
+  execution_notes: string | null;
+  execution_overridden: boolean;
 }
+
+export type ExecutionStatus =
+  | "pending"
+  | "executed"
+  | "partial"
+  | "not_executed"
+  | "n/a";
 
 export interface ThesisHealthRow {
   ticker: string;
