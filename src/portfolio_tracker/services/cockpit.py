@@ -21,7 +21,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import cast
+from typing import NamedTuple, cast
 
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -561,6 +561,11 @@ class QueueItemOut(BaseModel):
     snooze_until: date | None
     accepted_at: datetime | None
     dismissed_at: datetime | None
+    execution_status: str
+    executed_at: datetime | None
+    executed_weight_pct: float | None
+    execution_notes: str | None
+    execution_overridden: bool
 
 
 def _signature(item: ActionItem) -> str:
@@ -699,6 +704,13 @@ def _to_out(row: ActionQueueItem) -> QueueItemOut:
         snooze_until=row.snooze_until,
         accepted_at=row.accepted_at,
         dismissed_at=row.dismissed_at,
+        execution_status=row.execution_status,
+        executed_at=row.executed_at,
+        executed_weight_pct=(
+            float(row.executed_weight_pct) if row.executed_weight_pct is not None else None
+        ),
+        execution_notes=row.execution_notes,
+        execution_overridden=row.execution_overridden,
     )
 
 
@@ -720,6 +732,253 @@ def _loads_list(raw: str) -> list[str]:
     if not isinstance(data, list):
         return []
     return [str(x) for x in cast(list[object], data)]
+
+
+# ---------------------------------------------------------------------------
+# Execution reconciliation (accept -> trade)
+#
+# Accepting an item logs a commitment but nothing checked whether the trade
+# actually happened. On each daily refresh — after the holdings snapshot lands —
+# `reconcile_commitments` compares each accepted item's CURRENT dollar weight to
+# the weight captured at accept time and sets `execution_status` via the pure,
+# DB-free `_reconcile_one` heuristic. It is a FUZZY AUTO-MATCH WITH CORRECTION:
+# the heuristic sets it automatically, but the owner can override via
+# `set_execution_status`, which marks `execution_overridden` so the next refresh
+# leaves that row alone (manual writes are marked at the schema level, by
+# design). This is the substrate the Scorecard later grades against.
+# ---------------------------------------------------------------------------
+
+# Only these advisory verbs move a position; the rest are non-trades.
+_TRADE_ACTIONS = frozenset({"trim", "add", "exit"})
+
+# >= this relative move in the intended direction counts as executed.
+EXECUTED_REL_MOVE = 0.10
+# >= this (but < executed) counts as partial; below it is treated as price-drift
+# noise rather than a real partial fill, to avoid polluting the Scorecard grade.
+PARTIAL_REL_MOVE = 0.02
+# A still-`pending` commitment becomes `not_executed` after this many days.
+STALENESS_DAYS = 14
+# Current book weight at/under this (or a ticker absent from the snapshot)
+# counts as no longer held — an exit's success condition.
+NEGLIGIBLE_WEIGHT_PCT = 0.05
+
+_WEIGHT_EPS = 1e-9
+
+# Statuses the manual-correction endpoint accepts.
+EXECUTION_STATUSES = frozenset({"pending", "executed", "partial", "not_executed", "n/a"})
+
+
+class ReconResult(NamedTuple):
+    """Outcome of the pure reconciliation heuristic: a status + a human note."""
+
+    status: str
+    notes: str
+
+
+def _fmt_pct(x: float) -> str:
+    return f"{x:.1f}%"
+
+
+def _rel_move(accept_weight: float, current_weight: float) -> float:
+    """Signed relative change in book weight from accept-time to now.
+
+    Positive => the position grew, negative => it shrank, as a fraction of the
+    accept weight. A ~zero accept weight is guarded: a position that appeared
+    from nothing reports +1.0; one that stayed at ~zero reports 0.0.
+    """
+    if accept_weight <= _WEIGHT_EPS:
+        return 1.0 if current_weight > _WEIGHT_EPS else 0.0
+    return (current_weight - accept_weight) / accept_weight
+
+
+def _reconcile_one(
+    action: str,
+    accept_weight: float,
+    current_weight: float,
+    held: bool,
+    days_since_accept: int,
+) -> ReconResult:
+    """Pure execution heuristic for one commitment — no DB, fully unit-testable.
+
+    Only trim/add/exit affect a position; everything else is `n/a`. A trim/add
+    is `executed` once book weight moved >= EXECUTED_REL_MOVE in the intended
+    direction, `partial` for a smaller-but-real directional move
+    (>= PARTIAL_REL_MOVE, which also screens out price-drift noise), and
+    otherwise `pending` until STALENESS_DAYS elapse, then `not_executed`. An
+    exit is judged by whether the name is still held at all.
+    """
+    verb = action.strip().lower()
+    if verb not in _TRADE_ACTIONS:
+        return ReconResult("n/a", f"'{verb or action}' is advisory only; no trade to reconcile.")
+
+    if verb == "exit":
+        if not held:
+            return ReconResult(
+                "executed",
+                f"Exited — no longer held (was {_fmt_pct(accept_weight)} at accept).",
+            )
+        shrink = -_rel_move(accept_weight, current_weight)
+        if shrink >= PARTIAL_REL_MOVE:
+            return ReconResult(
+                "partial",
+                f"Trimmed toward the exit ({_fmt_pct(accept_weight)} -> "
+                f"{_fmt_pct(current_weight)}) but still held.",
+            )
+        if days_since_accept >= STALENESS_DAYS:
+            return ReconResult(
+                "not_executed",
+                f"Still held at {_fmt_pct(current_weight)} {days_since_accept}d "
+                f"after accept; exit not acted on.",
+            )
+        return ReconResult("pending", f"Still held at {_fmt_pct(current_weight)}; awaiting exit.")
+
+    rel = _rel_move(accept_weight, current_weight)
+    move = -rel if verb == "trim" else rel  # progress in the intended direction
+    arrow = f"{_fmt_pct(accept_weight)} -> {_fmt_pct(current_weight)}"
+    direction = "down" if verb == "trim" else "up"
+
+    if move >= EXECUTED_REL_MOVE:
+        return ReconResult(
+            "executed", f"{verb.capitalize()} executed: weight {arrow} ({direction} {move:.0%})."
+        )
+    if move >= PARTIAL_REL_MOVE:
+        return ReconResult(
+            "partial",
+            f"{verb.capitalize()} partially done: weight {arrow} ({direction} {move:.0%}), "
+            f"short of the {EXECUTED_REL_MOVE:.0%} bar.",
+        )
+    if days_since_accept >= STALENESS_DAYS:
+        return ReconResult(
+            "not_executed",
+            f"No meaningful {direction} move ({arrow}) {days_since_accept}d after accept.",
+        )
+    return ReconResult("pending", f"Awaiting {verb}: weight {arrow} so far.")
+
+
+def reconcile_commitments(session: Session) -> int:
+    """Reconcile every accepted commitment against the current position.
+
+    Meant to run on each daily refresh AFTER the holdings snapshot lands.
+    Compares the holding's current dollar weight (via `_value_by_ticker`) to the
+    weight captured at accept time and writes the execution fields. Rows the
+    owner has manually overridden are skipped. Returns the number of accepted
+    items examined. Best-effort by contract: callers wrap it so a failure can't
+    block the rest of the refresh.
+    """
+    accepted = [r for r in session.execute(select(ActionQueueItem)).scalars() if r.status == "accepted"]
+    if not accepted:
+        return 0
+
+    value_by_ticker, _ = _value_by_ticker(session)
+    total = Decimal(0)
+    for v in value_by_ticker.values():
+        total += v
+    if total <= 0:
+        # No holdings snapshot to reconcile against — don't infer "executed"
+        # from a missing book. Leave statuses untouched until real data lands.
+        return 0
+
+    now = datetime.now(UTC)
+    examined = 0
+    for row in accepted:
+        if row.execution_overridden:
+            continue  # respect the owner's manual correction
+        examined += 1
+        c_action, c_ticker, c_weight = _parse_commitment(row.commitment_json)
+        action = c_action or row.action
+        ticker = (c_ticker or row.ticker).upper()
+        accept_weight = c_weight if c_weight is not None else float(row.weight_pct)
+
+        cur_val = value_by_ticker.get(ticker)
+        current_weight = float(cur_val / total * 100) if cur_val is not None else 0.0
+        held = current_weight > NEGLIGIBLE_WEIGHT_PCT
+        days = _days_since(row.accepted_at, now)
+
+        result = _reconcile_one(action, accept_weight, current_weight, held, days)
+        _apply_execution(row, result, current_weight=current_weight, now=now)
+
+    session.commit()
+    return examined
+
+
+def set_execution_status(session: Session, item_id: int, status: str) -> QueueItemOut:
+    """Manually correct an item's execution status (the 'correction' half of the
+    fuzzy auto-match).
+
+    Any status other than `pending` marks `execution_overridden`, freezing the
+    row against the daily reconciler. Setting it back to `pending` clears the
+    override and hands the item back to the auto-matcher. Raises ValueError on an
+    unknown id (mirrors accept/dismiss/snooze) or an invalid status.
+    """
+    norm = status.strip().lower()
+    if norm not in EXECUTION_STATUSES:
+        raise ValueError(f"invalid execution status {status!r}")
+    row = _require_item(session, item_id)
+    now = datetime.now(UTC)
+    row.execution_status = norm
+    if norm == "pending":
+        # Re-arm the auto-matcher rather than freezing the row at 'pending'.
+        row.execution_overridden = False
+        row.executed_at = None
+        row.executed_weight_pct = None
+        row.execution_notes = "Reset to auto-reconcile by the owner."
+    else:
+        row.execution_overridden = True
+        row.execution_notes = "Set manually by the owner."
+        if norm in ("executed", "partial"):
+            if row.executed_at is None:
+                row.executed_at = now
+        else:  # not_executed / n/a
+            row.executed_at = None
+            row.executed_weight_pct = None
+    row.updated_at = now
+    session.commit()
+    return _to_out(row)
+
+
+def _apply_execution(
+    row: ActionQueueItem, result: ReconResult, *, current_weight: float, now: datetime
+) -> None:
+    row.execution_status = result.status
+    row.execution_notes = result.notes
+    if result.status in ("executed", "partial"):
+        row.executed_weight_pct = Decimal(str(round(current_weight, 4)))
+        if row.executed_at is None:
+            row.executed_at = now  # stamp first detection; keep it stable thereafter
+    else:  # pending / not_executed / n/a -> no execution stamp
+        row.executed_at = None
+        row.executed_weight_pct = None
+    row.updated_at = now
+
+
+def _days_since(accepted_at: datetime | None, now: datetime) -> int:
+    if accepted_at is None:
+        return 0
+    # SQLite hands back naive datetimes even for tz-aware columns; assume UTC.
+    ref = accepted_at if accepted_at.tzinfo is not None else accepted_at.replace(tzinfo=UTC)
+    return max(0, (now - ref).days)
+
+
+def _parse_commitment(raw: str | None) -> tuple[str | None, str | None, float | None]:
+    """Pull (action, ticker, weight_pct_at_accept) out of `commitment_json`."""
+    if not raw:
+        return None, None, None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None, None, None
+    if not isinstance(data, dict):
+        return None, None, None
+    d = cast(dict[str, object], data)
+    action = d.get("action")
+    ticker = d.get("ticker")
+    weight = d.get("weight_pct_at_accept")
+    weight_f = float(weight) if isinstance(weight, (int, float)) else None
+    return (
+        action if isinstance(action, str) else None,
+        ticker if isinstance(ticker, str) else None,
+        weight_f,
+    )
 
 
 # ---------------------------------------------------------------------------

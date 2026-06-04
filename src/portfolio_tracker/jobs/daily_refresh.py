@@ -176,6 +176,22 @@ def run() -> int:
         print("[daily_refresh]   classify_securities: FAILED")
         traceback.print_exc()
 
+    # 8. Reconcile accepted cockpit commitments against the real position
+    #    change now that today's holdings snapshot is in. Best-effort: a
+    #    reconciliation failure must not block the refresh. Imported lazily to
+    #    keep the cockpit / earnings-summary deps off the critical-path startup,
+    #    matching the legs above.
+    try:
+        from portfolio_tracker.services.cockpit import reconcile_commitments
+
+        with SessionLocal() as session:
+            checked = reconcile_commitments(session)
+        print(f"[daily_refresh]   reconcile commitments: {checked} accepted item(s) checked")
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   reconcile commitments: FAILED")
+        traceback.print_exc()
+
     status = "OK" if failures == 0 else f"{failures} step(s) FAILED"
     print(f"[daily_refresh] {today} done: {status}")
     return failures

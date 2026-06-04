@@ -15,7 +15,7 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "@/components/ui";
-import type { QueueItem } from "@/types";
+import type { ExecutionStatus, QueueItem } from "@/types";
 
 /**
  * The decision cockpit — the action queue.
@@ -29,6 +29,22 @@ import type { QueueItem } from "@/types";
 
 const TIER_TONE = { act: "loss", watch: "warn", fine: "muted" } as const;
 const TIER_LABEL = { act: "Act now", watch: "Watch", fine: "Fine" } as const;
+
+// Reconciliation: how the accepted trade actually played out.
+const EXEC_TONE = {
+  pending: "muted",
+  executed: "gain",
+  partial: "warn",
+  not_executed: "loss",
+  "n/a": "muted",
+} as const;
+const EXEC_LABEL = {
+  pending: "Awaiting trade",
+  executed: "Executed",
+  partial: "Partial",
+  not_executed: "Not executed",
+  "n/a": "No trade",
+} as const;
 
 export function Cockpit(): JSX.Element {
   const qc = useQueryClient();
@@ -175,6 +191,73 @@ function QueueRow({ item }: { item: QueueItem }): JSX.Element {
         >
           Discuss
         </Link>
+      </div>
+
+      {accepted && <ExecutionPanel item={item} />}
+    </div>
+  );
+}
+
+/**
+ * For an accepted item, shows how the trade actually reconciled (auto-matched
+ * on each refresh) and lets the owner correct it. A manual correction sticks —
+ * the daily reconciler skips overridden rows.
+ */
+function ExecutionPanel({ item }: { item: QueueItem }): JSX.Element {
+  const qc = useQueryClient();
+  const setExec = useMutation({
+    mutationFn: (status: string) => api.cockpitSetExecution(item.id, status),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["cockpit-queue"] }),
+  });
+  const status: ExecutionStatus = item.execution_status;
+
+  return (
+    <div className="mt-2.5 rounded-md bg-paper px-2.5 py-2">
+      <div className="flex flex-wrap items-center gap-2 text-[11px]">
+        <span className="text-muted">Execution</span>
+        <Pill tone={EXEC_TONE[status]}>{EXEC_LABEL[status]}</Pill>
+        {item.execution_overridden && (
+          <Pill tone="muted" title="Manually set — the daily reconciler won't change it">
+            manual
+          </Pill>
+        )}
+        {item.executed_weight_pct != null && (
+          <span className="font-mono text-[10px] text-muted">
+            now {item.executed_weight_pct.toFixed(1)}%
+          </span>
+        )}
+      </div>
+
+      {item.execution_notes && (
+        <p className="mt-1 text-[11px] leading-relaxed text-muted">{item.execution_notes}</p>
+      )}
+
+      <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px]">
+        <span className="text-muted">Correct:</span>
+        <button
+          type="button"
+          disabled={setExec.isPending}
+          onClick={() => setExec.mutate("executed")}
+          className="text-accent hover:underline disabled:opacity-50"
+        >
+          Executed
+        </button>
+        <button
+          type="button"
+          disabled={setExec.isPending}
+          onClick={() => setExec.mutate("not_executed")}
+          className="text-accent hover:underline disabled:opacity-50"
+        >
+          Not executed
+        </button>
+        <button
+          type="button"
+          disabled={setExec.isPending}
+          onClick={() => setExec.mutate("pending")}
+          className="text-muted hover:underline disabled:opacity-50"
+        >
+          Reset
+        </button>
       </div>
     </div>
   );

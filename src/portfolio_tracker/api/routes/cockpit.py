@@ -6,6 +6,7 @@
 - POST /items/{id}/accept       log a commitment
 - POST /items/{id}/dismiss      drop the item (sticks across refreshes)
 - POST /items/{id}/snooze       hide for N days
+- POST /items/{id}/execution    manually correct the reconciled execution status
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import get_session
 from portfolio_tracker.services.cockpit import (
+    EXECUTION_STATUSES,
     QueueItemOut,
     Signal,
     ThesisHealthRow,
@@ -25,6 +27,7 @@ from portfolio_tracker.services.cockpit import (
     gather_signals,
     list_queue,
     refresh_queue,
+    set_execution_status,
     snooze_item,
     thesis_health,
 )
@@ -88,3 +91,30 @@ def post_snooze(
         return snooze_item(db, item_id, days=days)
     except ValueError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+
+
+@router.post("/items/{item_id}/execution", response_model=QueueItemOut)
+def post_execution(
+    item_id: int,
+    db: Annotated[Session, Depends(get_session)],
+    status: str = "pending",
+) -> QueueItemOut:
+    """Manually correct an item's execution status.
+
+    `status` is one of executed | not_executed | pending (partial / n/a also
+    accepted). Anything but `pending` freezes the row against the daily
+    auto-reconciler; `pending` hands it back to the auto-matcher.
+
+    (The `status` query param shadows the `fastapi.status` import in this scope,
+    so the HTTP codes below are plain integer literals.)
+    """
+    norm = status.strip().lower()
+    if norm not in EXECUTION_STATUSES:
+        raise HTTPException(
+            400,
+            f"invalid execution status '{status}'; expected one of {sorted(EXECUTION_STATUSES)}",
+        )
+    try:
+        return set_execution_status(db, item_id, norm)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
