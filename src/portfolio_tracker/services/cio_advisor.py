@@ -56,6 +56,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, TypedDict, cast
 
+import nh3
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -958,12 +959,51 @@ def _brief_section_guidance(key: str) -> str:
     }.get(key, "Free-form HTML.")
 
 
+# Allowlist for sanitizing model-produced brief HTML. The brief interpolates
+# Claude's output into a document that is rendered in an in-app iframe, opened
+# as a standalone `data:text/html` page (no sandbox), and emailed. A
+# prompt-injected holding/thesis name must never be able to smuggle a
+# `<script>`, `onerror=`, `<iframe>`, or `javascript:` URL through the model
+# into any of those sinks — so we permit only inline formatting tags and strip
+# everything else (and ALL event-handler / style / script / unknown attrs).
+_BRIEF_ALLOWED_TAGS: set[str] = {
+    "p", "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "td", "th",
+    "strong", "em", "b", "i",
+    "h2", "h3", "h4",
+    "code", "pre", "br", "span",
+}
+# Only harmless layout attributes on table cells — never class/style/id/on*.
+_BRIEF_ALLOWED_ATTRIBUTES: dict[str, set[str]] = {
+    "td": {"colspan", "rowspan"},
+    "th": {"colspan", "rowspan"},
+}
+
+
+def _sanitize_brief_html(html: str) -> str:
+    """Allowlist-sanitize one model-produced HTML section via `nh3`
+    (Rust/ammonia) — never a hand-rolled regex. Strips scripts, event
+    handlers, inline styles, and unknown tags/attributes while leaving the
+    permitted formatting — and any dollar figures / percentages inside it —
+    untouched (preserving the no-decimal-dollars convention)."""
+    return nh3.clean(
+        html,
+        tags=_BRIEF_ALLOWED_TAGS,
+        attributes=_BRIEF_ALLOWED_ATTRIBUTES,
+    )
+
+
 def _parse_brief_sections(raw: str) -> dict[str, str]:
     """Parse the JSON the model emitted into a dict of section_key → HTML.
 
-    Falls back gracefully if the model wrapped its output in a markdown
-    code fence or added stray text. Missing sections render as a
-    placeholder so the brief is still viewable.
+    Each section's HTML is allowlist-sanitized here (see
+    `_sanitize_brief_html`) so that ALL downstream sinks — the in-app
+    iframe, the standalone `data:text/html` link, and the emailed brief —
+    receive clean HTML from a single chokepoint. Falls back gracefully if
+    the model wrapped its output in a markdown code fence or added stray
+    text; missing sections render as a placeholder so the brief is still
+    viewable. The JSON-parse-failure branch escapes the raw text instead
+    (already inert inside a `<pre>`).
     """
     text = raw.strip()
     # Strip a leading code fence if present
@@ -988,11 +1028,22 @@ def _parse_brief_sections(raw: str) -> dict[str, str]:
             ),
         }
     typed_sections = cast("dict[str, object]", parsed)
-    return {k: str(v) for k, v in typed_sections.items() if k in dict(_BRIEF_SECTIONS)}
+    return {
+        k: _sanitize_brief_html(str(v))
+        for k, v in typed_sections.items()
+        if k in dict(_BRIEF_SECTIONS)
+    }
 
 
 def _render_brief_html(period_yyyymm: str, snap: FactsSnapshot, sections: dict[str, str]) -> str:
-    """Wrap the LLM section HTML in a consistent stylesheet + scaffold."""
+    """Wrap the LLM section HTML in a consistent stylesheet + scaffold.
+
+    Section content is already allowlist-sanitized upstream in
+    `_parse_brief_sections`. The section labels are hardcoded, but
+    `period_yyyymm` reaches here straight from a request query param
+    (`POST /briefs/generate?period_yyyymm=...`), so it is HTML-escaped
+    before interpolation to keep this scaffold injection-free end to end.
+    """
     rendered_sections: list[str] = []
     for key, label in _BRIEF_SECTIONS:
         content = sections.get(key, f"<p><em>{label} not produced by the model.</em></p>")
@@ -1000,13 +1051,14 @@ def _render_brief_html(period_yyyymm: str, snap: FactsSnapshot, sections: dict[s
             f'<section id="{key}">\n  <h2>{label}</h2>\n  {content}\n</section>'
         )
     body = "\n\n".join(rendered_sections)
+    period_label = _escape(period_yyyymm)
     portfolio_total_fmt = f"${snap.portfolio_total_value:,.0f}"
     today_iso = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>CIO Brief · {period_yyyymm}</title>
+  <title>CIO Brief · {period_label}</title>
   <style>
     body {{
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
@@ -1080,7 +1132,7 @@ def _render_brief_html(period_yyyymm: str, snap: FactsSnapshot, sections: dict[s
 </head>
 <body>
   <header class="brief-header">
-    <h1>CIO Brief · {period_yyyymm}</h1>
+    <h1>CIO Brief · {period_label}</h1>
     <div class="meta">
       Portfolio value {portfolio_total_fmt} ·
       Generated {today_iso}

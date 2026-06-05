@@ -62,6 +62,17 @@ def brief_passthrough(ticker: str) -> FileResponse:
     Path is resolved by the connector (which enforces the ticker char
     set and confirms the resolved file is under the configured output
     dir — defense in depth against ../ traversal).
+
+    The companion project's reports are served same-origin from this app,
+    so a `<script>` in one would otherwise execute in the app's origin
+    (cookies, localStorage, same-origin API calls). The served
+    `{date}_report.html` files are static today — inspected output/research
+    contains no `<script>` or inline event handlers — so we attach a
+    `Content-Security-Policy: sandbox` header. That neutralizes scripts and
+    forces an opaque origin even if a future (or prompt-injected) report
+    embeds one, without breaking the static HTML/CSS/font rendering. The
+    interactive `*_workspace.html` files (which do use JS) are never served
+    by this route — only `*_report.html`.
     """
     path = svc.latest_brief_path(ticker)
     if path is None:
@@ -69,4 +80,8 @@ def brief_passthrough(ticker: str) -> FileResponse:
             status.HTTP_404_NOT_FOUND,
             detail=f"No brief available for ticker {ticker!r}",
         )
-    return FileResponse(path, media_type="text/html")
+    return FileResponse(
+        path,
+        media_type="text/html",
+        headers={"Content-Security-Policy": "sandbox"},
+    )

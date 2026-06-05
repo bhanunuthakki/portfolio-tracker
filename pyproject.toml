@@ -23,6 +23,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "yfinance>=0.2.50",
     "httpx>=0.27",
+    # Server-side HTML sanitization (Rust/ammonia-backed allowlist) for the
+    # LLM-generated monthly-brief sections before they reach the iframe,
+    # standalone `data:text/html` view, and email sinks. Never hand-roll
+    # an HTML sanitizer — this strips <script>/on*=/<style>/unknown tags.
+    "nh3>=0.2.18",
     "apscheduler>=3.10",
     "typer>=0.12",
     # Gmail send for the scheduled monthly-brief email (jobs.email_brief).
