@@ -25,7 +25,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker import snaptrade_client
@@ -136,6 +136,17 @@ def sync(
             for sec in holdings_resp.securities:
                 upsert_security(session, sec)
             session.flush()
+
+            # Clear today's snapshot rows for this account before writing the
+            # fresh set (mirrors jobs/snapshot.py). A merge-only upsert would
+            # leave a phantom row for any position the user fully exited
+            # between two same-day syncs — the new response never names it, so
+            # the stale row would survive and inflate today's value.
+            session.execute(
+                delete(HoldingSnapshot)
+                .where(HoldingSnapshot.snapshot_date == today)
+                .where(HoldingSnapshot.account_id == account.account_id)
+            )
 
             for h in holdings_resp.holdings:
                 security = next(
