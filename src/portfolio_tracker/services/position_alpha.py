@@ -969,6 +969,11 @@ def _price_per_ticker_at_date(
                 px = series[max(candidates)]
                 if best is None or px > 0:
                     best = px
+                # Keep scanning the remaining security_ids only while the best
+                # so far is non-positive — a stop on the first sid would pin a
+                # 0/negative close even when another aggregator's row for the
+                # same ticker carries a real price.
+                if px > 0:
                     break
         if best is not None:
             out[ticker] = best
