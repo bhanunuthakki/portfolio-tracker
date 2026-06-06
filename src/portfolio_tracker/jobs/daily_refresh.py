@@ -39,6 +39,14 @@ def run() -> int:
     today = date.today()
     print(f"[daily_refresh] {today} starting")
     failures = 0
+    # Tracks whether the holdings-snapshot legs (Plaid snapshot + SnapTrade
+    # sync) all landed. The end-of-run commitment reconciliation judges
+    # accepted trades against today's holdings snapshot, so it must NOT run
+    # against a partially-synced book: a missing leg makes still-held
+    # positions read as weight ~0 and could wrongly auto-stamp an accepted
+    # exit/trim as executed. Unrelated legs failing (benchmarks, prices,
+    # earnings, classification) do not gate reconciliation.
+    snapshot_failed = False
 
     # 1. Plaid snapshot — handles its own session and also refreshes
     #    today's row in `portfolio_values_daily` after committing.
@@ -47,6 +55,7 @@ def run() -> int:
         print(f"[daily_refresh]   plaid snapshot: {written} holdings rows written")
     except Exception:
         failures += 1
+        snapshot_failed = True
         print("[daily_refresh]   plaid snapshot: FAILED")
         traceback.print_exc()
 
@@ -77,16 +86,19 @@ def run() -> int:
                     print(f"[daily_refresh]   snaptrade {profile.value}: skipped (not configured)")
                     continue
                 failures += 1
+                snapshot_failed = True
                 print(
                     f"[daily_refresh]   snaptrade {profile.value}: "
                     f"FAILED ({exc.status_code} {exc.detail})"
                 )
             except Exception:
                 failures += 1
+                snapshot_failed = True
                 print(f"[daily_refresh]   snaptrade {profile.value}: FAILED")
                 traceback.print_exc()
     except Exception:
         failures += 1
+        snapshot_failed = True
         print("[daily_refresh]   snaptrade module: FAILED to import / configure")
         traceback.print_exc()
 
@@ -181,16 +193,22 @@ def run() -> int:
     #    reconciliation failure must not block the refresh. Imported lazily to
     #    keep the cockpit / earnings-summary deps off the critical-path startup,
     #    matching the legs above.
-    try:
-        from portfolio_tracker.services.cockpit import reconcile_commitments
+    if snapshot_failed:
+        print(
+            "[daily_refresh]   reconcile commitments: SKIPPED "
+            "(holdings snapshot incomplete — would judge against a partial book)"
+        )
+    else:
+        try:
+            from portfolio_tracker.services.cockpit import reconcile_commitments
 
-        with SessionLocal() as session:
-            checked = reconcile_commitments(session)
-        print(f"[daily_refresh]   reconcile commitments: {checked} accepted item(s) checked")
-    except Exception:
-        failures += 1
-        print("[daily_refresh]   reconcile commitments: FAILED")
-        traceback.print_exc()
+            with SessionLocal() as session:
+                checked = reconcile_commitments(session)
+            print(f"[daily_refresh]   reconcile commitments: {checked} accepted item(s) checked")
+        except Exception:
+            failures += 1
+            print("[daily_refresh]   reconcile commitments: FAILED")
+            traceback.print_exc()
 
     status = "OK" if failures == 0 else f"{failures} step(s) FAILED"
     print(f"[daily_refresh] {today} done: {status}")

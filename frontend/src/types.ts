@@ -19,20 +19,6 @@ export interface ItemOut {
   accounts: AccountOut[];
 }
 
-export interface HoldingOut {
-  snapshot_date: string;
-  account_id: number;
-  account_name: string;
-  security_id: number;
-  ticker: string | null;
-  name: string | null;
-  quantity: string;
-  institution_price: string | null;
-  institution_value: string | null;
-  cost_basis: string | null;
-  currency: string;
-}
-
 export type CostBasisSource = "manual" | "inferred_acats" | "inferred_1099";
 
 export interface EarningsEnrichment {
@@ -226,22 +212,6 @@ export interface HumanCapitalBucketWeightIn {
 export interface HumanCapitalOverlapIn {
   ticker: string;
   buckets: HumanCapitalBucketWeightIn[];
-}
-
-export interface CashflowGroupOut {
-  type: string;
-  subtype: string | null;
-  count: number;
-  sum_amount: string;
-  classified_as_external_cashflow: boolean;
-}
-
-export interface CashflowAuditOut {
-  start_date: string;
-  end_date: string;
-  groups: CashflowGroupOut[];
-  net_external_cashflow_in: string;
-  notes: string[];
 }
 
 export interface DataQualityFindingOut {
@@ -493,12 +463,6 @@ export interface DecisionIn {
   linked_brief_path?: string | null;
 }
 
-export interface DecisionOutcomeIn {
-  outcome_date: string;
-  outcome_status: string;
-  outcome_notes?: string | null;
-}
-
 export interface TradeTagOut {
   tag_id: number;
   ticker: string;
@@ -557,10 +521,6 @@ export interface ChatSessionCreateIn {
 
 export interface ChatTurnIn {
   content: string;
-}
-
-export interface ChatTurnPostResponse extends ChatTurnOut {
-  paired_turn_id: number;
 }
 
 // Discriminated by which key is present. The server emits one event

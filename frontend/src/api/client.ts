@@ -1,17 +1,14 @@
 import type {
   BetaResult,
-  CashflowAuditOut,
   ChatSessionCreateIn,
   ChatSessionOut,
   ChatTurnIn,
   ChatTurnOut,
-  ChatTurnPostResponse,
   CioStreamEvent,
   CoachingResult,
   ConsolidatedHoldingOut,
   DataQualityReportOut,
   ExchangePublicTokenOut,
-  HoldingOut,
   HumanCapitalOverlapIn,
   HumanCapitalOverlapOut,
   HumanCapitalOverlapsOut,
@@ -33,7 +30,6 @@ import type {
   TransactionOverrideOut,
   DecisionIn,
   DecisionOut,
-  DecisionOutcomeIn,
   TradeTagIn,
   TradeTagOut,
   EarningsRow,
@@ -87,9 +83,6 @@ export const api = {
   latestHoldings: (): Promise<ConsolidatedHoldingOut[]> =>
     request("/api/portfolio/holdings"),
 
-  latestHoldingsByAccount: (): Promise<HoldingOut[]> =>
-    request("/api/portfolio/holdings/by-account"),
-
   positioning: (params?: {
     startDate?: string;
     endDate?: string;
@@ -116,9 +109,6 @@ export const api = {
     request(`/api/overrides/security-classification/${securityId}`, {
       method: "DELETE",
     }),
-
-  cashflowAudit: (): Promise<CashflowAuditOut> =>
-    request("/api/portfolio/cashflow-audit"),
 
   dataQuality: (): Promise<DataQualityReportOut> =>
     request("/api/portfolio/data-quality"),
@@ -182,12 +172,6 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(input),
     }),
-
-  deleteTickerOverride: (securityId: number): Promise<void> =>
-    request(`/api/overrides/ticker/${securityId}`, { method: "DELETE" }),
-
-  listTransactionOverrides: (): Promise<TransactionOverrideOut[]> =>
-    request("/api/overrides/transactions"),
 
   setTransactionOverride: (
     input: TransactionOverrideIn,
@@ -322,15 +306,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  attachOutcome: (
-    decisionId: number,
-    payload: DecisionOutcomeIn,
-  ): Promise<DecisionOut> =>
-    request(`/api/decisions/${decisionId}/outcome`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    }),
-
   deleteDecision: (decisionId: number): Promise<void> =>
     request(`/api/decisions/${decisionId}`, { method: "DELETE" }),
 
@@ -422,12 +397,6 @@ export const api = {
 
   cioListTurns: (sessionId: number): Promise<ChatTurnOut[]> =>
     request(`/api/cio-advisor/sessions/${sessionId}/turns`),
-
-  cioSendTurn: (sessionId: number, payload: ChatTurnIn): Promise<ChatTurnPostResponse> =>
-    request(`/api/cio-advisor/sessions/${sessionId}/turns`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
 
   /**
    * Stream a chat turn via SSE. POST body carries the user message; the
