@@ -147,39 +147,6 @@ export function PageHeader({
   );
 }
 
-// ---- typography ---------------------------------------------------------
-
-/** Mono uppercase kicker that sits above a title or stat. */
-export function Eyebrow({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}): JSX.Element {
-  return <div className={["eyebrow", className ?? ""].join(" ")}>{children}</div>;
-}
-
-/** Large editorial section title (sans, tight tracking). */
-export function SectionTitle({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}): JSX.Element {
-  return (
-    <h2
-      className={[
-        "text-2xl font-semibold tracking-tight text-ink",
-        className ?? "",
-      ].join(" ")}
-    >
-      {children}
-    </h2>
-  );
-}
-
 // ---- buttons ------------------------------------------------------------
 
 type ButtonProps = {
