@@ -967,11 +967,27 @@ def _brief_section_guidance(key: str) -> str:
 # into any of those sinks — so we permit only inline formatting tags and strip
 # everything else (and ALL event-handler / style / script / unknown attrs).
 _BRIEF_ALLOWED_TAGS: set[str] = {
-    "p", "ul", "ol", "li",
-    "table", "thead", "tbody", "tr", "td", "th",
-    "strong", "em", "b", "i",
-    "h2", "h3", "h4",
-    "code", "pre", "br", "span",
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "td",
+    "th",
+    "strong",
+    "em",
+    "b",
+    "i",
+    "h2",
+    "h3",
+    "h4",
+    "code",
+    "pre",
+    "br",
+    "span",
 }
 # Only harmless layout attributes on table cells — never class/style/id/on*.
 _BRIEF_ALLOWED_ATTRIBUTES: dict[str, set[str]] = {

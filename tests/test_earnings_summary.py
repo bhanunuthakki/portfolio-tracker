@@ -42,7 +42,11 @@ def _make_db(path: Path) -> None:
     )
     conn.executemany(
         "INSERT INTO tracked_companies (ticker, list_type, archived_at) VALUES (?,?,?)",
-        [("NU", "portfolio", None), ("MELI", "portfolio", None), ("OLD", "portfolio", "2025-01-01")],
+        [
+            ("NU", "portfolio", None),
+            ("MELI", "portfolio", None),
+            ("OLD", "portfolio", "2025-01-01"),
+        ],
     )
     conn.execute(
         "INSERT INTO thesis_state (ticker, thesis, breach_status) VALUES (?,?,?)",

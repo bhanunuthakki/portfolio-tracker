@@ -31,18 +31,14 @@ from portfolio_tracker.config import get_settings
 SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
 
 _CONSENT_BANNER = (
-    "\n"
-    + "=" * 78
-    + "\n"
+    "\n" + "=" * 78 + "\n"
     "OPEN THIS URL IN YOUR BROWSER TO AUTHORIZE Gmail send:\n"
     "\n"
     "  {url}\n"
     "\n"
     "After consenting, you'll be redirected to a localhost page that says\n"
     "'The authentication flow has completed.' Close that tab and this\n"
-    "command will exit automatically.\n"
-    + "=" * 78
-    + "\n"
+    "command will exit automatically.\n" + "=" * 78 + "\n"
 )
 
 

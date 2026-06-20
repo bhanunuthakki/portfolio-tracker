@@ -663,7 +663,7 @@ def _matched_flow_open_position(
     alpha_pl = realized_gain - spy_counterfactual_pl
 
     weighted_holding_days = 0
-    weighted_entry_date: date | None = None
+    weighted_entry_date = None
     if weighted_denom > 0:
         avg_days = round(float(weighted_numer / weighted_denom))
         weighted_holding_days = avg_days

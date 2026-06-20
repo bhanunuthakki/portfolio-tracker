@@ -42,8 +42,7 @@ def test_parse_brief_sections_strips_script() -> None:
     raw = json.dumps(
         {
             "executive_summary": (
-                "<p>Portfolio is healthy.</p>"
-                "<script>alert('xss');fetch('/api/secrets')</script>"
+                "<p>Portfolio is healthy.</p><script>alert('xss');fetch('/api/secrets')</script>"
             )
         }
     )
@@ -62,8 +61,7 @@ def test_parse_brief_sections_strips_handlers_iframe_and_js_urls() -> None:
         {
             "holdings_review": '<p onclick="steal()">NU</p><img src=x onerror=alert(1)>',
             "market_regime": (
-                '<iframe src="javascript:alert(1)"></iframe>'
-                '<a href="javascript:alert(2)">click</a>'
+                '<iframe src="javascript:alert(1)"></iframe><a href="javascript:alert(2)">click</a>'
             ),
         }
     )

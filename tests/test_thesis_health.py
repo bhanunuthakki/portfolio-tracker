@@ -43,7 +43,9 @@ def test_thesis_health_assembles_weights_and_sorts(monkeypatch: pytest.MonkeyPat
         es,
         "summary_by_ticker",
         lambda _t: {
-            "NU": _summary("NU", tracked=True, list_type="portfolio", has_brief=True, brief="2026-05-13"),
+            "NU": _summary(
+                "NU", tracked=True, list_type="portfolio", has_brief=True, brief="2026-05-13"
+            ),
             "META": _summary("META", tracked=True, list_type="portfolio"),
             # ZZZ absent -> blind spot
         },
@@ -53,7 +55,10 @@ def test_thesis_health_assembles_weights_and_sorts(monkeypatch: pytest.MonkeyPat
         "latest_verdicts",
         lambda _t: {
             "NU": es.ThesisVerdict(
-                "NU", "breach", "2026-06-01", (es.RuleEval("r1", "Revenue YoY", "breach", "u", "n"),)
+                "NU",
+                "breach",
+                "2026-06-01",
+                (es.RuleEval("r1", "Revenue YoY", "breach", "u", "n"),),
             ),
             "META": es.ThesisVerdict("META", "ok", "x", ()),
         },
