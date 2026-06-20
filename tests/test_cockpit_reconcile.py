@@ -83,7 +83,9 @@ def test_exit_partial_when_trimmed_but_still_held() -> None:
 
 
 def test_exit_pending_then_not_executed() -> None:
-    assert cockpit._reconcile_one("exit", 8.0, 8.0, held=True, days_since_accept=3).status == "pending"
+    assert (
+        cockpit._reconcile_one("exit", 8.0, 8.0, held=True, days_since_accept=3).status == "pending"
+    )
     assert (
         cockpit._reconcile_one("exit", 8.0, 8.0, held=True, days_since_accept=20).status
         == "not_executed"
@@ -154,7 +156,9 @@ def test_reconcile_trim_executed(session: Session, monkeypatch: pytest.MonkeyPat
     assert examined == 1
     assert row.execution_status == "executed"
     assert row.executed_at is not None
-    assert row.executed_weight_pct is not None and float(row.executed_weight_pct) == pytest.approx(5.0)
+    assert row.executed_weight_pct is not None and float(row.executed_weight_pct) == pytest.approx(
+        5.0
+    )
 
 
 def test_reconcile_staleness_marks_not_executed(
@@ -192,9 +196,7 @@ def test_reconcile_skips_when_no_holdings(
     assert row.execution_status == "pending"  # untouched
 
 
-def test_reconcile_skips_overridden_rows(
-    session: Session, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_reconcile_skips_overridden_rows(session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
     row = _seed_accepted(session, action="trim", weight=12.5)
     cockpit.set_execution_status(session, row.id, "not_executed")  # owner's manual call
     assert row.execution_overridden is True

@@ -468,7 +468,8 @@ def _item_from_entry(entry: dict[str, object], sigs: list[Signal], order: int) -
         action=_opt_text(entry.get("action")) or _action_for_kind(kinds[0]),
         headline=_opt_text(entry.get("headline")) or sigs[0].headline,
         rationale=_opt_text(entry.get("rationale")) or sigs[0].detail,
-        suggested_action=_opt_text(entry.get("suggested_action")) or _default_suggested_action(sigs[0]),
+        suggested_action=_opt_text(entry.get("suggested_action"))
+        or _default_suggested_action(sigs[0]),
         weight_pct=weight,
         evidence=evidence,
         signal_kinds=kinds,
@@ -865,7 +866,9 @@ def reconcile_commitments(session: Session) -> int:
     items examined. Best-effort by contract: callers wrap it so a failure can't
     block the rest of the refresh.
     """
-    accepted = [r for r in session.execute(select(ActionQueueItem)).scalars() if r.status == "accepted"]
+    accepted = [
+        r for r in session.execute(select(ActionQueueItem)).scalars() if r.status == "accepted"
+    ]
     if not accepted:
         return 0
 
@@ -1042,9 +1045,7 @@ def thesis_health(session: Session) -> list[ThesisHealthRow]:
                 tracked=summary.tracked if summary else False,
                 list_type=summary.list_type if summary else None,
                 verdict_status=verdict.status if verdict else None,
-                flagged_rules=(
-                    [r.kpi_name for r in verdict.flagged_rules[:4]] if verdict else []
-                ),
+                flagged_rules=([r.kpi_name for r in verdict.flagged_rules[:4]] if verdict else []),
                 valuation_signal=val.signal if val else None,
                 over_under_pct=val.over_under_pct if val else None,
                 fair_value=val.fair_value if val else None,

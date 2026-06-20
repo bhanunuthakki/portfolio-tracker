@@ -97,7 +97,9 @@ def test_gather_signals_wires_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda _s: ({"NU": Decimal(50), "META": Decimal(50)}, {"NU": "Nu", "META": "Meta"}),
     )
     monkeypatch.setattr(cockpit, "generate_coaching_tips", lambda _s: SimpleNamespace(tips=[]))
-    monkeypatch.setattr(es, "latest_verdicts", lambda _t: {"NU": es.ThesisVerdict("NU", "breach", "x", ())})
+    monkeypatch.setattr(
+        es, "latest_verdicts", lambda _t: {"NU": es.ThesisVerdict("NU", "breach", "x", ())}
+    )
     monkeypatch.setattr(es, "latest_valuations", lambda _t: {})
     monkeypatch.setattr(es, "pending_alerts", lambda _t: {})
     monkeypatch.setattr(es, "untracked_holdings", lambda _t: [])
