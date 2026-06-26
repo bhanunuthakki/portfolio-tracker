@@ -40,8 +40,16 @@ from portfolio_tracker.services.performance import (
 )
 from portfolio_tracker.services.position_alpha import compute_position_alpha
 
-# Daily moves above this are dropped — almost certainly reconstruction noise.
-_MAX_PLAUSIBLE_DAILY_RETURN = Decimal("0.30")
+# A single-day move in the *aggregate* position book above this is almost
+# certainly a price-data error (a close that briefly went to 0, a split that
+# wasn't adjusted), not a market event — even a 50% drop in one name at full
+# weight only moves a multi-name book ~50%, and a diversified book far less.
+# Days below this bound are KEPT so σ / Sharpe / Sortino reflect real tail
+# risk: a concentrated single-name book genuinely gaps 20-40% on earnings, and
+# silently dropping those days (the old 30% clip did) understates volatility
+# and inflates risk-adjusted ratios. Excluded days are enumerated in `notes`,
+# never dropped silently, and the bound is tunable via `compute_beta`.
+_DATA_ERROR_DAILY_RETURN = Decimal("0.50")
 _TRADING_DAYS_PER_YEAR = 252
 _POLICY_PSEUDO_SYMBOL = "POLICY"
 
@@ -85,6 +93,7 @@ def compute_beta(
     risk_free_annual: float = _DEFAULT_RISK_FREE_ANNUAL,
     exclude_index_etfs: bool = False,
     reserve_amount: Decimal = Decimal(0),
+    data_error_threshold: Decimal = _DATA_ERROR_DAILY_RETURN,
 ) -> BetaResult:
     """Risk metrics over [start_date, end_date].
 
@@ -132,12 +141,18 @@ def compute_beta(
         session, benchmark_symbol, start_date, end_date
     )
 
-    paired_p, paired_m, dropped = _pair_returns(portfolio_returns, benchmark_returns)
+    paired_p, paired_m, excluded = _pair_returns(
+        portfolio_returns, benchmark_returns, data_error_threshold
+    )
     notes: list[str] = []
-    if dropped > 0:
+    if excluded:
+        bound_pct = int(data_error_threshold * 100)
+        detail = ", ".join(f"{d.isoformat()} ({float(r) * 100:+.0f}%)" for d, r in sorted(excluded))
         notes.append(
-            f"Dropped {dropped} day(s) with implausible (>30%) reconstructed "
-            f"portfolio moves — likely backfill artifacts."
+            f"Excluded {len(excluded)} day(s) with >{bound_pct}% single-day "
+            f"position-book moves as suspected price-data errors (not market "
+            f"events): {detail}. Genuine large moves below that bound are "
+            f"retained so volatility and Sharpe/Sortino reflect real tail risk."
         )
 
     if not paired_p:
@@ -297,19 +312,28 @@ def _benchmark_daily_returns(closes: dict[date, Decimal]) -> dict[date, Decimal]
 def _pair_returns(
     portfolio_returns: dict[date, Decimal],
     benchmark_returns: dict[date, Decimal],
-) -> tuple[list[float], list[float], int]:
+    data_error_threshold: Decimal = _DATA_ERROR_DAILY_RETURN,
+) -> tuple[list[float], list[float], list[tuple[date, Decimal]]]:
+    """Pair portfolio & benchmark returns on common dates.
+
+    Returns `(p, m, excluded)` where `excluded` is the list of
+    `(date, portfolio_return)` pairs whose magnitude exceeds
+    `data_error_threshold` — suspected price-data errors, surfaced to the
+    caller so they're reported explicitly rather than dropped silently.
+    Real (sub-threshold) large moves are retained.
+    """
     p: list[float] = []
     m: list[float] = []
-    dropped = 0
+    excluded: list[tuple[date, Decimal]] = []
     common_dates = sorted(set(portfolio_returns) & set(benchmark_returns))
     for d in common_dates:
         r_p = portfolio_returns[d]
-        if abs(r_p) > _MAX_PLAUSIBLE_DAILY_RETURN:
-            dropped += 1
+        if abs(r_p) > data_error_threshold:
+            excluded.append((d, r_p))
             continue
         p.append(float(r_p))
         m.append(float(benchmark_returns[d]))
-    return p, m, dropped
+    return p, m, excluded
 
 
 # ---- regression + ratio math --------------------------------------------

@@ -127,22 +127,40 @@ def test_daily_returns_skips_nonpositive_prior_value():
 # ---- _pair_returns -------------------------------------------------------
 
 
-def test_pair_returns_drops_implausible_and_intersects_dates():
-    d1, d2, d3, d4 = (
+def test_pair_returns_excludes_only_data_errors_and_keeps_real_tails():
+    d1, d2, d3, d4, d5 = (
         date(2025, 1, 2),
         date(2025, 1, 3),
         date(2025, 1, 4),
         date(2025, 1, 5),
+        date(2025, 1, 6),
     )
-    portfolio = {d1: Decimal("0.05"), d2: Decimal("0.5"), d3: Decimal("-0.1")}
+    portfolio = {
+        d1: Decimal("0.05"),
+        d2: Decimal("0.6"),  # >50% aggregate move → suspected data error
+        d3: Decimal("-0.1"),
+        d5: Decimal("0.35"),  # real earnings-day gap → MUST be retained
+    }
     benchmark = {
         d1: Decimal("0.04"),
         d2: Decimal("0.4"),
         d3: Decimal("-0.08"),
-        d4: Decimal("0.01"),  # no portfolio counterpart → excluded
+        d4: Decimal("0.01"),  # no portfolio counterpart → intersected out
+        d5: Decimal("0.02"),
     }
-    p, m, dropped = _pair_returns(portfolio, benchmark)
-    # d2 dropped (|0.5| > 0.30); d4 absent from portfolio.
-    assert dropped == 1
-    assert p == pytest.approx([0.05, -0.1])
-    assert m == pytest.approx([0.04, -0.08])
+    p, m, excluded = _pair_returns(portfolio, benchmark)
+    # Only d2 excluded (and reported with its magnitude); the 35% real move at
+    # d5 survives so volatility/Sharpe capture genuine tail risk; d4 absent.
+    assert excluded == [(d2, Decimal("0.6"))]
+    assert p == pytest.approx([0.05, -0.1, 0.35])
+    assert m == pytest.approx([0.04, -0.08, 0.02])
+
+
+def test_pair_returns_threshold_is_tunable():
+    d1, d2 = date(2025, 1, 2), date(2025, 1, 3)
+    portfolio = {d1: Decimal("0.05"), d2: Decimal("0.35")}
+    benchmark = {d1: Decimal("0.04"), d2: Decimal("0.30")}
+    # A stricter 0.20 bound now treats the 35% move as out-of-bounds.
+    p, _m, excluded = _pair_returns(portfolio, benchmark, Decimal("0.20"))
+    assert excluded == [(d2, Decimal("0.35"))]
+    assert p == pytest.approx([0.05])

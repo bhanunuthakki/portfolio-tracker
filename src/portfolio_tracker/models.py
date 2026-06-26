@@ -246,13 +246,26 @@ class Price(Base):
 
 
 class Benchmark(Base):
-    """Daily close for a benchmark index (SPY, QQQ, etc.)."""
+    """Daily marks for a benchmark index (SPY, QQQ, etc.).
+
+    `close` is the raw price close (split-adjusted, dividends NOT reinvested)
+    — kept for display and data-quality coverage. `total_return_close` is the
+    dividend-reinvested adjusted close (yfinance `Adj Close`); it's the series
+    return/counterfactual math should use so the comparison is total-return
+    on both sides. A buy-and-hold of SPY earns its ~1.3 %/yr dividend, so a
+    price-only counterfactual understates the benchmark and over-credits the
+    user's alpha. `total_return_close` is nullable for rows written before
+    migration 0021 — consumers `coalesce` to `close` until a re-fetch
+    (`python -m portfolio_tracker.jobs.benchmarks --start <earliest>`)
+    backfills it.
+    """
 
     __tablename__ = "benchmarks"
 
     symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
     date: Mapped[date] = mapped_column(Date, primary_key=True)
     close: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    total_return_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
 
 
 class PortfolioValueDaily(Base):

@@ -285,3 +285,109 @@ def test_compute_position_alpha_held_position_outperforms_spy(session):
     assert row.value_at_end == Decimal(1200)
     assert row.alpha == Decimal(100)
     assert row.incomplete is False
+
+
+def test_benchmark_counterfactual_uses_total_return_close(session):
+    # Same setup as above, but the SPY benchmark carries a `total_return_close`
+    # that reinvests dividends: price 400 -> 440 (+10%), total return 400 -> 444
+    # (+11%). The counterfactual must use the total-return series, so the SPY
+    # leg earns more and the user's alpha shrinks accordingly — removing the
+    # ~dividend-yield over-credit a price-only comparison bakes in.
+    start = date(2025, 5, 1)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add(aapl)
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=aapl.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1000),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=aapl.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1200),
+            ),
+            Price(security_id=aapl.security_id, date=start, close=Decimal(100)),
+            Price(security_id=aapl.security_id, date=end, close=Decimal(120)),
+            Benchmark(
+                symbol="SPY", date=start, close=Decimal(400), total_return_close=Decimal(400)
+            ),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440), total_return_close=Decimal(444)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    # (1000 / 400) * 444 - 1000 = 110, NOT the price-only 100.
+    assert result.total_spy_pl == Decimal(110)
+    assert result.total_alpha == Decimal(90)  # 200 - 110, down from 100
+
+
+def test_chart_series_reconciles_to_table_under_broker_close_drift(session):
+    # Broker `institution_value` drifts from qty × Price.close (the realistic
+    # case for ADRs / thin names). The table prefers the broker mark; the chart
+    # series must reconcile to that SAME V_start / V_end, and interior snapshot
+    # dates must show the broker mark too — not qty × yfinance close.
+    start = date(2025, 5, 1)
+    mid = date(2025, 5, 15)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    nvo = Security(plaid_security_id="s-nvo", ticker="NVO", type="ad")
+    session.add(nvo)
+    session.flush()
+    session.add_all(
+        [
+            # qty × close would be 1000 / 1000 / 1200; broker marks drift higher.
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=nvo.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1050),
+            ),
+            HoldingSnapshot(
+                snapshot_date=mid,
+                account_id=account.account_id,
+                security_id=nvo.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=nvo.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1260),
+            ),
+            Price(security_id=nvo.security_id, date=start, close=Decimal(100)),
+            Price(security_id=nvo.security_id, date=end, close=Decimal(120)),
+            Benchmark(symbol="SPY", date=start, close=Decimal(400)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    # Table reports the broker-preferred V at both endpoints.
+    assert result.v_start == Decimal("1050.00")
+    assert result.v_end == Decimal("1260.00")
+
+    by_date = {p.date: p for p in result.series}
+    # Chart endpoints reconcile to the table (previously 1000 / 1200 from
+    # qty × close — the mismatch this fix removes).
+    assert by_date[start].portfolio_value == result.v_start
+    assert by_date[end].portfolio_value == result.v_end
+    # Interior snapshot date shows the broker mark, not qty × forward-filled close.
+    assert by_date[mid].portfolio_value == Decimal("1100.00")
+    # Every benchmark sleeve anchors to the same V_start.
+    assert by_date[start].spy_counterfactual_value == Decimal("1050.00")

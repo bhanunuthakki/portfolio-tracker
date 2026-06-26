@@ -594,7 +594,9 @@ def beta_endpoint(
     Returns beta + alpha + R² (regression-based), Sharpe / Sortino
     (absolute), and Information Ratio + tracking error (vs benchmark).
     All annualized. Defaults to a 1-year lookback. Daily returns are
-    paired by date; days with reconstructed swings >30% are dropped.
+    paired by date; genuine large (earnings-day) moves are retained so the
+    risk metrics reflect real tail risk, and only >50% single-day moves —
+    suspected price-data errors — are excluded and enumerated in `notes`.
     """
     if end_date is None:
         end_date = date.today()

@@ -57,11 +57,24 @@ def _fetch_symbol(session: Session, symbol: str, start_date: date, end_date: dat
         if close is None or close != close:  # NaN check
             continue
         close_decimal = Decimal(str(close))
+        # `Adj Close` is split- AND dividend-adjusted (dividends reinvested) —
+        # the total-return series. Fall back to the raw close if it's missing
+        # or NaN so the row is never written without a usable comparison value.
+        adj = row.get("Adj Close")
+        tr_decimal = Decimal(str(adj)) if adj is not None and adj == adj else close_decimal
         existing = session.get(Benchmark, (symbol, bar_date))
         if existing is not None:
             existing.close = close_decimal
+            existing.total_return_close = tr_decimal
             continue
-        session.add(Benchmark(symbol=symbol, date=bar_date, close=close_decimal))
+        session.add(
+            Benchmark(
+                symbol=symbol,
+                date=bar_date,
+                close=close_decimal,
+                total_return_close=tr_decimal,
+            )
+        )
         rows_written += 1
     return rows_written
 

@@ -1528,9 +1528,18 @@ def _benchmark_series(
     (e.g., YTD = Jan 1, a holiday). Without this lookback, `_last_known_price`
     has no candidates ≤ start_date in the filtered dict and returns None,
     which collapses the SPY/QQQ lines to empty.
+
+    Uses `total_return_close` (dividend-reinvested), coalesced to the raw
+    `close` for pre-0021 rows, so benchmark daily returns and the matched-flow
+    synthetic are total-return — consistent with the position-alpha
+    counterfactual and an honest comparison against a buy-and-hold index.
     """
     rows = session.execute(
-        select(Benchmark.symbol, Benchmark.date, Benchmark.close)
+        select(
+            Benchmark.symbol,
+            Benchmark.date,
+            func.coalesce(Benchmark.total_return_close, Benchmark.close),
+        )
         .where(Benchmark.date >= start_date - timedelta(days=14))
         .where(Benchmark.date <= end_date)
     ).all()

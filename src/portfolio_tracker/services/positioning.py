@@ -286,9 +286,10 @@ def correlation_beta(
 ) -> tuple[float | None, float | None, int]:
     """(correlation, beta, sample_size) of a security's daily returns vs a benchmark.
 
-    Pairs on common dates only. Unlike the portfolio-level beta service we do
-    NOT drop large daily moves — these come straight from the `prices` table,
-    so a 30%+ earnings move is real signal, not reconstruction noise. Returns
+    Pairs on common dates only. We apply NO move bound here — these come
+    straight from the `prices` table, so a 30%+ earnings move is real signal.
+    (The portfolio-level beta service keeps real moves too, excluding only
+    >50% single-day swings as suspected price-data errors.) Returns
     `(None, None, n)` when there are fewer than two paired observations or the
     benchmark has no variance.
     """
