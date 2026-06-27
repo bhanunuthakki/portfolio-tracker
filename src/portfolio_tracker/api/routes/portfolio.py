@@ -31,6 +31,7 @@ from portfolio_tracker.schemas import (
     PerformanceSeries,
     PositioningOut,
 )
+from portfolio_tracker.services import after_tax as after_tax_service
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import drawdown as drawdown_service
@@ -496,6 +497,27 @@ def drawdown_metrics(
         end_date,
         Decimal(str(reserve_amount)),
         exclude_index_etfs,
+    )
+
+
+@router.get("/after-tax", response_model=after_tax_service.AfterTaxResult)
+def after_tax_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    tax_year: int | None = Query(
+        default=None, description="Filter to one 1099 tax year; all years if omitted."
+    ),
+    st_rate: float = Query(
+        default=0.37, ge=0, le=1, description="Marginal short-term / ordinary rate."
+    ),
+    lt_rate: float = Query(
+        default=0.20, ge=0, le=1, description="Marginal long-term capital-gains rate."
+    ),
+) -> after_tax_service.AfterTaxResult:
+    """After-tax realized gain from imported 1099-B lots: applies the owner's
+    marginal ST/LT rates to wash-sale-adjusted gains by term. Flat rates, no
+    carryforward — the 1099-B is authoritative for filing (see notes)."""
+    return after_tax_service.compute_after_tax(
+        session, tax_year, Decimal(str(st_rate)), Decimal(str(lt_rate))
     )
 
 
