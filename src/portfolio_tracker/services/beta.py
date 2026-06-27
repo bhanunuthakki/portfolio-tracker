@@ -374,14 +374,22 @@ def _sharpe(returns: list[float], rf_daily: float) -> float | None:
 
 
 def _sortino(returns: list[float], rf_daily: float) -> float | None:
-    """Like Sharpe but uses downside deviation (only counts r < rf)."""
+    """Like Sharpe but uses downside deviation (only counts r < rf).
+
+    The downside-variance denominator is (n-1), matching the sample-variance
+    convention used by `_sharpe`, `_information_ratio`, and
+    `_annualized_volatility` — so Sharpe and Sortino are directly comparable
+    on the same (small) sample. (A population `/n` here would inflate Sortino
+    relative to Sharpe, growing as n shrinks — exactly the short windows this
+    tool warns about.)
+    """
     n = len(returns)
     if n < 2:
         return None
     excess = [r - rf_daily for r in returns]
     mean = sum(excess) / n
     downside = [min(0.0, r) for r in excess]
-    downside_var = sum(d * d for d in downside) / n
+    downside_var = sum(d * d for d in downside) / (n - 1)
     if downside_var == 0:
         return None
     return (mean / downside_var**0.5) * (_TRADING_DAYS_PER_YEAR**0.5)

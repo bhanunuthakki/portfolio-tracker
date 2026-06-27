@@ -169,6 +169,14 @@ def test_sector_breakdown_buckets_funds_and_cash(session):
     assert by["Cash"].value == Decimal(1000)
 
 
+def test_etf_lookthrough_caveat_note_when_funds_present(session):
+    _seed(session)
+    out = compute_positioning(session, _START, _END)
+    lookthrough = [n for n in out.notes if "look-through" in n]
+    assert lookthrough, "expected an ETF/fund look-through caveat note"
+    assert "20%" in lookthrough[0]  # VOO is 1000 / 5000 of the book
+
+
 def test_region_breakdown(session):
     _seed(session)
     by = _bucket_map(compute_positioning(session, _START, _END).by_region)

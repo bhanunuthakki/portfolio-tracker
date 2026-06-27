@@ -69,10 +69,11 @@ def test_sharpe_zero_variance_is_none():
 
 
 def test_sortino_known_value():
-    # excess [-0.02, 0.04], mean 0.01; downside_var = 0.0004/2 = 0.0002.
-    expected = (0.01 / math.sqrt(0.0002)) * _SQRT_252
+    # excess [-0.02, 0.04], mean 0.01; downside [-0.02, 0]; sample (n-1)
+    # downside_var = 0.0004 / 1 = 0.0004 (matches Sharpe's n-1 convention).
+    expected = (0.01 / math.sqrt(0.0004)) * _SQRT_252
     assert _sortino([-0.02, 0.04], 0.0) == pytest.approx(expected)
-    assert _sortino([-0.02, 0.04], 0.0) == pytest.approx(11.224972, rel=1e-5)
+    assert _sortino([-0.02, 0.04], 0.0) == pytest.approx(7.937254, rel=1e-5)
 
 
 def test_sortino_no_downside_is_none():

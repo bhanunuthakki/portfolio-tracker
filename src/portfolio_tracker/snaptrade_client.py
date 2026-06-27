@@ -315,13 +315,21 @@ def _holding_from_snaptrade(
     quantity = _to_decimal(raw.get("units")) or Decimal(0)
     price = _to_decimal(raw.get("price"))
     value = quantity * price if price is not None else None
+    # SnapTrade reports `average_purchase_price` PER SHARE, but `cost_basis`
+    # follows the Plaid convention of TOTAL dollars for the lot (every
+    # downstream consumer — Holdings unrealized P&L, Trade Analysis — treats
+    # it as total). Multiply by units so the column is aggregator-independent;
+    # without this, SnapTrade-sourced cost basis is understated by a factor of
+    # quantity unless a CostBasisOverride happens to mask it.
+    avg_price = _to_decimal(raw.get("average_purchase_price"))
+    cost_basis = avg_price * quantity if avg_price is not None else None
     return PlaidHolding(
         plaid_account_id=plaid_account_id,
         plaid_security_id=plaid_security_id,
         quantity=quantity,
         institution_price=price,
         institution_value=value,
-        cost_basis=_to_decimal(raw.get("average_purchase_price")),
+        cost_basis=cost_basis,
         currency=str(_dig(raw, ["currency", "code"]) or "USD"),
     )
 

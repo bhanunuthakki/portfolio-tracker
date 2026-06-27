@@ -1,9 +1,26 @@
-"""Portfolio performance vs. benchmarks (time-weighted return).
+"""Portfolio performance vs. benchmarks (money-weighted Modified Dietz).
 
-Builds a daily time series of `(portfolio_index, spy_index, qqq_index)` over
-a chosen window, all rebased to 100 at `start_date`. The portfolio series is
-a **time-weighted return** (TWR) — the standard metric for benchmarking
-because it neutralizes contributions / withdrawals.
+Builds a daily series of cumulative window returns for the portfolio and for
+synthetic SPY / QQQ / policy books that receive the SAME external cashflows,
+so the GAP between the lines is a clean relative-performance signal even when
+the reconstructed V_start is noisy.
+
+NOTE ON THE METRIC: despite "benchmarking" connoting time-weighted return,
+this series is **money-weighted (Modified Dietz)**, NOT a chained daily TWR.
+At each observation date `d` it computes a single-window return-since-start
+with a contribution-weighted denominator:
+
+    return_pct(d) = (V(d) − V_start − Σ_{i: d_i≤d} C_i)
+                    / (V_start + Σ_{i: d_i≤d} C_i · (d − d_i)/(d − d_0))
+
+(see `_modified_dietz_series`). `C_i` is an *external* cashflow on day `d_i`
+— deposits, withdrawals, ACATS transfers; trades, dividends, fees, and
+interest are internal events that move V but not the cashflow term. The
+contribution-weighted denominator makes the % sensitive to cashflow timing
+on a heavy-contribution book — which is exactly why the dollar-legible
+`position_alpha` engine is canonical for the headline; this series is kept
+for the /performance endpoint (consumed by the companion earnings-summary
+project) and as the matched-flow benchmark source for the Risk Metrics card.
 
 Two-stage construction:
 
@@ -12,12 +29,8 @@ Two-stage construction:
      walking `investment_transactions` backward and valuing each position
      against `prices` (yfinance backfill).
 
-  2. **Daily TWR** chains per-day returns:
-        r_d = (V_d − V_{d−1} − cashflow_d) / V_{d−1}
-        TWR_index_d = TWR_index_{d−1} × (1 + r_d)
-     where `cashflow_d` is the sum of *external* money movements on day `d`
-     — deposits, withdrawals, ACATS transfers. Trades, dividends, fees, and
-     interest are internal events: they affect V but not the cashflow term.
+  2. **Modified Dietz** is evaluated per date over the window via the formula
+     above; the result is rebased to an index for the chart.
 
 The raw `portfolio_value` is also returned per-point so the UI can show the
 underlying dollar series alongside the rebased index if it wants.
