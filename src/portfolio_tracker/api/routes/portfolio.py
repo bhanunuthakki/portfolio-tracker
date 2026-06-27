@@ -31,9 +31,12 @@ from portfolio_tracker.schemas import (
     PerformanceSeries,
     PositioningOut,
 )
+from portfolio_tracker.services import after_tax as after_tax_service
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
+from portfolio_tracker.services import drawdown as drawdown_service
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
+from portfolio_tracker.services import exit_quality as exit_quality_service
 from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
@@ -473,6 +476,67 @@ def _default_start_date(session: Session, end_date: date, include_backfill: bool
     return end_date - timedelta(days=365)
 
 
+@router.get("/drawdown", response_model=drawdown_service.DrawdownResult)
+def drawdown_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    reserve_amount: float = Query(default=0.0, ge=0),
+    exclude_index_etfs: bool = Query(default=False),
+) -> drawdown_service.DrawdownResult:
+    """Loss-shaped risk over the cashflow-neutral return index: max drawdown,
+    underwater curve, time-to-recovery, and Calmar (annualized return / |maxDD|).
+    Same windowing as /performance; defaults to a snapshot-derived window."""
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = _default_start_date(session, end_date, include_backfill=False)
+    return drawdown_service.compute_drawdown(
+        session,
+        start_date,
+        end_date,
+        Decimal(str(reserve_amount)),
+        exclude_index_etfs,
+    )
+
+
+@router.get("/after-tax", response_model=after_tax_service.AfterTaxResult)
+def after_tax_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    tax_year: int | None = Query(
+        default=None, description="Filter to one 1099 tax year; all years if omitted."
+    ),
+    st_rate: float = Query(
+        default=0.37, ge=0, le=1, description="Marginal short-term / ordinary rate."
+    ),
+    lt_rate: float = Query(
+        default=0.20, ge=0, le=1, description="Marginal long-term capital-gains rate."
+    ),
+) -> after_tax_service.AfterTaxResult:
+    """After-tax realized gain from imported 1099-B lots: applies the owner's
+    marginal ST/LT rates to wash-sale-adjusted gains by term. Flat rates, no
+    carryforward — the 1099-B is authoritative for filing (see notes)."""
+    return after_tax_service.compute_after_tax(
+        session, tax_year, Decimal(str(st_rate)), Decimal(str(lt_rate))
+    )
+
+
+@router.get("/exit-quality", response_model=exit_quality_service.ExitQualityResult)
+def exit_quality_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> exit_quality_service.ExitQualityResult:
+    """Sell-side quality: for each ticker sold in the window, re-price the sold
+    shares to today (regret vs holding) and vs a SPY-hold counterfactual (exit
+    alpha vs the market). Defaults to a trailing 365-day window."""
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    return exit_quality_service.compute_exit_quality(session, start_date, end_date)
+
+
 @router.get("/cashflow-audit", response_model=CashflowAuditOut)
 def cashflow_audit(
     session: Annotated[Session, Depends(get_session)],
@@ -567,9 +631,13 @@ def beta_endpoint(
         default="SPY",
         description="Benchmark symbol (SPY/QQQ/etc.) or 'POLICY' for the user's policy mix.",
     ),
-    risk_free_annual: float = Query(
-        default=0.04,
-        description="Annualized risk-free rate used by Sharpe and Sortino (0.04 = 4%/year).",
+    risk_free_annual: float | None = Query(
+        default=None,
+        description=(
+            "Annualized risk-free rate for Sharpe/Sortino (0.04 = 4%/year). "
+            "Omit to use the time-varying average 13-week T-bill yield over the "
+            "window (falls back to ~4% if no T-bill data)."
+        ),
     ),
     exclude_index_etfs: bool = Query(
         default=False,
@@ -594,7 +662,9 @@ def beta_endpoint(
     Returns beta + alpha + R² (regression-based), Sharpe / Sortino
     (absolute), and Information Ratio + tracking error (vs benchmark).
     All annualized. Defaults to a 1-year lookback. Daily returns are
-    paired by date; days with reconstructed swings >30% are dropped.
+    paired by date; genuine large (earnings-day) moves are retained so the
+    risk metrics reflect real tail risk, and only >50% single-day moves —
+    suspected price-data errors — are excluded and enumerated in `notes`.
     """
     if end_date is None:
         end_date = date.today()

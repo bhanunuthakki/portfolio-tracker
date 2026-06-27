@@ -286,9 +286,10 @@ def correlation_beta(
 ) -> tuple[float | None, float | None, int]:
     """(correlation, beta, sample_size) of a security's daily returns vs a benchmark.
 
-    Pairs on common dates only. Unlike the portfolio-level beta service we do
-    NOT drop large daily moves — these come straight from the `prices` table,
-    so a 30%+ earnings move is real signal, not reconstruction noise. Returns
+    Pairs on common dates only. We apply NO move bound here — these come
+    straight from the `prices` table, so a 30%+ earnings move is real signal.
+    (The portfolio-level beta service keeps real moves too, excluding only
+    >50% single-day swings as suspected price-data errors.) Returns
     `(None, None, n)` when there are fewer than two paired observations or the
     benchmark has no variance.
     """
@@ -466,12 +467,20 @@ def _build_correlations(
 
 
 def _positioning_notes(
-    unknown_accounts: set[str], no_price_count: int, has_policy: bool
+    unknown_accounts: set[str], no_price_count: int, has_policy: bool, etf_fund_pct: Decimal
 ) -> list[str]:
     notes = [
         "Funds/ETFs are shown as their own 'ETF/Fund' sector bucket (no single "
         "GICS sector); cash is excluded from the correlation table.",
     ]
+    if etf_fund_pct > 0:
+        notes.append(
+            f"No ETF/fund look-through: each fund is counted as ONE position "
+            f"({etf_fund_pct.quantize(Decimal('1'))}% of the book is in funds), so "
+            f"concentration (HHI / top-N / effective holdings) and the sector cut "
+            f"do not see the underlying constituents — true single-name and sector "
+            f"exposure may be higher than shown."
+        )
     if unknown_accounts:
         notes.append(
             f"{len(unknown_accounts)} account(s) couldn't be classified by tax "
@@ -547,6 +556,16 @@ def compute_positioning(session: Session, start_date: date, end_date: date) -> P
         session, dict(value_by_security), security_by_id, total, start_date, end_date, has_policy
     )
 
+    fund_value = sum(
+        (
+            v
+            for label, v in asset_items
+            if label in (AssetType.ETF.value, AssetType.MUTUAL_FUND.value)
+        ),
+        Decimal(0),
+    )
+    etf_fund_pct = (fund_value / total * Decimal(100)) if total > 0 else Decimal(0)
+
     return PositioningOut(
         snapshot_date=snapshot_date,
         start_date=start_date,
@@ -560,5 +579,5 @@ def compute_positioning(session: Session, start_date: date, end_date: date) -> P
         correlations=correlations,
         weighted_avg_correlation_spy=weighted_avg_corr_spy,
         has_policy=has_policy,
-        notes=_positioning_notes(unknown_accounts, no_price_count, has_policy),
+        notes=_positioning_notes(unknown_accounts, no_price_count, has_policy, etf_fund_pct),
     )

@@ -162,3 +162,25 @@ def test_sync_deletes_fully_exited_position_on_same_day_resync(session, monkeypa
     assert result.holdings_written == 1
     assert result.accounts_synced == 1
     assert result.items_synced == 1
+
+
+def test_holding_from_snaptrade_cost_basis_is_total_not_per_share():
+    # SnapTrade gives average_purchase_price PER SHARE; cost_basis must be
+    # stored as TOTAL dollars (Plaid convention) = avg × units, else
+    # unrealized P&L is overstated by (units − 1) × avg.
+    raw = {
+        "units": "10",
+        "price": "150",
+        "average_purchase_price": "100",
+        "currency": {"code": "USD"},
+    }
+    holding = snaptrade_client._holding_from_snaptrade(raw, "acct", "sec")
+    assert holding.quantity == Decimal(10)
+    assert holding.institution_value == Decimal(1500)
+    assert holding.cost_basis == Decimal(1000)  # 100/share × 10, NOT 100
+
+
+def test_holding_from_snaptrade_cost_basis_none_when_no_avg_price():
+    raw = {"units": "10", "price": "150", "currency": {"code": "USD"}}
+    holding = snaptrade_client._holding_from_snaptrade(raw, "acct", "sec")
+    assert holding.cost_basis is None

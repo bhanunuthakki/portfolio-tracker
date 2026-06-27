@@ -43,6 +43,7 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.policy import load_policy_weights
+from portfolio_tracker.services.splits import load_split_factors
 
 # Skip these from the per-ticker view — they're cash-equivalent vehicles
 # whose "alpha vs SPY" doesn't carry meaning (they're effectively cash).
@@ -238,6 +239,41 @@ def compute_position_alpha(
     snapshot_values_start = _snapshot_value_per_ticker(session, start_date, accts, all_tickers)
     snapshot_values_end = _snapshot_value_per_ticker(session, end_date, accts, all_tickers)
 
+    # Snapshot-preferred per-ticker V at the window endpoints. Built ONCE here
+    # so the per-ticker table rows AND the daily chart series share the exact
+    # same V_start / V_end basis — previously the table preferred broker
+    # `institution_value` while `_compute_alpha_series` re-derived V from
+    # qty × Price.close, so the headline total and the chart's first/last
+    # points disagreed whenever a broker mark drifted from the yfinance close.
+    v_start_by_ticker: dict[str, Decimal] = {}
+    v_end_by_ticker: dict[str, Decimal] = {}
+    for t_up in by_ticker:
+        q_start = qty_at_start.get(t_up, Decimal(0))
+        q_end = qty_at_end.get(t_up, Decimal(0))
+        p_start = prices_start.get(t_up)
+        p_end = prices_end.get(t_up)
+        snap_start = snapshot_values_start.get(t_up)
+        snap_end = snapshot_values_end.get(t_up)
+        if snap_start is not None and snap_start > 0:
+            v_start_by_ticker[t_up] = snap_start
+        else:
+            v_start_by_ticker[t_up] = (
+                q_start * p_start if (q_start != 0 and p_start is not None) else Decimal(0)
+            )
+        if snap_end is not None and snap_end > 0:
+            v_end_by_ticker[t_up] = snap_end
+        else:
+            v_end_by_ticker[t_up] = (
+                q_end * p_end if (q_end != 0 and p_end is not None) else Decimal(0)
+            )
+
+    # Per-day snapshot values so the chart series can prefer the broker mark on
+    # any date a snapshot exists (matching Holdings), falling back to
+    # qty × Price.close only for dates with no snapshot.
+    snap_values_by_date = _snapshot_values_by_date(
+        session, start_date, end_date, accts, all_tickers
+    )
+
     # 4. Benchmark closes (SPY, QQQ, and policy basket)
     spy_closes = _benchmark_closes_with_lookback(session, "SPY", start_date, end_date)
     qqq_closes = _benchmark_closes_with_lookback(session, "QQQ", start_date, end_date)
@@ -281,22 +317,12 @@ def compute_position_alpha(
         q_end = qty_at_end.get(t_up, Decimal(0))
         p_start = prices_start.get(t_up)
         p_end = prices_end.get(t_up)
-        # Prefer broker `institution_value` from the snapshot when one
-        # exists for the exact date. Falls back to qty × Price.close
-        # when there's no snapshot (e.g. historical window-start dates
-        # the user hadn't been running snapshots for). Keeps Holdings,
-        # Trade Timeline, Trade Analysis, and Position Alpha agreeing
-        # on dollar values when they share the same observation date.
-        snap_start = snapshot_values_start.get(t_up)
-        snap_end = snapshot_values_end.get(t_up)
-        if snap_start is not None and snap_start > 0:
-            v_start = snap_start
-        else:
-            v_start = q_start * p_start if (q_start != 0 and p_start is not None) else Decimal(0)
-        if snap_end is not None and snap_end > 0:
-            v_end = snap_end
-        else:
-            v_end = q_end * p_end if (q_end != 0 and p_end is not None) else Decimal(0)
+        # Snapshot-preferred V (broker `institution_value` on the exact date,
+        # else qty × Price.close) — precomputed above so the chart series uses
+        # the identical basis. Keeps Holdings, Trade Timeline, Trade Analysis,
+        # and Position Alpha agreeing on dollar values for a shared date.
+        v_start = v_start_by_ticker[t_up]
+        v_end = v_end_by_ticker[t_up]
 
         bought_sum = sum((a for _, a in b["buys"]), Decimal(0))
         sold_sum = sum((a for _, a in b["sells"]), Decimal(0))
@@ -392,6 +418,9 @@ def compute_position_alpha(
         Decimal(str(qqq_start)) if qqq_start else None,
         policy_weights,
         policy_closes_per_ticker,
+        v_start_by_ticker,
+        v_end_by_ticker,
+        snap_values_by_date,
     )
 
     return PositionAlphaResult(
@@ -520,12 +549,24 @@ def _compute_alpha_series(
     qqq_start: Decimal | None = None,
     policy_weights: dict[str, Decimal] | None = None,
     policy_closes_per_ticker: dict[str, dict[date, Decimal]] | None = None,
+    v_start_by_ticker: dict[str, Decimal] | None = None,
+    v_end_by_ticker: dict[str, Decimal] | None = None,
+    snap_values_by_date: dict[date, dict[str, Decimal]] | None = None,
 ) -> list[PositionAlphaTimePoint]:
     """Build the daily aggregate V and benchmark V series for the chart.
 
     Walks transactions forward, maintaining per-ticker qty (for V_portfolio)
     and per-ticker benchmark-shares accumulators (one per benchmark) using
     dollar-matched conversions at each trade's date.
+
+    `v_start_by_ticker` / `v_end_by_ticker` are the SAME snapshot-preferred
+    per-ticker V the table reports; the chart's first/last points are pinned
+    to those sums and the benchmark sleeves are seeded from `v_start_by_ticker`
+    so every line starts at the table's V_start. Interior days prefer the
+    same-day broker mark from `snap_values_by_date` (matching Holdings on
+    snapshot dates), falling back to qty × Price.close otherwise. This removes
+    the prior mismatch where the table used broker `institution_value` but the
+    chart re-derived V from yfinance closes.
     """
     if not tickers or not spy_closes:
         return []
@@ -540,6 +581,10 @@ def _compute_alpha_series(
             sid_to_ticker[sid] = t.upper()
     if not sid_to_ticker:
         return []
+
+    # Split factors so in-window trades are normalized to today's
+    # split-adjusted units (same basis as `prices` and as qty_at_start).
+    split_factors = load_split_factors(session, sid_to_ticker.keys())
 
     # Pull all in-window transactions sorted by date
     tx_rows = (
@@ -578,9 +623,16 @@ def _compute_alpha_series(
     for t in tk_set:
         q = qty_at_start.get(t, Decimal(0))
         qty[t] = q
-        p = prices_at_start.get(t)
-        if q != 0 and p is not None:
-            v_start_t = q * p
+        # Seed each benchmark sleeve from the SAME snapshot-preferred V_start
+        # the table uses, so every line on the chart anchors to the table's
+        # V_start. Fall back to qty × Price.close only if the caller didn't
+        # supply the precomputed map (keeps the helper independently callable).
+        if v_start_by_ticker is not None:
+            v_start_t = v_start_by_ticker.get(t, Decimal(0))
+        else:
+            p = prices_at_start.get(t)
+            v_start_t = q * p if (q != 0 and p is not None) else Decimal(0)
+        if v_start_t != 0:
             if spy_start > 0:
                 spy_shares_per_ticker[t] = v_start_t / spy_start
             if qqq_closes and qqq_start and qqq_start > 0:
@@ -624,6 +676,7 @@ def _compute_alpha_series(
                 continue
             qty_delta = _forward_quantity_delta(tx)
             if qty_delta is not None and qty_delta != 0:
+                qty_delta *= split_factors.factor_after(tx.security_id, cur)
                 qty[t] += qty_delta
                 px = _last_known_price(prices.get(t, {}), cur)
                 if px is not None:
@@ -650,15 +703,32 @@ def _compute_alpha_series(
             if policy_weights and policy_closes_per_ticker:
                 policy_lots_per_ticker[t].append((cur, sign * amt))
 
-        # V_portfolio: end-of-day positions × today's close
-        v_port = Decimal(0)
-        for t in tk_set:
-            q = qty[t]
-            if q == 0:
-                continue
-            px = _last_known_price(prices.get(t, {}), cur)
-            if px is not None:
-                v_port += q * px
+        # V_portfolio. Pin the endpoints to the table's snapshot-preferred
+        # V_start / V_end so the chart reconciles to the headline exactly;
+        # for interior days prefer the same-day broker mark, falling back to
+        # qty × today's close.
+        if cur == start_date and v_start_by_ticker is not None:
+            v_port = sum(
+                (v.quantize(Decimal("0.01")) for v in v_start_by_ticker.values()), Decimal(0)
+            )
+        elif cur == end_date and v_end_by_ticker is not None:
+            v_port = sum(
+                (v.quantize(Decimal("0.01")) for v in v_end_by_ticker.values()), Decimal(0)
+            )
+        else:
+            snap_today = snap_values_by_date.get(cur) if snap_values_by_date else None
+            v_port = Decimal(0)
+            for t in tk_set:
+                snap_v = snap_today.get(t) if snap_today else None
+                if snap_v is not None and snap_v > 0:
+                    v_port += snap_v
+                    continue
+                q = qty[t]
+                if q == 0:
+                    continue
+                px = _last_known_price(prices.get(t, {}), cur)
+                if px is not None:
+                    v_port += q * px
 
         # V_SPY counterfactual
         spy_px = _last_known_price(spy_closes, cur)
@@ -746,18 +816,21 @@ def _qty_per_ticker_at_date(
 def _qty_from_snapshot_forward(
     session: Session, snap_date: date, target_date: date, accts: frozenset[int]
 ) -> dict[str, Decimal]:
-    """Start from snapshot at snap_date, replay transactions forward to target_date."""
-    qty: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
-    for sid, q in session.execute(
+    """Start from snapshot at snap_date, replay transactions forward to target_date.
+
+    Quantities are normalized to today's split-adjusted units (the units the
+    `prices` series uses) by scaling each snapshot/transaction quantity by the
+    product of split ratios after its own date — so a split between snap_date
+    and now doesn't doubled/halve the reconstructed quantity.
+    """
+    snap_rows = session.execute(
         select(HoldingSnapshot.security_id, HoldingSnapshot.quantity)
         .where(HoldingSnapshot.snapshot_date == snap_date)
         .where(HoldingSnapshot.account_id.in_(accts))
-    ):
-        if sid is not None and q is not None:
-            qty[sid] += Decimal(q)
+    ).all()
+    forward_tx: list[InvestmentTransaction] = []
     if target_date > snap_date:
-        # Replay forward (apply, not reverse)
-        forward_tx = (
+        forward_tx = list(
             session.execute(
                 select(InvestmentTransaction)
                 .where(InvestmentTransaction.account_id.in_(accts))
@@ -768,12 +841,20 @@ def _qty_from_snapshot_forward(
             .scalars()
             .all()
         )
-        for tx in forward_tx:
-            if tx.security_id is None:
-                continue
-            delta = _forward_quantity_delta(tx)
-            if delta is not None:
-                qty[tx.security_id] += delta
+    sids = {sid for sid, _ in snap_rows if sid is not None}
+    sids |= {tx.security_id for tx in forward_tx if tx.security_id is not None}
+    factors = load_split_factors(session, sids)
+
+    qty: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    for sid, q in snap_rows:
+        if sid is not None and q is not None:
+            qty[sid] += Decimal(q) * factors.factor_after(sid, snap_date)
+    for tx in forward_tx:
+        if tx.security_id is None:
+            continue
+        delta = _forward_quantity_delta(tx)
+        if delta is not None:
+            qty[tx.security_id] += delta * factors.factor_after(tx.security_id, tx.date)
     return _resolve_tickers(session, qty)
 
 
@@ -787,8 +868,7 @@ def _qty_walk_back(
     accounts. Without per-account tracking, a multi-account ticker would
     see all its qty wiped when one account has an ACATS-in override.
     """
-    qty_per_acct_sec: dict[tuple[int, int], Decimal] = defaultdict(lambda: Decimal(0))
-    for acct_id, sid, q in session.execute(
+    anchor_rows = session.execute(
         select(
             HoldingSnapshot.account_id,
             HoldingSnapshot.security_id,
@@ -796,10 +876,8 @@ def _qty_walk_back(
         )
         .where(HoldingSnapshot.snapshot_date == anchor_date)
         .where(HoldingSnapshot.account_id.in_(accts))
-    ):
-        if acct_id is not None and sid is not None and q is not None:
-            qty_per_acct_sec[(acct_id, sid)] += Decimal(q)
-    backward_tx = (
+    ).all()
+    backward_tx = list(
         session.execute(
             select(InvestmentTransaction)
             .where(InvestmentTransaction.account_id.in_(accts))
@@ -810,12 +888,26 @@ def _qty_walk_back(
         .scalars()
         .all()
     )
+    # Normalize to today's split-adjusted units (consistent with the adjusted
+    # `prices` series): scale anchor and each reversed tx by the split product
+    # after its own date, so a split between the tx/anchor and now isn't
+    # mis-counted.
+    sids = {sid for _, sid, _ in anchor_rows if sid is not None}
+    sids |= {tx.security_id for tx in backward_tx if tx.security_id is not None}
+    factors = load_split_factors(session, sids)
+
+    qty_per_acct_sec: dict[tuple[int, int], Decimal] = defaultdict(lambda: Decimal(0))
+    for acct_id, sid, q in anchor_rows:
+        if acct_id is not None and sid is not None and q is not None:
+            qty_per_acct_sec[(acct_id, sid)] += Decimal(q) * factors.factor_after(sid, anchor_date)
     for tx in backward_tx:
         if tx.security_id is None:
             continue
         delta = _reverse_quantity_delta(tx)
         if delta is not None:
-            qty_per_acct_sec[(tx.account_id, tx.security_id)] += delta
+            qty_per_acct_sec[(tx.account_id, tx.security_id)] += delta * factors.factor_after(
+                tx.security_id, tx.date
+            )
 
     # ACATS-in pre-window adjustment. For each cost-basis override with
     # `acquired_at > target_date`, the user did NOT have those shares in
@@ -930,6 +1022,41 @@ def _snapshot_value_per_ticker(
     return out
 
 
+def _snapshot_values_by_date(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    accts: frozenset[int],
+    tickers: list[str],
+) -> dict[date, dict[str, Decimal]]:
+    """Broker `institution_value` summed per (snapshot_date, ticker) across the
+    window. Lets the chart series prefer the broker mark on any date a snapshot
+    exists, so interior chart points match Holdings — falling back to
+    qty × Price.close only on dates with no snapshot.
+    """
+    if not tickers:
+        return {}
+    rows = session.execute(
+        select(
+            HoldingSnapshot.snapshot_date,
+            Security.ticker,
+            func.sum(HoldingSnapshot.institution_value),
+        )
+        .join(HoldingSnapshot, HoldingSnapshot.security_id == Security.security_id)
+        .where(HoldingSnapshot.snapshot_date >= start_date)
+        .where(HoldingSnapshot.snapshot_date <= end_date)
+        .where(HoldingSnapshot.account_id.in_(accts))
+        .where(Security.ticker.in_(tickers))
+        .group_by(HoldingSnapshot.snapshot_date, Security.ticker)
+    ).all()
+    out: dict[date, dict[str, Decimal]] = defaultdict(dict)
+    for d, t, v in rows:
+        if d is None or t is None or v is None:
+            continue
+        out[d][t.upper()] = Decimal(v)
+    return dict(out)
+
+
 def _price_per_ticker_at_date(
     session: Session, tickers: list[str], target_date: date
 ) -> dict[str, Decimal]:
@@ -983,10 +1110,21 @@ def _price_per_ticker_at_date(
 def _benchmark_closes_with_lookback(
     session: Session, symbol: str, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    """Closes for one benchmark symbol, plus a 14-day forward/backward window
-    so non-trading start/end dates fall back to the most recent close."""
+    """Total-return closes for one benchmark symbol, plus a 14-day
+    forward/backward window so non-trading start/end dates fall back to the
+    most recent close.
+
+    Uses `total_return_close` (dividend-reinvested) so the counterfactual
+    compares against a buy-and-hold that reinvests the index's dividends —
+    a price-only series understates the benchmark and over-credits alpha.
+    Coalesces to the raw `close` for rows written before migration 0021's
+    backfill.
+    """
     rows = session.execute(
-        select(Benchmark.date, Benchmark.close)
+        select(
+            Benchmark.date,
+            func.coalesce(Benchmark.total_return_close, Benchmark.close),
+        )
         .where(Benchmark.symbol == symbol)
         .where(Benchmark.date >= start_date - timedelta(days=14))
         .where(Benchmark.date <= end_date + timedelta(days=14))

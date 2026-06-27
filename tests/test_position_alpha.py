@@ -20,6 +20,7 @@ from portfolio_tracker.models import (
     Item,
     Price,
     Security,
+    StockSplit,
 )
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.position_alpha import (
@@ -129,6 +130,77 @@ def test_qty_walk_back_reverses_buy(session):
     accts = active_account_ids(session)
     result = _qty_walk_back(session, anchor, target, accts)
     assert result == {"AAPL": Decimal(70)}
+
+
+def test_qty_walk_back_normalizes_pre_split_quantity(session):
+    # A 2:1 split sits between a pre-split buy and the anchor snapshot. The
+    # snapshot (200) is post-split; the buy was recorded as 100 as-traded
+    # (pre-split) shares. Reversing the raw 100 against 200 would leave a
+    # phantom 100; scaled by the 2x split factor it reverses 200 -> 0.
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add(aapl)
+    session.flush()
+    anchor = date(2025, 1, 10)
+    target = date(2025, 1, 1)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            quantity=Decimal(200),  # post-split units
+        )
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-presplit-buy",
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            date=date(2025, 1, 3),  # before the split
+            type="buy",
+            quantity=Decimal(100),  # as-traded, pre-split
+            amount=Decimal(40000),
+        )
+    )
+    session.add(
+        StockSplit(security_id=aapl.security_id, split_date=date(2025, 1, 5), ratio=Decimal(2))
+    )
+    session.commit()
+
+    accts = active_account_ids(session)
+    result = _qty_walk_back(session, anchor, target, accts)
+    assert result == {"AAPL": Decimal(0)}
+
+
+def test_qty_walk_back_no_split_unchanged(session):
+    # No split rows -> identity factor -> the original reversal (200 - 30 = 170).
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add(aapl)
+    session.flush()
+    anchor = date(2025, 1, 10)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            quantity=Decimal(200),
+        )
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-buy",
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            date=date(2025, 1, 5),
+            type="buy",
+            quantity=Decimal(30),
+            amount=Decimal(3000),
+        )
+    )
+    session.commit()
+    accts = active_account_ids(session)
+    assert _qty_walk_back(session, anchor, date(2025, 1, 1), accts) == {"AAPL": Decimal(170)}
 
 
 def test_qty_walk_back_acats_acquired_at_zeroes_position(session):
@@ -285,3 +357,109 @@ def test_compute_position_alpha_held_position_outperforms_spy(session):
     assert row.value_at_end == Decimal(1200)
     assert row.alpha == Decimal(100)
     assert row.incomplete is False
+
+
+def test_benchmark_counterfactual_uses_total_return_close(session):
+    # Same setup as above, but the SPY benchmark carries a `total_return_close`
+    # that reinvests dividends: price 400 -> 440 (+10%), total return 400 -> 444
+    # (+11%). The counterfactual must use the total-return series, so the SPY
+    # leg earns more and the user's alpha shrinks accordingly — removing the
+    # ~dividend-yield over-credit a price-only comparison bakes in.
+    start = date(2025, 5, 1)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add(aapl)
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=aapl.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1000),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=aapl.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1200),
+            ),
+            Price(security_id=aapl.security_id, date=start, close=Decimal(100)),
+            Price(security_id=aapl.security_id, date=end, close=Decimal(120)),
+            Benchmark(
+                symbol="SPY", date=start, close=Decimal(400), total_return_close=Decimal(400)
+            ),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440), total_return_close=Decimal(444)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    # (1000 / 400) * 444 - 1000 = 110, NOT the price-only 100.
+    assert result.total_spy_pl == Decimal(110)
+    assert result.total_alpha == Decimal(90)  # 200 - 110, down from 100
+
+
+def test_chart_series_reconciles_to_table_under_broker_close_drift(session):
+    # Broker `institution_value` drifts from qty × Price.close (the realistic
+    # case for ADRs / thin names). The table prefers the broker mark; the chart
+    # series must reconcile to that SAME V_start / V_end, and interior snapshot
+    # dates must show the broker mark too — not qty × yfinance close.
+    start = date(2025, 5, 1)
+    mid = date(2025, 5, 15)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    nvo = Security(plaid_security_id="s-nvo", ticker="NVO", type="ad")
+    session.add(nvo)
+    session.flush()
+    session.add_all(
+        [
+            # qty × close would be 1000 / 1000 / 1200; broker marks drift higher.
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=nvo.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1050),
+            ),
+            HoldingSnapshot(
+                snapshot_date=mid,
+                account_id=account.account_id,
+                security_id=nvo.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=nvo.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1260),
+            ),
+            Price(security_id=nvo.security_id, date=start, close=Decimal(100)),
+            Price(security_id=nvo.security_id, date=end, close=Decimal(120)),
+            Benchmark(symbol="SPY", date=start, close=Decimal(400)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    # Table reports the broker-preferred V at both endpoints.
+    assert result.v_start == Decimal("1050.00")
+    assert result.v_end == Decimal("1260.00")
+
+    by_date = {p.date: p for p in result.series}
+    # Chart endpoints reconcile to the table (previously 1000 / 1200 from
+    # qty × close — the mismatch this fix removes).
+    assert by_date[start].portfolio_value == result.v_start
+    assert by_date[end].portfolio_value == result.v_end
+    # Interior snapshot date shows the broker mark, not qty × forward-filled close.
+    assert by_date[mid].portfolio_value == Decimal("1100.00")
+    # Every benchmark sleeve anchors to the same V_start.
+    assert by_date[start].spy_counterfactual_value == Decimal("1050.00")
