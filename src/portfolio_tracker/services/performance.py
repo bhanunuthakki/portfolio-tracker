@@ -57,6 +57,7 @@ from portfolio_tracker.models import (
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.policy import load_policy_weights
+from portfolio_tracker.services.splits import load_split_factors
 
 # Diagnostics-only threshold: daily portfolio-value swings beyond this are
 # almost certainly reconstruction artifacts (unobserved transfers, gifted
@@ -1233,6 +1234,17 @@ def _backfill_values_from_transactions(
         .all()
     )
 
+    # Normalize quantities to today's split-adjusted units (consistent with the
+    # split-adjusted `prices` used by _value_quantities_with_prices): scale the
+    # anchor positions and each reversed tx by the split product after its date.
+    split_factors = load_split_factors(
+        session,
+        set(positions) | {tx.security_id for tx in backward_tx if tx.security_id is not None},
+    )
+    positions = {
+        sid: q * split_factors.factor_after(sid, anchor_date) for sid, q in positions.items()
+    }
+
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     daily_cash_adj: dict[date, Decimal] = {}
     rolling_positions = dict(positions)
@@ -1251,6 +1263,7 @@ def _backfill_values_from_transactions(
         if tx.security_id is not None:
             delta = _reverse_transaction_quantity(tx)
             if delta is not None:
+                delta *= split_factors.factor_after(tx.security_id, tx.date)
                 rolling_positions[tx.security_id] = (
                     rolling_positions.get(tx.security_id, Decimal(0)) + delta
                 )
