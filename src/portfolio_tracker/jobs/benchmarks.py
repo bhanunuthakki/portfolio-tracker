@@ -23,12 +23,30 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import Benchmark, PolicyWeight
 
+# The 11 SPDR Select Sector ETFs — one per GICS sector. Stored like benchmarks
+# so the Brinson allocation/selection attribution (`services.brinson`) can value
+# each benchmark sector sleeve over a window. Never used as a whole-portfolio
+# counterfactual; only the Brinson service references these symbols.
+_SECTOR_ETFS: tuple[str, ...] = (
+    "XLK",  # Information Technology
+    "XLF",  # Financials
+    "XLV",  # Health Care
+    "XLE",  # Energy
+    "XLY",  # Consumer Discretionary
+    "XLP",  # Consumer Staples
+    "XLI",  # Industrials
+    "XLB",  # Materials
+    "XLU",  # Utilities
+    "XLRE",  # Real Estate
+    "XLC",  # Communication Services
+)
+
 # Always-on benchmarks. Anything else comes from policy_weights.
 # `^IRX` is the 13-week US T-bill yield (in percent) — stored like a benchmark
 # so the risk-metrics service can use a time-varying risk-free rate instead of
 # a flat constant. It's never used as a return counterfactual (nothing
 # references the "^IRX" symbol except `beta._window_risk_free`).
-_DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX")
+_DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX", *_SECTOR_ETFS)
 
 
 def run(start_date: date, end_date: date) -> int:
