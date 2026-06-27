@@ -71,6 +71,12 @@ class BetaResult(BaseModel):
     alpha_annualized_pct: float | None
     r_squared: float | None
     correlation: float | None
+    # Statistical significance of the alpha intercept — is the measured skill
+    # distinguishable from zero, or is it small-sample noise? `alpha_t_stat`
+    # is the intercept / its standard error (n-2 df); |t| >~ 2 ≈ p<0.05.
+    alpha_t_stat: float | None
+    alpha_std_error_annualized_pct: float | None
+    alpha_significant: bool | None
 
     # Absolute risk-adjusted performance
     sharpe: float | None
@@ -173,6 +179,21 @@ def compute_beta(
     m_vol = _annualized_volatility(paired_m)
     alpha_annual = alpha * _TRADING_DAYS_PER_YEAR * 100 if alpha is not None else None
 
+    se_alpha_daily, alpha_t_stat = _alpha_significance(paired_p, paired_m, beta, alpha)
+    alpha_se_annual = (
+        se_alpha_daily * _TRADING_DAYS_PER_YEAR * 100 if se_alpha_daily is not None else None
+    )
+    # |t| ~ 2 is the conventional ≈p<0.05 threshold; on the small samples this
+    # tool runs, an alpha below it should be read as not-yet-distinguishable
+    # from luck.
+    alpha_significant = abs(alpha_t_stat) >= 2.0 if alpha_t_stat is not None else None
+    if alpha_t_stat is not None and not alpha_significant and alpha_annual is not None:
+        notes.append(
+            f"Alpha {alpha_annual:+.1f}%/yr is NOT statistically distinguishable "
+            f"from zero (t={alpha_t_stat:.2f}, n={len(paired_p)}) — likely noise, "
+            f"not demonstrated skill, on this sample."
+        )
+
     if len(paired_p) < 30:
         notes.append(
             f"Sample size is small ({len(paired_p)} days). Confidence in "
@@ -196,6 +217,9 @@ def compute_beta(
         alpha_annualized_pct=alpha_annual,
         r_squared=r_squared,
         correlation=correlation,
+        alpha_t_stat=alpha_t_stat,
+        alpha_std_error_annualized_pct=alpha_se_annual,
+        alpha_significant=alpha_significant,
         sharpe=sharpe,
         sortino=sortino,
         information_ratio=info_ratio,
@@ -223,6 +247,9 @@ def _empty_result(
         alpha_annualized_pct=None,
         r_squared=None,
         correlation=None,
+        alpha_t_stat=None,
+        alpha_std_error_annualized_pct=None,
+        alpha_significant=None,
         sharpe=None,
         sortino=None,
         information_ratio=None,
@@ -359,6 +386,33 @@ def _ols(
     correlation = cov / ((var_p * var_m) ** 0.5)
     r_squared = correlation * correlation
     return (beta, alpha, r_squared, correlation)
+
+
+def _alpha_significance(
+    p: list[float], m: list[float], beta: float | None, alpha: float | None
+) -> tuple[float | None, float | None]:
+    """Standard error and t-statistic of the OLS alpha intercept.
+
+    Returns (se_alpha_daily, t_stat). The t-stat is scale-invariant, so it's
+    the same for the daily or annualized alpha; the daily SE is annualized by
+    the caller. Needs n ≥ 3 (n-2 residual degrees of freedom) and benchmark
+    variance > 0.
+
+        SE(α)² = s² · [ 1/n + x̄² / Σ(xᵢ − x̄)² ],   s² = Σeᵢ² / (n − 2)
+    """
+    n = len(p)
+    if n < 3 or beta is None or alpha is None:
+        return (None, None)
+    mean_m = sum(m) / n
+    ssx = sum((mi - mean_m) ** 2 for mi in m)
+    if ssx == 0:
+        return (None, None)
+    sse = sum((pi - (alpha + beta * mi)) ** 2 for pi, mi in zip(p, m, strict=False))
+    s_squared = sse / (n - 2)
+    se_alpha = (s_squared * (1.0 / n + mean_m**2 / ssx)) ** 0.5
+    if se_alpha == 0:
+        return (None, None)
+    return (se_alpha, alpha / se_alpha)
 
 
 def _sharpe(returns: list[float], rf_daily: float) -> float | None:

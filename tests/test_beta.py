@@ -13,6 +13,7 @@ from decimal import Decimal
 import pytest
 
 from portfolio_tracker.services.beta import (
+    _alpha_significance,
     _daily_returns,
     _information_ratio,
     _ols,
@@ -40,6 +41,32 @@ def test_ols_perfectly_linear():
 
 def test_ols_too_few_points_returns_nones():
     assert _ols([0.01], [0.02]) == (None, None, None, None)
+
+
+# ---- _alpha_significance -------------------------------------------------
+
+
+def test_alpha_significance_known_value():
+    # m=[-1,0,1], p=[0,1,3] -> beta 1.5, alpha 4/3, residuals [1/6,-1/3,1/6],
+    # SSE 1/6, s^2 1/6, SE(alpha)^2 = (1/6)(1/3) = 1/18, t = alpha/SE.
+    m = [-1.0, 0.0, 1.0]
+    p = [0.0, 1.0, 3.0]
+    beta, alpha, _r2, _corr = _ols(p, m)
+    se, t = _alpha_significance(p, m, beta, alpha)
+    assert se == pytest.approx(1 / math.sqrt(18))
+    assert t == pytest.approx(5.656854, rel=1e-5)
+
+
+def test_alpha_significance_too_few_points():
+    assert _alpha_significance([0.0, 1.0], [0.0, 1.0], 1.0, 0.0) == (None, None)
+
+
+def test_alpha_significance_perfect_fit_is_undefined():
+    # p = m + 2 exactly: zero residuals -> SE 0 -> t undefined (None).
+    m = [-1.0, 0.0, 1.0]
+    p = [1.0, 2.0, 3.0]
+    beta, alpha, _r2, _corr = _ols(p, m)
+    assert _alpha_significance(p, m, beta, alpha) == (None, None)
 
 
 def test_ols_zero_benchmark_variance_returns_nones():
