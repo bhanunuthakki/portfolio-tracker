@@ -33,6 +33,7 @@ from portfolio_tracker.schemas import (
 )
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
+from portfolio_tracker.services import drawdown as drawdown_service
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
@@ -471,6 +472,30 @@ def _default_start_date(session: Session, end_date: date, include_backfill: bool
         return earliest_snap
 
     return end_date - timedelta(days=365)
+
+
+@router.get("/drawdown", response_model=drawdown_service.DrawdownResult)
+def drawdown_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    reserve_amount: float = Query(default=0.0, ge=0),
+    exclude_index_etfs: bool = Query(default=False),
+) -> drawdown_service.DrawdownResult:
+    """Loss-shaped risk over the cashflow-neutral return index: max drawdown,
+    underwater curve, time-to-recovery, and Calmar (annualized return / |maxDD|).
+    Same windowing as /performance; defaults to a snapshot-derived window."""
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = _default_start_date(session, end_date, include_backfill=False)
+    return drawdown_service.compute_drawdown(
+        session,
+        start_date,
+        end_date,
+        Decimal(str(reserve_amount)),
+        exclude_index_etfs,
+    )
 
 
 @router.get("/cashflow-audit", response_model=CashflowAuditOut)
