@@ -33,6 +33,7 @@ from portfolio_tracker.schemas import (
 )
 from portfolio_tracker.services import after_tax as after_tax_service
 from portfolio_tracker.services import beta as beta_service
+from portfolio_tracker.services import brinson as brinson_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import drawdown as drawdown_service
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
@@ -679,6 +680,29 @@ def beta_endpoint(
         exclude_index_etfs,
         Decimal(str(reserve_amount)),
     )
+
+
+@router.get("/brinson", response_model=brinson_service.BrinsonResult)
+def brinson_attribution(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> brinson_service.BrinsonResult:
+    """Brinson-Fachler sector attribution vs SPY: splits active return into
+    allocation (sector over/under-weighting), selection (in-sector stock
+    picking), and interaction effects.
+
+    Portfolio sector weights/returns are aggregated from the position-alpha
+    sleeve by GICS sector (beginning-of-window weights); benchmark sector
+    returns are the 11 SPDR sector ETFs; benchmark sector weights are a
+    documented STATIC approximate S&P 500 map (no live feed). Every
+    approximation is enumerated in the response `notes`. Defaults to a trailing
+    365-day window."""
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    return brinson_service.compute_brinson(session, start_date, end_date)
 
 
 @router.get("/positioning", response_model=PositioningOut)
