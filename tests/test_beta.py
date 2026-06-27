@@ -12,6 +12,7 @@ from decimal import Decimal
 
 import pytest
 
+from portfolio_tracker.models import Benchmark
 from portfolio_tracker.services.beta import (
     _alpha_significance,
     _daily_returns,
@@ -20,6 +21,7 @@ from portfolio_tracker.services.beta import (
     _pair_returns,
     _sharpe,
     _sortino,
+    _window_risk_free,
 )
 
 _SQRT_252 = math.sqrt(252)
@@ -59,6 +61,27 @@ def test_alpha_significance_known_value():
 
 def test_alpha_significance_too_few_points():
     assert _alpha_significance([0.0, 1.0], [0.0, 1.0], 1.0, 0.0) == (None, None)
+
+
+# ---- _window_risk_free ---------------------------------------------------
+
+
+def test_window_risk_free_averages_tbill_yield(session):
+    session.add_all(
+        [
+            Benchmark(symbol="^IRX", date=date(2025, 1, 2), close=Decimal("4.00")),
+            Benchmark(symbol="^IRX", date=date(2025, 1, 3), close=Decimal("5.00")),
+            # Outside the window — must be ignored.
+            Benchmark(symbol="^IRX", date=date(2024, 6, 1), close=Decimal("0.50")),
+        ]
+    )
+    session.commit()
+    rf = _window_risk_free(session, date(2025, 1, 1), date(2025, 1, 31))
+    assert rf == pytest.approx(0.045)  # avg(4, 5) / 100
+
+
+def test_window_risk_free_none_when_no_data(session):
+    assert _window_risk_free(session, date(2025, 1, 1), date(2025, 1, 31)) is None
 
 
 def test_alpha_significance_perfect_fit_is_undefined():

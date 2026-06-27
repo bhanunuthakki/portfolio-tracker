@@ -24,7 +24,11 @@ from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import Benchmark, PolicyWeight
 
 # Always-on benchmarks. Anything else comes from policy_weights.
-_DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ")
+# `^IRX` is the 13-week US T-bill yield (in percent) — stored like a benchmark
+# so the risk-metrics service can use a time-varying risk-free rate instead of
+# a flat constant. It's never used as a return counterfactual (nothing
+# references the "^IRX" symbol except `beta._window_risk_free`).
+_DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX")
 
 
 def run(start_date: date, end_date: date) -> int:

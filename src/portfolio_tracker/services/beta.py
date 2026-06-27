@@ -34,11 +34,15 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio_tracker.models import PolicyWeight
+from portfolio_tracker.models import Benchmark, PolicyWeight
 from portfolio_tracker.services.performance import (
     _benchmark_series,  # pyright: ignore[reportPrivateUsage]
 )
 from portfolio_tracker.services.position_alpha import compute_position_alpha
+
+# The 13-week US T-bill yield is stored under this symbol (percent units) by
+# the benchmarks job, giving Sharpe/Sortino a time-varying risk-free rate.
+_RISK_FREE_SYMBOL = "^IRX"
 
 # A single-day move in the *aggregate* position book above this is almost
 # certainly a price-data error (a close that briefly went to 0, a split that
@@ -96,7 +100,7 @@ def compute_beta(
     start_date: date,
     end_date: date,
     benchmark_symbol: str = "SPY",
-    risk_free_annual: float = _DEFAULT_RISK_FREE_ANNUAL,
+    risk_free_annual: float | None = None,
     exclude_index_etfs: bool = False,
     reserve_amount: Decimal = Decimal(0),
     data_error_threshold: Decimal = _DATA_ERROR_DAILY_RETURN,
@@ -121,7 +125,28 @@ def compute_beta(
     of this service used the legacy walk-back-reconstructed total V which
     introduced cashflow-attribution noise that distorted daily returns
     by 5-15 pp/year (see PERFORMANCE_AUDIT.md F6, now obsoleted).
+
+    `risk_free_annual=None` (the default) sources a time-varying rate: the
+    average 13-week T-bill yield over the window (from the `^IRX` series the
+    benchmarks job stores), falling back to ~4% only when no T-bill data
+    covers the window. Pass an explicit float to override.
     """
+    notes: list[str] = []
+    if risk_free_annual is None:
+        sourced = _window_risk_free(session, start_date, end_date)
+        if sourced is not None:
+            risk_free_annual = sourced
+            notes.append(
+                f"Risk-free rate {sourced * 100:.2f}%/yr = average 13-week T-bill "
+                f"yield over the window (time-varying)."
+            )
+        else:
+            risk_free_annual = _DEFAULT_RISK_FREE_ANNUAL
+            notes.append(
+                f"Risk-free rate defaulted to {_DEFAULT_RISK_FREE_ANNUAL * 100:.1f}%/yr "
+                f"— no 13-week T-bill (^IRX) data for the window; run jobs.benchmarks."
+            )
+
     # Position-alpha builds positions-only V series, walks transactions
     # forward, applies prices daily. This is the same series the dashboard's
     # main chart renders.
@@ -150,7 +175,6 @@ def compute_beta(
     paired_p, paired_m, excluded = _pair_returns(
         portfolio_returns, benchmark_returns, data_error_threshold
     )
-    notes: list[str] = []
     if excluded:
         bound_pct = int(data_error_threshold * 100)
         detail = ", ".join(f"{d.isoformat()} ({float(r) * 100:+.0f}%)" for d, r in sorted(excluded))
@@ -258,6 +282,29 @@ def _empty_result(
         tracking_error_annualized=None,
         notes=notes,
     )
+
+
+def _window_risk_free(session: Session, start_date: date, end_date: date) -> float | None:
+    """Average 13-week T-bill yield over the window as an annual fraction.
+
+    `^IRX` closes are stored in PERCENT (e.g. 4.30 = 4.30%/yr), so divide by
+    100. Returns None when no T-bill data covers the window (caller falls back
+    to the flat default).
+    """
+    rows = (
+        session.execute(
+            select(Benchmark.close)
+            .where(Benchmark.symbol == _RISK_FREE_SYMBOL)
+            .where(Benchmark.date >= start_date)
+            .where(Benchmark.date <= end_date)
+        )
+        .scalars()
+        .all()
+    )
+    yields = [float(c) for c in rows if float(c) >= 0]
+    if not yields:
+        return None
+    return (sum(yields) / len(yields)) / 100.0
 
 
 def _benchmark_daily_returns_for(

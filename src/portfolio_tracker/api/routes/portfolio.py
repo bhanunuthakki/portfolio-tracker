@@ -631,9 +631,13 @@ def beta_endpoint(
         default="SPY",
         description="Benchmark symbol (SPY/QQQ/etc.) or 'POLICY' for the user's policy mix.",
     ),
-    risk_free_annual: float = Query(
-        default=0.04,
-        description="Annualized risk-free rate used by Sharpe and Sortino (0.04 = 4%/year).",
+    risk_free_annual: float | None = Query(
+        default=None,
+        description=(
+            "Annualized risk-free rate for Sharpe/Sortino (0.04 = 4%/year). "
+            "Omit to use the time-varying average 13-week T-bill yield over the "
+            "window (falls back to ~4% if no T-bill data)."
+        ),
     ),
     exclude_index_etfs: bool = Query(
         default=False,
