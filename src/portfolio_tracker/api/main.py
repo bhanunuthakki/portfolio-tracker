@@ -20,6 +20,7 @@ from portfolio_tracker.api.routes import (
     plaid,
     policy,
     portfolio,
+    positions_v1,
     snaptrade,
 )
 from portfolio_tracker.config import get_settings
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(plaid.router)
     app.include_router(snaptrade.router)
     app.include_router(portfolio.router)
+    app.include_router(positions_v1.router)
     app.include_router(overrides.router)
     app.include_router(policy.router)
     app.include_router(decision_support.router)
