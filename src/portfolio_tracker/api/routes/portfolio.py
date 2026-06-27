@@ -35,6 +35,7 @@ from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import drawdown as drawdown_service
 from portfolio_tracker.services import earnings_summary as earnings_summary_svc
+from portfolio_tracker.services import exit_quality as exit_quality_service
 from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
 from portfolio_tracker.services import trade_analysis as trade_analysis_service
@@ -496,6 +497,22 @@ def drawdown_metrics(
         Decimal(str(reserve_amount)),
         exclude_index_etfs,
     )
+
+
+@router.get("/exit-quality", response_model=exit_quality_service.ExitQualityResult)
+def exit_quality_metrics(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> exit_quality_service.ExitQualityResult:
+    """Sell-side quality: for each ticker sold in the window, re-price the sold
+    shares to today (regret vs holding) and vs a SPY-hold counterfactual (exit
+    alpha vs the market). Defaults to a trailing 365-day window."""
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    return exit_quality_service.compute_exit_quality(session, start_date, end_date)
 
 
 @router.get("/cashflow-audit", response_model=CashflowAuditOut)
