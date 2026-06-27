@@ -43,6 +43,7 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.policy import load_policy_weights
+from portfolio_tracker.services.splits import load_split_factors
 
 # Skip these from the per-ticker view — they're cash-equivalent vehicles
 # whose "alpha vs SPY" doesn't carry meaning (they're effectively cash).
@@ -581,6 +582,10 @@ def _compute_alpha_series(
     if not sid_to_ticker:
         return []
 
+    # Split factors so in-window trades are normalized to today's
+    # split-adjusted units (same basis as `prices` and as qty_at_start).
+    split_factors = load_split_factors(session, sid_to_ticker.keys())
+
     # Pull all in-window transactions sorted by date
     tx_rows = (
         session.execute(
@@ -671,6 +676,7 @@ def _compute_alpha_series(
                 continue
             qty_delta = _forward_quantity_delta(tx)
             if qty_delta is not None and qty_delta != 0:
+                qty_delta *= split_factors.factor_after(tx.security_id, cur)
                 qty[t] += qty_delta
                 px = _last_known_price(prices.get(t, {}), cur)
                 if px is not None:
@@ -810,18 +816,21 @@ def _qty_per_ticker_at_date(
 def _qty_from_snapshot_forward(
     session: Session, snap_date: date, target_date: date, accts: frozenset[int]
 ) -> dict[str, Decimal]:
-    """Start from snapshot at snap_date, replay transactions forward to target_date."""
-    qty: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
-    for sid, q in session.execute(
+    """Start from snapshot at snap_date, replay transactions forward to target_date.
+
+    Quantities are normalized to today's split-adjusted units (the units the
+    `prices` series uses) by scaling each snapshot/transaction quantity by the
+    product of split ratios after its own date — so a split between snap_date
+    and now doesn't doubled/halve the reconstructed quantity.
+    """
+    snap_rows = session.execute(
         select(HoldingSnapshot.security_id, HoldingSnapshot.quantity)
         .where(HoldingSnapshot.snapshot_date == snap_date)
         .where(HoldingSnapshot.account_id.in_(accts))
-    ):
-        if sid is not None and q is not None:
-            qty[sid] += Decimal(q)
+    ).all()
+    forward_tx: list[InvestmentTransaction] = []
     if target_date > snap_date:
-        # Replay forward (apply, not reverse)
-        forward_tx = (
+        forward_tx = list(
             session.execute(
                 select(InvestmentTransaction)
                 .where(InvestmentTransaction.account_id.in_(accts))
@@ -832,12 +841,20 @@ def _qty_from_snapshot_forward(
             .scalars()
             .all()
         )
-        for tx in forward_tx:
-            if tx.security_id is None:
-                continue
-            delta = _forward_quantity_delta(tx)
-            if delta is not None:
-                qty[tx.security_id] += delta
+    sids = {sid for sid, _ in snap_rows if sid is not None}
+    sids |= {tx.security_id for tx in forward_tx if tx.security_id is not None}
+    factors = load_split_factors(session, sids)
+
+    qty: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+    for sid, q in snap_rows:
+        if sid is not None and q is not None:
+            qty[sid] += Decimal(q) * factors.factor_after(sid, snap_date)
+    for tx in forward_tx:
+        if tx.security_id is None:
+            continue
+        delta = _forward_quantity_delta(tx)
+        if delta is not None:
+            qty[tx.security_id] += delta * factors.factor_after(tx.security_id, tx.date)
     return _resolve_tickers(session, qty)
 
 
@@ -851,8 +868,7 @@ def _qty_walk_back(
     accounts. Without per-account tracking, a multi-account ticker would
     see all its qty wiped when one account has an ACATS-in override.
     """
-    qty_per_acct_sec: dict[tuple[int, int], Decimal] = defaultdict(lambda: Decimal(0))
-    for acct_id, sid, q in session.execute(
+    anchor_rows = session.execute(
         select(
             HoldingSnapshot.account_id,
             HoldingSnapshot.security_id,
@@ -860,10 +876,8 @@ def _qty_walk_back(
         )
         .where(HoldingSnapshot.snapshot_date == anchor_date)
         .where(HoldingSnapshot.account_id.in_(accts))
-    ):
-        if acct_id is not None and sid is not None and q is not None:
-            qty_per_acct_sec[(acct_id, sid)] += Decimal(q)
-    backward_tx = (
+    ).all()
+    backward_tx = list(
         session.execute(
             select(InvestmentTransaction)
             .where(InvestmentTransaction.account_id.in_(accts))
@@ -874,12 +888,26 @@ def _qty_walk_back(
         .scalars()
         .all()
     )
+    # Normalize to today's split-adjusted units (consistent with the adjusted
+    # `prices` series): scale anchor and each reversed tx by the split product
+    # after its own date, so a split between the tx/anchor and now isn't
+    # mis-counted.
+    sids = {sid for _, sid, _ in anchor_rows if sid is not None}
+    sids |= {tx.security_id for tx in backward_tx if tx.security_id is not None}
+    factors = load_split_factors(session, sids)
+
+    qty_per_acct_sec: dict[tuple[int, int], Decimal] = defaultdict(lambda: Decimal(0))
+    for acct_id, sid, q in anchor_rows:
+        if acct_id is not None and sid is not None and q is not None:
+            qty_per_acct_sec[(acct_id, sid)] += Decimal(q) * factors.factor_after(sid, anchor_date)
     for tx in backward_tx:
         if tx.security_id is None:
             continue
         delta = _reverse_quantity_delta(tx)
         if delta is not None:
-            qty_per_acct_sec[(tx.account_id, tx.security_id)] += delta
+            qty_per_acct_sec[(tx.account_id, tx.security_id)] += delta * factors.factor_after(
+                tx.security_id, tx.date
+            )
 
     # ACATS-in pre-window adjustment. For each cost-basis override with
     # `acquired_at > target_date`, the user did NOT have those shares in

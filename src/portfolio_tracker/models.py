@@ -245,6 +245,27 @@ class Price(Base):
     close: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
 
 
+class StockSplit(Base):
+    """A corporate stock-split event for a security.
+
+    `ratio` is the yfinance convention: shares-after / shares-before for one
+    pre-split share — 4.0 for a 4:1 forward split, 0.125 for a 1:8 reverse.
+    `prices` stores split-adjusted (back-adjusted) closes, so historical
+    transaction/snapshot QUANTITIES (recorded in as-traded units) must be
+    scaled to today's split-adjusted units before being valued against those
+    prices in the walk-back — see `services/splits.py`. Refreshed by
+    `jobs.splits` from yfinance `.splits`. Composite PK so a re-fetch upserts.
+    """
+
+    __tablename__ = "stock_splits"
+
+    security_id: Mapped[int] = mapped_column(
+        ForeignKey("securities.security_id", ondelete="CASCADE"), primary_key=True
+    )
+    split_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    ratio: Mapped[Decimal] = mapped_column(Numeric(20, 10), nullable=False)
+
+
 class Benchmark(Base):
     """Daily marks for a benchmark index (SPY, QQQ, etc.).
 

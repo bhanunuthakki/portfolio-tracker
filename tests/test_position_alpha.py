@@ -20,6 +20,7 @@ from portfolio_tracker.models import (
     Item,
     Price,
     Security,
+    StockSplit,
 )
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.position_alpha import (
@@ -129,6 +130,77 @@ def test_qty_walk_back_reverses_buy(session):
     accts = active_account_ids(session)
     result = _qty_walk_back(session, anchor, target, accts)
     assert result == {"AAPL": Decimal(70)}
+
+
+def test_qty_walk_back_normalizes_pre_split_quantity(session):
+    # A 2:1 split sits between a pre-split buy and the anchor snapshot. The
+    # snapshot (200) is post-split; the buy was recorded as 100 as-traded
+    # (pre-split) shares. Reversing the raw 100 against 200 would leave a
+    # phantom 100; scaled by the 2x split factor it reverses 200 -> 0.
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add(aapl)
+    session.flush()
+    anchor = date(2025, 1, 10)
+    target = date(2025, 1, 1)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            quantity=Decimal(200),  # post-split units
+        )
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-presplit-buy",
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            date=date(2025, 1, 3),  # before the split
+            type="buy",
+            quantity=Decimal(100),  # as-traded, pre-split
+            amount=Decimal(40000),
+        )
+    )
+    session.add(
+        StockSplit(security_id=aapl.security_id, split_date=date(2025, 1, 5), ratio=Decimal(2))
+    )
+    session.commit()
+
+    accts = active_account_ids(session)
+    result = _qty_walk_back(session, anchor, target, accts)
+    assert result == {"AAPL": Decimal(0)}
+
+
+def test_qty_walk_back_no_split_unchanged(session):
+    # No split rows -> identity factor -> the original reversal (200 - 30 = 170).
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add(aapl)
+    session.flush()
+    anchor = date(2025, 1, 10)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            quantity=Decimal(200),
+        )
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-buy",
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            date=date(2025, 1, 5),
+            type="buy",
+            quantity=Decimal(30),
+            amount=Decimal(3000),
+        )
+    )
+    session.commit()
+    accts = active_account_ids(session)
+    assert _qty_walk_back(session, anchor, date(2025, 1, 1), accts) == {"AAPL": Decimal(170)}
 
 
 def test_qty_walk_back_acats_acquired_at_zeroes_position(session):
