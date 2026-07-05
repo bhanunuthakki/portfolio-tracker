@@ -90,6 +90,45 @@ def es_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return db
 
 
+def _make_db_with_thesis_status_view(path: Path) -> None:
+    """A companion DB that also carries the v_thesis_status view (alembic 0143).
+    Modeled as a plain table with the view's columns — the reader issues the
+    same SELECT regardless of whether it's a view or a table."""
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE v_thesis_status (
+            ticker TEXT, has_written_thesis INTEGER, breach_status TEXT,
+            thesis_updated_at TEXT, ledger_entry_count INTEGER, last_ledger_at TEXT,
+            open_notes_count INTEGER, open_questions_count INTEGER
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO v_thesis_status (ticker, has_written_thesis, breach_status, "
+        "thesis_updated_at, ledger_entry_count, last_ledger_at, open_notes_count, "
+        "open_questions_count) VALUES (?,?,?,?,?,?,?,?)",
+        [
+            # NU: thesis + deep ledger + open threads (the "decision log NOT empty" case).
+            ("NU", 1, "ok", "2026-06-01", 17, "2026-06-01T18:18:24", 3, 1),
+            # WIX: thesis exists but ZERO ledger (research done, no formal decision).
+            ("WIX", 1, "warn", "2026-05-20", 0, None, 0, 0),
+            # FLKR: present in substrate but NO written thesis — the genuine gap.
+            ("FLKR", 0, None, None, 0, None, 0, 0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def es_db_with_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    db = tmp_path / "es_view.db"
+    _make_db_with_thesis_status_view(db)
+    monkeypatch.setattr(es, "_db_path", lambda: db)
+    return db
+
+
 def test_latest_verdict_uses_most_recent_eval(es_db: Path) -> None:
     verdicts = es.latest_verdicts(["NU", "MELI"])
     assert verdicts["NU"].status == "breach"
@@ -140,6 +179,32 @@ def test_thesis_detail_assembles_everything(es_db: Path) -> None:
     assert detail.thesis_summary is not None and "ROE" in detail.thesis_summary
 
 
+def test_thesis_status_reads_view(es_db_with_view: Path) -> None:
+    out = es.thesis_status_by_ticker(["NU", "WIX", "FLKR", "ZZZ"])
+
+    nu = out["NU"]
+    assert nu.has_written_thesis is True
+    assert nu.breach_status == "ok"
+    assert nu.ledger_entry_count == 17
+    assert nu.last_ledger_at == "2026-06-01T18:18:24"
+    assert nu.open_notes_count == 3
+    assert nu.open_questions_count == 1
+
+    # Thesis exists but zero ledger — must still read has_written_thesis True.
+    assert out["WIX"].has_written_thesis is True
+    assert out["WIX"].ledger_entry_count == 0
+
+    # Present in the substrate but no thesis — the genuine documentation gap.
+    assert out["FLKR"].has_written_thesis is False
+
+    assert "ZZZ" not in out  # no footprint → absent
+
+
+def test_thesis_status_degrades_when_view_missing(es_db: Path) -> None:
+    # The base es_db fixture has no v_thesis_status view (older companion build).
+    assert es.thesis_status_by_ticker(["NU"]) == {}
+
+
 def test_graceful_when_db_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(es, "_db_path", lambda: tmp_path / "nope.db")
     assert es.latest_verdicts(["NU"]) == {}
@@ -147,3 +212,4 @@ def test_graceful_when_db_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert es.pending_alerts(["NU"]) == {}
     assert es.untracked_holdings(["NU"]) == []
     assert es.thesis_detail("NU") is None
+    assert es.thesis_status_by_ticker(["NU"]) == {}
