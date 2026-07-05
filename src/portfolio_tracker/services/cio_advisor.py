@@ -73,6 +73,7 @@ from portfolio_tracker.models import (
     Security,
     TradeDecision,
 )
+from portfolio_tracker.services import earnings_summary
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.coaching import generate_coaching_tips
 
@@ -221,6 +222,11 @@ class FactsSnapshot:
     recent_decisions: list[dict[str, object]]
     coaching_findings: dict[str, object]
     persona_excerpt: str = field(default="")
+    # Per-holding research status from the companion earnings-summary platform
+    # (its v_thesis_status view). One dict per current holding; empty when the
+    # companion DB is unavailable. Distinct from `recent_decisions`, which is
+    # THIS tracker's own (often-sparse) log.
+    research_status: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
 
 
 class _AggRow(TypedDict):
@@ -335,6 +341,7 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
     }
 
     persona = _read_persona()
+    research_status = _research_status_for(positions)
 
     return FactsSnapshot(
         as_of=today_iso,
@@ -343,7 +350,56 @@ def build_facts_snapshot(session: Session) -> FactsSnapshot:
         recent_decisions=recent_decisions,
         coaching_findings=coaching_findings,
         persona_excerpt=persona,
+        research_status=research_status,
     )
+
+
+def _research_status_for(positions: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Per-holding research status from the companion earnings-summary platform.
+
+    Covers EVERY current holding, not just the ones the platform knows about:
+    a ticker absent from ``v_thesis_status`` is emitted with
+    ``has_written_thesis=False`` and ``in_research_platform=False`` — that is the
+    genuine "no documented thesis anywhere" signal the brief should flag (e.g.
+    FLKR), as opposed to a name whose thesis simply lives in the research repo
+    rather than this tracker's decision log. Degrades to ``[]`` when the
+    companion DB is unavailable (the caller then renders a "not connected" note).
+    """
+    tickers = [str(p["ticker"]) for p in positions if p.get("ticker")]
+    if not tickers:
+        return []
+    status = earnings_summary.thesis_status_by_ticker(tickers)
+    if not status:
+        return []
+    out: list[dict[str, object]] = []
+    for t in tickers:
+        s = status.get(t.upper())
+        if s is None:
+            out.append(
+                {
+                    "ticker": t.upper(),
+                    "in_research_platform": False,
+                    "has_written_thesis": False,
+                    "ledger_entries": 0,
+                    "last_decision_at": None,
+                    "open_questions": 0,
+                    "open_notes": 0,
+                }
+            )
+        else:
+            out.append(
+                {
+                    "ticker": s.ticker,
+                    "in_research_platform": True,
+                    "has_written_thesis": s.has_written_thesis,
+                    "thesis_breach_status": s.breach_status,
+                    "ledger_entries": s.ledger_entry_count,
+                    "last_decision_at": s.last_ledger_at,
+                    "open_questions": s.open_questions_count,
+                    "open_notes": s.open_notes_count,
+                }
+            )
+    return out
 
 
 def _read_persona() -> str:
@@ -368,6 +424,7 @@ def _facts_to_prompt_block(snap: FactsSnapshot) -> str:
     positions_json = json.dumps(snap.positions, indent=2, default=str)
     decisions_json = json.dumps(snap.recent_decisions, indent=2, default=str)
     coaching_json = json.dumps(snap.coaching_findings, indent=2, default=str)
+    research_block = _research_status_block(snap.research_status)
     return f"""# Portfolio facts (as of {snap.as_of})
 
 ## CIO persona & strategic directives
@@ -403,6 +460,44 @@ action vs which are noise?
 
 ```json
 {coaching_json}
+```
+{research_block}"""
+
+
+def _research_status_block(research_status: list[dict[str, object]]) -> str:
+    """Render the per-holding earnings-summary research status as a facts
+    section. Empty when the companion platform isn't connected — in that case
+    we say so explicitly so the model doesn't infer "no thesis" from silence."""
+    if not research_status:
+        return (
+            "\n## Earnings-summary research status (per holding)\n\n"
+            "The companion earnings-summary research platform is not reachable "
+            "for this run — no thesis/decision-ledger data available. Do NOT "
+            "infer that holdings lack a thesis from this absence; say the "
+            "research platform was unavailable if the point comes up.\n"
+        )
+    research_json = json.dumps(research_status, indent=2, default=str)
+    return f"""
+## Earnings-summary research status (per holding)
+
+This is the durable research history from the companion **earnings-summary**
+platform — the system of record for written theses, the thesis-decision ledger,
+and open research questions. It is SEPARATE from the `recent_decisions` above
+(this tracker's own log, which is often sparse or empty). Treat it as ground
+truth for whether a holding is actually documented:
+
+- `has_written_thesis: true` → a written thesis EXISTS. Do NOT describe the name
+  as "held without a thesis."
+- `ledger_entries` / `last_decision_at` → the real thesis-decision log. A
+  non-zero count means the decision log is NOT empty for that name, even when
+  this tracker's own decision log is.
+- `in_research_platform: false` (or `has_written_thesis: false` with zero
+  ledger/notes) → the research platform has NO coverage. THAT is a genuine
+  documentation gap worth flagging.
+- `open_questions` / `open_notes` → live research threads on the name.
+
+```json
+{research_json}
 ```
 """
 
@@ -930,7 +1025,10 @@ def _brief_section_guidance(key: str) -> str:
             "Position-by-position commentary on each material holding "
             "(>5% weight). For each: thesis status, conviction, what "
             "moved this month if apparent from the data, hold/trim/add "
-            "leaning. Avoid tickers <2% unless they're newly opened."
+            "leaning. Use `research_status[]` for whether a written thesis "
+            "exists — a name with `has_written_thesis: true` is documented "
+            "(cite its ledger depth / breach status), not a thesis gap. "
+            "Avoid tickers <2% unless they're newly opened."
         ),
         "concentration_human_capital": (
             "Where is portfolio risk correlated with the user's "
@@ -940,10 +1038,13 @@ def _brief_section_guidance(key: str) -> str:
             "confirm the diversification is intact."
         ),
         "decision_log_status": (
-            "Which open positions lack a thesis? Which have stale "
-            "theses (>180d)? What were the most recent decisions and "
-            "did they execute? Don't list every gap; surface the 3-5 "
-            "most material ones."
+            "Ground this in `research_status[]` (the earnings-summary "
+            "thesis-decision ledger), NOT only this tracker's `recent_decisions`. "
+            "A holding with `ledger_entries > 0` has a live decision log even if "
+            "this tracker's own log is empty — cite `last_decision_at`. Flag as "
+            "gaps only names with `in_research_platform: false` or "
+            "`has_written_thesis: false` and zero ledger entries. Surface the "
+            "3-5 most material items (genuine gaps + oldest `last_decision_at`)."
         ),
         "market_regime": (
             "Brief read on market posture: are we in a regime where "

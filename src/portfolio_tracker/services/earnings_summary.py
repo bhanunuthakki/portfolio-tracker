@@ -359,6 +359,40 @@ class ThesisDetail:
     alerts: tuple[ThesisAlert, ...]
 
 
+@dataclass(frozen=True)
+class ThesisStatusSummary:
+    """Per-ticker research snapshot from earnings-summary's ``v_thesis_status``
+    view (alembic 0143) — the companion project's system-of-record answer to
+    "does this holding have a documented thesis / decision history?"
+
+    ``has_written_thesis`` is the direct refutation of a brief claiming a name is
+    "held without a thesis"; ``ledger_entry_count`` / ``last_ledger_at`` are the
+    real thesis-decision log (distinct from this tracker's own ``TradeDecision``
+    rows, which may be empty). A ticker with a written thesis but zero ledger
+    entries (research done, no formal decision logged) still reads
+    ``has_written_thesis=True``.
+    """
+
+    ticker: str
+    has_written_thesis: bool
+    breach_status: str | None
+    ledger_entry_count: int
+    last_ledger_at: str | None
+    open_notes_count: int
+    open_questions_count: int
+
+
+def thesis_status_by_ticker(tickers: list[str]) -> dict[str, ThesisStatusSummary]:
+    """Per-ticker research status from earnings-summary's ``v_thesis_status``.
+
+    Only tickers with a footprint in the research substrate are returned;
+    callers read absence as "no coverage in the research platform." Empty dict
+    when the companion DB is unavailable OR predates the view (older
+    earnings-summary build) — the brief then degrades to its tracker-only view.
+    """
+    return _query_map(_thesis_status_view, tickers)
+
+
 def latest_verdicts(tickers: list[str]) -> dict[str, ThesisVerdict]:
     """Latest thesis evaluation per ticker. Empty when the companion DB is
     unavailable or the table is missing."""
@@ -436,6 +470,34 @@ def _query_map(
         return {}
     finally:
         conn.close()
+
+
+def _thesis_status_view(
+    conn: sqlite3.Connection, tickers: list[str]
+) -> dict[str, ThesisStatusSummary]:
+    placeholders = ",".join("?" for _ in tickers)
+    rows = conn.execute(
+        f"""
+        SELECT ticker, has_written_thesis, breach_status, ledger_entry_count,
+               last_ledger_at, open_notes_count, open_questions_count
+        FROM v_thesis_status
+        WHERE ticker IN ({placeholders})
+        """,
+        [t.upper() for t in tickers],
+    ).fetchall()
+    out: dict[str, ThesisStatusSummary] = {}
+    for ticker, has_thesis, breach, ledger_n, last_ledger, notes_n, q_n in rows:
+        key = str(ticker).upper()
+        out[key] = ThesisStatusSummary(
+            ticker=key,
+            has_written_thesis=bool(has_thesis),
+            breach_status=_opt_str(breach),
+            ledger_entry_count=int(ledger_n or 0),
+            last_ledger_at=_opt_str(last_ledger),
+            open_notes_count=int(notes_n or 0),
+            open_questions_count=int(q_n or 0),
+        )
+    return out
 
 
 def _verdicts(conn: sqlite3.Connection, tickers: list[str]) -> dict[str, ThesisVerdict]:
