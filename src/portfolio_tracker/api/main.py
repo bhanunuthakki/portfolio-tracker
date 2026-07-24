@@ -14,12 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from portfolio_tracker.api.routes import (
-    cio_advisor,
-    coaching,
-    cockpit,
-    decision_support,
-    earnings_summary,
-    human_capital,
     overrides,
     plaid,
     policy,
@@ -67,12 +61,6 @@ def create_app() -> FastAPI:
     app.include_router(v1.router)
     app.include_router(overrides.router)
     app.include_router(policy.router)
-    app.include_router(decision_support.router)
-    app.include_router(earnings_summary.router)
-    app.include_router(coaching.router)
-    app.include_router(cockpit.router)
-    app.include_router(human_capital.router)
-    app.include_router(cio_advisor.router)
 
     @app.get("/api/health")
     def health() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]

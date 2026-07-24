@@ -34,91 +34,6 @@ const SOURCE_CLASS: Record<CostBasisSource, string> = {
   inferred_1099: "bg-indigo-100 text-indigo-800",
 };
 
-function daysUntil(iso: string | null): number | null {
-  if (!iso) return null;
-  const d = new Date(iso + "T00:00:00Z").getTime();
-  const today = new Date(new Date().toISOString().slice(0, 10) + "T00:00:00Z").getTime();
-  return Math.round((d - today) / 86_400_000);
-}
-
-function daysAgo(iso: string | null): number | null {
-  const u = daysUntil(iso);
-  return u === null ? null : -u;
-}
-
-function EarningsThesisCell({
-  h,
-}: {
-  h: ConsolidatedHoldingOut;
-}): JSX.Element {
-  const es = h.earnings;
-  if (!es || (!es.tracked && !es.has_brief && es.next_earnings_date === null)) {
-    return <span className="text-slate-400 text-[11px]">—</span>;
-  }
-  const dUntil = daysUntil(es.next_earnings_date);
-  const earningsChipColor =
-    dUntil === null
-      ? "bg-slate-100 text-slate-600"
-      : dUntil <= 7
-        ? "bg-rose-100 text-rose-800"
-        : dUntil <= 14
-          ? "bg-amber-100 text-amber-800"
-          : "bg-slate-100 text-slate-700";
-  const thesisColor =
-    es.thesis_status === "breach"
-      ? "bg-rose-100 text-rose-800"
-      : es.thesis_status === "ok"
-        ? "bg-emerald-100 text-emerald-800"
-        : "bg-slate-100 text-slate-600";
-  return (
-    <div
-      className="flex flex-wrap items-center gap-1"
-      onClick={(e) => e.stopPropagation()}
-    >
-      {es.next_earnings_date ? (
-        <span
-          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${earningsChipColor}`}
-          title={`Next earnings ${es.next_earnings_date}${dUntil !== null ? ` (${dUntil}d)` : ""}`}
-        >
-          {es.next_earnings_date.slice(5)}
-        </span>
-      ) : null}
-      {es.thesis_status ? (
-        <span
-          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${thesisColor}`}
-          title={es.thesis_summary ?? `thesis status: ${es.thesis_status}`}
-        >
-          {es.thesis_status}
-        </span>
-      ) : null}
-      {es.has_brief && h.ticker ? (() => {
-        const age = daysAgo(es.latest_brief_iso_date);
-        const briefClass =
-          age === null
-            ? "bg-indigo-100 text-indigo-800 hover:bg-indigo-200"
-            : age <= 30
-              ? "bg-indigo-100 text-indigo-800 hover:bg-indigo-200"
-              : age <= 90
-                ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
-                : "bg-rose-100 text-rose-800 hover:bg-rose-200";
-        const ageLabel =
-          age === null ? "" : age === 0 ? " · today" : ` · ${age}d`;
-        return (
-          <a
-            href={`/api/earnings-summary/brief/${encodeURIComponent(h.ticker)}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${briefClass}`}
-            title={`Open latest research brief (${es.latest_brief_iso_date}${age !== null ? `, ${age}d ago` : ""})`}
-          >
-            brief{ageLabel}
-          </a>
-        );
-      })() : null}
-    </div>
-  );
-}
-
 export function Holdings(): JSX.Element {
   const [searchParams] = useSearchParams();
   // Deep-link support: /holdings?ticker=NU highlights + scrolls to that row
@@ -144,8 +59,6 @@ export function Holdings(): JSX.Element {
         h.total_value !== null ? parseFloat(h.total_value) : null,
       unrealized: (h: ConsolidatedHoldingOut) =>
         h.unrealized_pnl !== null ? parseFloat(h.unrealized_pnl) : null,
-      earnings: (h: ConsolidatedHoldingOut) =>
-        h.earnings?.next_earnings_date ?? "",
       accounts: (h: ConsolidatedHoldingOut) => h.accounts.length,
     }),
     [],
@@ -188,9 +101,6 @@ export function Holdings(): JSX.Element {
               </SortableTh>
               <SortableTh column="unrealized" align="right" sort={sort}>
                 Unrealized
-              </SortableTh>
-              <SortableTh column="earnings" sort={sort}>
-                Earnings / thesis
               </SortableTh>
               <SortableTh column="accounts" align="right" sort={sort}>
                 Accounts
@@ -311,14 +221,13 @@ function Row({ h, focus }: { h: ConsolidatedHoldingOut; focus: boolean }): JSX.E
         >
           {fmtSignedUSD(unrealized)}
         </Td>
-        <Td><EarningsThesisCell h={h} /></Td>
         <Td align="right" className="text-slate-500">
           {accountCount} {accountCount === 1 ? "account" : "accounts"}
         </Td>
       </tr>
       {open && (
         <tr className="bg-slate-50/60">
-          <td colSpan={9} className="px-4 py-3 cursor-default" onClick={(e) => e.stopPropagation()}>
+          <td colSpan={8} className="px-4 py-3 cursor-default" onClick={(e) => e.stopPropagation()}>
             <table className="min-w-full text-xs">
               <thead className="text-slate-500 uppercase tracking-wide">
                 <tr>
@@ -476,8 +385,6 @@ function CostBasisEditor({
     onSuccess: () => {
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
-      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
-      queryClient.invalidateQueries({ queryKey: ["trade-timeline"] });
       queryClient.invalidateQueries({ queryKey: ["data-quality"] });
       onDone();
     },
@@ -489,7 +396,6 @@ function CostBasisEditor({
     onSuccess: () => {
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
-      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
       queryClient.invalidateQueries({ queryKey: ["data-quality"] });
       onDone();
     },

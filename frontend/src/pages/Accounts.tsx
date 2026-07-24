@@ -3,7 +3,6 @@ import { useCallback, useEffect, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 
 import { api } from "@/api/client";
-import { HumanCapitalEditor } from "@/components/HumanCapitalEditor";
 import { PolicyEditor } from "@/components/PolicyEditor";
 import { SnapTradeButtons } from "@/components/SnapTradeButtons";
 import {
@@ -62,14 +61,11 @@ export function Accounts(): JSX.Element {
       api.setItemDataActive(itemId, isActive),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["items"] });
-      // Aggregations across the dashboard depend on this; bust their caches.
+      // Aggregations elsewhere in the app depend on this; bust their caches.
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
-      queryClient.invalidateQueries({ queryKey: ["holdings-by-account"] });
       queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["performance"] });
-      queryClient.invalidateQueries({ queryKey: ["beta"] });
       queryClient.invalidateQueries({ queryKey: ["data-quality"] });
-      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
+      queryClient.invalidateQueries({ queryKey: ["positioning"] });
     },
   });
 
@@ -206,8 +202,6 @@ export function Accounts(): JSX.Element {
       )}
 
       <PolicyEditor />
-
-      <HumanCapitalEditor />
     </div>
   );
 }

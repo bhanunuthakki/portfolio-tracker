@@ -61,10 +61,9 @@ export function PolicyEditor(): JSX.Element {
     onSuccess: () => {
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["policy"] });
-      // Performance + beta queries depend on policy weights for the
-      // synthetic POLICY benchmark — invalidate them too.
-      queryClient.invalidateQueries({ queryKey: ["performance"] });
-      queryClient.invalidateQueries({ queryKey: ["beta"] });
+      // Positioning's correlation/beta-vs-policy table depends on these
+      // weights for the synthetic POLICY benchmark.
+      queryClient.invalidateQueries({ queryKey: ["positioning"] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Save failed"),
   });
@@ -88,8 +87,8 @@ export function PolicyEditor(): JSX.Element {
             Policy benchmark weights
           </h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            Defines the synthetic <em>Policy</em> line in the Dashboard chart
-            and the <em>vs Policy</em> regression in the Risk Metrics card.
+            Defines the synthetic <em>Policy</em> benchmark used by the
+            Holdings positioning section's correlation &amp; beta table.
           </p>
         </div>
         <div className="flex items-center gap-3 text-xs">
