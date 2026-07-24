@@ -45,9 +45,9 @@ def _seed(session) -> None:
     individual = Account(
         item_id=item.item_id,
         plaid_account_id="a-ind",
-        name="Self-directed",
+        name="Mystery Account",
         type="investment",
-        subtype="individual",  # bare individual -> unknown in the detailed contract
+        subtype=None,  # no subtype, no recognizable name -> unknown
     )
     session.add_all([brokerage, roth, k401, individual])
     session.flush()
@@ -103,7 +103,7 @@ def test_positions_v1(client, session):
         "pretax": 5000.0,
         "roth": 4000.0,
         "hsa": 0.0,
-        "unknown": 5000.0,  # the bare "individual" account
+        "unknown": 5000.0,  # the subtype-less, unrecognizable account
     }
 
 

@@ -52,5 +52,5 @@ def positions(
     overrides = _load_cost_basis_overrides(session)
     consolidated = _consolidate_holdings(snapshot_date, rows, overrides)
     # account_id → five-way tax treatment, from the Account type/subtype on each row.
-    account_tax = {a.account_id: tax_treatment(a.type, a.subtype) for _, a, _ in rows}
+    account_tax = {a.account_id: tax_treatment(a.type, a.subtype, a.name) for _, a, _ in rows}
     return build_positions_result(snapshot_date, consolidated, account_tax)

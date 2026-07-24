@@ -158,7 +158,7 @@ def build_portfolio_snapshot(
         snapshot_date = None
         consolidated = []
     account_tax = {
-        (account.account_id): tax_treatment(account.type, account.subtype)
+        (account.account_id): tax_treatment(account.type, account.subtype, account.name)
         for _h, account, _s in rows
     }
     positions_result = build_positions_result(snapshot_date, consolidated, account_tax)

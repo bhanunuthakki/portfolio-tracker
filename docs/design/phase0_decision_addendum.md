@@ -23,6 +23,15 @@ Field name: **`tax_treatment`**. Enum (lowercase strings, exactly):
   which already distinguishes Roth and HSA before collapsing them: `roth` substring →
   `roth`; `hsa` → `hsa`; 401k/IRA/deferred subtypes → `pretax`; brokerage → `taxable`;
   else `unknown`.
+- **Refinement (ratified during M1 dual-read parity):** the provider owns the
+  account-NAME fallback tier at `medium` confidence — required because SnapTrade
+  omits `subtype` for some institutions (live evidence: Fidelity "BrokerageLink",
+  "BrokerageLink Roth", "Health Savings Account", "…401(K) PLAN" all arrive with
+  `subtype=None`). A bare "BrokerageLink" is the owner-confirmed self-directed
+  401(k) window → `pretax`. Cash-account subtypes (`checking` etc.) → `taxable`
+  (medium). A bare `individual`/`joint` subtype → `taxable` at `low` confidence
+  (both consumers' legacy heuristics agreed; blocking it as `unknown` would have
+  broken parity for zero benefit). Consumers must still block on `unknown`.
 - The coarse 4-way lot enum currently emitted by `GET /api/v1/portfolio/positions`
   (`taxable/tax_deferred/tax_free/unknown`) has **no live consumer** (the
   earnings-summary client still reads legacy `/api/portfolio/*` + `/api/plaid/items`).

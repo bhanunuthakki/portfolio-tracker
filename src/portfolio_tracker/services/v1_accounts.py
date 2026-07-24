@@ -123,7 +123,7 @@ def build_accounts_result(
             as_of = d if as_of is None or d > as_of else as_of
 
     for account, item in rows:
-        detail = tax_treatment_detail(account.type, account.subtype)
+        detail = tax_treatment_detail(account.type, account.subtype, account.name)
         holdings_as_of, value = values.get(account.account_id, (None, None))
         acct_warnings: list[V1Warning] = []
         if item.is_data_active:

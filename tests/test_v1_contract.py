@@ -206,7 +206,7 @@ def test_empty_book_reports_no_data_not_zero(client):
 def test_unknown_tax_treatment_is_flagged_not_guessed(client, session):
     item = _mk_item(session, source="plaid", name="SoFi")
     mystery = _mk_account(
-        session, item, pid="a1", name="Self-directed", type_="investment", subtype="individual"
+        session, item, pid="a1", name="Mystery Account", type_="investment", subtype=None
     )
     aapl = _mk_security(session, pid="s1", ticker="AAPL")
     _snap(session, mystery, aapl, d=_FRESH, qty="1", value="1000")

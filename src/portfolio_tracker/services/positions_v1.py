@@ -13,9 +13,9 @@ The five-way enum is the Phase 0 SC-1 ruling
 (`docs/design/phase0_decision_addendum.md`): Roth and HSA stay distinct because
 wealthplan models their cash-flow and withdrawal behavior separately. This is
 intentionally NOT the coarser ``services.positioning.classify_tax_treatment``
-(which collapses everything tax-advantaged into one display slice and maps a
-bare ``individual`` subtype to taxable) — the v1 contract needs the finer
-split, and a bare ``individual`` is ``unknown`` here, not ``taxable``.
+(one collapsed tax-advantaged display slice) — the v1 contract needs the finer
+split, with evidence + confidence on every inference tier (subtype high; cash
+subtype / account-name / type medium; bare individual-joint low).
 
 This module is split so the math is testable without a database: the pure
 :func:`tax_treatment` mapping and :func:`build_positions_result` assembler know
@@ -56,13 +56,22 @@ _PRETAX_SUBTYPES: frozenset[str] = frozenset(
 )
 
 
+# Cash-account subtypes some providers attach to brokerage cash-management
+# sleeves (e.g. Robinhood "Cash Management"/"Spending" arrive as CHECKING via
+# SnapTrade). Outside any tax shelter -> taxable, at medium confidence.
+_CASH_ACCOUNT_SUBTYPES: frozenset[str] = frozenset(
+    {"checking", "savings", "cash management", "cash"}
+)
+
+
 class TaxTreatmentDetail(BaseModel):
     """The SC-1 detailed tax treatment plus its evidence trail.
 
     ``evidence`` names the account field + value that decided the treatment
-    (e.g. ``subtype:roth ira``); ``confidence`` is ``high`` for an explicit
-    subtype match, ``medium`` for a type-level fallback, ``low`` when nothing
-    matched and the treatment is ``unknown``.
+    (e.g. ``subtype:roth ira``, ``name:brokeragelink``); ``confidence`` is
+    ``high`` for an explicit subtype match, ``medium`` for a name/type/cash
+    fallback tier, ``low`` for the weakest tier (bare individual/joint) or an
+    ``unknown`` treatment.
     """
 
     treatment: str
@@ -70,12 +79,53 @@ class TaxTreatmentDetail(BaseModel):
     confidence: str
 
 
-def tax_treatment_detail(account_type: str | None, subtype: str | None) -> TaxTreatmentDetail:
-    """Map an account ``type`` + ``subtype`` to the detailed five-way treatment.
+def _name_tier(name: str | None) -> TaxTreatmentDetail | None:
+    """Provider-owned account-NAME heuristics (confidence ``medium``).
 
-    The ``roth`` check runs first so "roth ira" / "roth 401k" land in ``roth``,
-    not ``pretax``. A bare ``individual`` / ``joint`` (no ``brokerage`` token)
-    is ``unknown`` — the contract doesn't guess taxable from those alone.
+    Centralizes the fallbacks both consumers used to hand-roll — needed
+    because SnapTrade omits ``subtype`` entirely for some institutions, so the
+    name is the only evidence (e.g. Fidelity "BrokerageLink Roth", "Health
+    Savings Account", "META PLATFORMS, INC. 401(K) PLAN"). Rules:
+
+      * ``roth`` anywhere -> roth (checked first, so "BrokerageLink Roth" wins);
+      * ``hsa`` / ``health savings`` -> hsa;
+      * ``401k`` / ``401(k)`` / word-ish `` ira `` / ``retirement`` /
+        ``brokeragelink`` -> pretax — a bare BrokerageLink is the self-directed
+        401(k) window (owner-confirmed, carried over from the wealthplan
+        adapter this replaces);
+      * ``brokerage`` / ``self-directed`` / ``taxable`` -> taxable.
+    """
+    n = (name or "").strip().lower()
+    if not n:
+        return None
+    if "roth" in n:
+        return TaxTreatmentDetail(treatment="roth", evidence=f"name:{n}", confidence="medium")
+    if "hsa" in n or "health savings" in n:
+        return TaxTreatmentDetail(treatment="hsa", evidence=f"name:{n}", confidence="medium")
+    padded = f" {n} "
+    if (
+        "401k" in n
+        or "401(k)" in n
+        or " ira " in padded
+        or "retirement" in n
+        or "brokeragelink" in n
+        or "brokerage link" in n
+    ):
+        return TaxTreatmentDetail(treatment="pretax", evidence=f"name:{n}", confidence="medium")
+    if "brokerage" in n or "self-directed" in n or "taxable" in n:
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"name:{n}", confidence="medium")
+    return None
+
+
+def tax_treatment_detail(
+    account_type: str | None, subtype: str | None, name: str | None = None
+) -> TaxTreatmentDetail:
+    """Map an account to the detailed five-way treatment, with evidence.
+
+    Precedence: explicit subtype (high) -> cash-account subtype (medium) ->
+    account-name heuristics (medium) -> brokerage type / individual-joint
+    subtype (medium/low) -> unknown (low). The ``roth`` check runs first at
+    every tier so "roth ira" / "BrokerageLink Roth" land in ``roth``.
     """
     s = (subtype or "").strip().lower()
     t = (account_type or "").strip().lower()
@@ -87,15 +137,25 @@ def tax_treatment_detail(account_type: str | None, subtype: str | None) -> TaxTr
         return TaxTreatmentDetail(treatment="pretax", evidence=f"subtype:{s}", confidence="high")
     if "brokerage" in s:
         return TaxTreatmentDetail(treatment="taxable", evidence=f"subtype:{s}", confidence="high")
+    if s in _CASH_ACCOUNT_SUBTYPES:
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"subtype:{s}", confidence="medium")
+    named = _name_tier(name)
+    if named is not None:
+        return named
     if t == "brokerage":
         return TaxTreatmentDetail(treatment="taxable", evidence=f"type:{t}", confidence="medium")
+    if s in ("individual", "joint"):
+        # Weakest positive signal: an individual/joint sleeve with no shelter
+        # marker is a taxable account in practice (both consumers' legacy
+        # heuristics agreed). Low confidence so operators can review.
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"subtype:{s}", confidence="low")
     evidence = f"subtype:{s}" if s else (f"type:{t}" if t else None)
     return TaxTreatmentDetail(treatment="unknown", evidence=evidence, confidence="low")
 
 
-def tax_treatment(account_type: str | None, subtype: str | None) -> str:
+def tax_treatment(account_type: str | None, subtype: str | None, name: str | None = None) -> str:
     """The five-way treatment value alone (see :func:`tax_treatment_detail`)."""
-    return tax_treatment_detail(account_type, subtype).treatment
+    return tax_treatment_detail(account_type, subtype, name).treatment
 
 
 class PositionLotV1(BaseModel):

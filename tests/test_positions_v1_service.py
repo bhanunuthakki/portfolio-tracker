@@ -41,15 +41,35 @@ _D = date(2025, 6, 2)
         # taxable: brokerage token in subtype OR brokerage account type
         ("brokerage", None, "taxable"),
         ("investment", "brokerage", "taxable"),
-        # unknown: a bare individual/joint is NOT taxable in this contract
-        ("investment", "individual", "unknown"),
-        ("investment", "joint", "unknown"),
+        # cash-management sleeves (Robinhood via SnapTrade arrives as CHECKING)
+        ("investment", "CHECKING", "taxable"),
+        # weakest positive tier: bare individual/joint -> taxable at LOW confidence
+        ("investment", "individual", "taxable"),
+        ("investment", "joint", "taxable"),
         (None, None, "unknown"),
         ("", "", "unknown"),
     ],
 )
 def test_tax_treatment_mapping(account_type: str | None, subtype: str | None, expected: str):
     assert tax_treatment(account_type, subtype) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        # SnapTrade omits subtype for some institutions; the NAME tier covers
+        # the live cases the consumers used to hand-classify.
+        ("BrokerageLink Roth", "roth"),
+        ("BrokerageLink", "pretax"),  # self-directed 401(k) window, owner-confirmed
+        ("Health Savings Account", "hsa"),
+        ("META PLATFORMS, INC. 401(K) PLAN", "pretax"),
+        ("Robinhood traditional IRA", "pretax"),
+        ("SoFi Self-directed", "taxable"),
+        ("Admiral Shares Fund", "unknown"),  # 'ira' is word-ish, not substring
+    ],
+)
+def test_tax_treatment_name_tier(name: str, expected: str):
+    assert tax_treatment("investment", None, name) == expected
 
 
 def test_tax_treatment_detail_evidence_and_confidence():
@@ -63,10 +83,19 @@ def test_tax_treatment_detail_evidence_and_confidence():
     assert type_only.evidence == "type:brokerage"
     assert type_only.confidence == "medium"
 
-    unknown = tax_treatment_detail("investment", "individual")
-    assert unknown.treatment == "unknown"
-    assert unknown.evidence == "subtype:individual"
-    assert unknown.confidence == "low"
+    named = tax_treatment_detail("investment", None, "BrokerageLink Roth")
+    assert named.treatment == "roth"
+    assert named.evidence == "name:brokeragelink roth"
+    assert named.confidence == "medium"
+
+    individual = tax_treatment_detail("investment", "individual")
+    assert individual.treatment == "taxable"
+    assert individual.evidence == "subtype:individual"
+    assert individual.confidence == "low"
+
+    # Subtype beats name: an explicit roth subtype wins over a taxable-looking name.
+    subtype_wins = tax_treatment_detail("investment", "roth ira", "Self-directed brokerage")
+    assert subtype_wins.treatment == "roth"
 
     blank = tax_treatment_detail(None, None)
     assert blank.treatment == "unknown"

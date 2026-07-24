@@ -92,18 +92,25 @@ Inferred from each account's `type` + `subtype`. The mapping is the ratified
 tax-advantaged into a single display slice and maps a bare `individual` to
 taxable:
 
-| Value     | Matches                                                                                          |
+| Value     | Matches (in precedence order)                                                                    |
 | --------- | ------------------------------------------------------------------------------------------------ |
-| `roth`    | subtype contains `roth` (incl. Roth 401k/IRA)                                                     |
-| `hsa`     | subtype is `hsa`                                                                                  |
-| `pretax`  | subtype contains `401k` or `ira`, or is one of `403b`/`457b`/`sep`/`simple`/`pension`/`keogh`/`retirement`/`rrsp`/`sarsep`/`profit sharing plan` |
-| `taxable` | subtype contains `brokerage`, or account `type` is `brokerage`                                    |
-| `unknown` | everything else — including a bare `individual` / `joint` subtype with no `brokerage` token       |
+| `roth`    | subtype contains `roth` (incl. Roth 401k/IRA); or account NAME contains `roth`                    |
+| `hsa`     | subtype is `hsa`; or name contains `hsa` / `health savings`                                       |
+| `pretax`  | subtype contains `401k` or `ira`, or is one of `403b`/`457b`/`sep`/`simple`/`pension`/`keogh`/`retirement`/`rrsp`/`sarsep`/`profit sharing plan`; or name contains `401k`/`401(k)`/word-ish `ira`/`retirement`/`brokeragelink` |
+| `taxable` | subtype contains `brokerage`; cash-account subtype (`checking`/`savings`/`cash management`); name contains `brokerage`/`self-directed`/`taxable`; account `type` is `brokerage`; or a bare `individual`/`joint` subtype (LOW confidence) |
+| `unknown` | everything else                                                                                   |
 
-The `roth` check runs first, so "roth ira" / "roth 401k" land in `roth`, not
-`pretax`. Bucketing is done at the **lot** level, so a position held in both a
-Roth IRA and a taxable brokerage contributes to both `roth` and `taxable` in
-`by_tax_treatment`.
+Subtype evidence is `high` confidence; cash-subtype/name/type tiers are
+`medium`; the bare `individual`/`joint` fallback is `low`. The name tier
+exists because SnapTrade omits `subtype` for some institutions (Fidelity
+"BrokerageLink", "Health Savings Account") — it centralizes, in the provider,
+the heuristics the consumers used to hand-roll. A bare "BrokerageLink" is the
+self-directed 401(k) window (owner-confirmed) → `pretax`.
+
+The `roth` check runs first at every tier, so "roth ira" / "BrokerageLink
+Roth" land in `roth`, not `pretax`. Bucketing is done at the **lot** level, so
+a position held in both a Roth IRA and a taxable brokerage contributes to both
+`roth` and `taxable` in `by_tax_treatment`.
 
 Roth and HSA stay distinct because wealthplan models their cash-flow and
 withdrawal behavior separately. Consumers needing the old coarse buckets map
