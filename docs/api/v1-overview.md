@@ -1,4 +1,4 @@
-# Portfolio Data Service — `/api/v1` consumer guide (Slice 1)
+# Portfolio Data Service — `/api/v1` consumer guide
 
 The versioned read contract for portfolio facts, consumed by `earnings-summary`
 and `wealthplan`. Governing documents: `docs/design/portfolio_data_service_prd.md`
@@ -26,7 +26,7 @@ Probe `GET /api/v1/health` before decision-grade reads: it reports database
 and migration state, per-provider link health (counts and times only — never
 balances), the latest snapshot date, and staleness.
 
-## Slice-1 resources
+## Resources
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -34,9 +34,44 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/accounts` | Normalized accounts: canonical identity, inclusion state, detailed Tax treatment with evidence, per-account value + observation date, freshness |
 | `GET /api/v1/portfolio-snapshot` | Bulk consumer read model: accounts + consolidated positions + five-way tax-bucket totals + equity fraction, one consistent read |
 | `GET /api/v1/portfolio/positions` | Consolidated positions with per-lot tax treatment (see `positions-v1.md`) |
-| `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction, enveloped |
+| `GET /api/v1/transactions` | Cursor-paginated normalized transactions with override + effective TWR classification (default window 730 days) |
+| `GET /api/v1/cash-flows` | Deterministically classified cash flows using the exact TWR precedence (override → name hint → subtype heuristic); `include_internal=true` adds zeroed internal events |
+| `GET /api/v1/position-snapshots` | Historical observed holdings rows with `origin` markers (`broker` vs `manual` gap-fill); default window 90 days |
+| `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
+| `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
+| `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
+| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals (`performance.modified_dietz` v1) |
+| `GET /api/v1/analytics/position-performance` | Per-ticker dollar alpha vs dollar-matched counterfactuals (`position_alpha.dollar_matched_counterfactual` v1) |
+| `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery (`risk.beta_drawdown` v1) |
+| `GET /api/v1/analytics/exit-quality` | Sell-side quality: regret vs holding, exit alpha vs SPY (`exit_quality.repricing` v1) |
 
 Wealthplan normally needs exactly one `portfolio-snapshot` read per refresh.
+
+**Deferred:** `GET/POST /api/v1/sync-runs` requires a run-log schema migration
+on the live database and ships with the Phase 3 migration batch (backup +
+preview + owner approval). Until then, sync recency comes from `health` and
+each account's `last_successful_sync_at`.
+
+### Analytics envelope semantics
+
+For `analytics/*` responses, `meta.as_of` is the underlying **holdings
+observation date**, not the query window end — a calculation run today over a
+week-old book reads as stale (PRD §9.3). The calculation's own window travels
+in the payload (`series.start_date`/`end_date` etc.).
+
+### Pagination
+
+`transactions`, `cash-flows`, and `position-snapshots` use opaque keyset
+cursors: pass `cursor` from the previous page's `next_cursor` until it is
+null. `limit` is 1–1000 (default 500). There is no hidden row cap — the
+legacy 5,000-row transactions ceiling does not apply to v1. A malformed
+cursor returns the structured `INVALID_CURSOR` error (below).
+
+### Deprecation headers
+
+Superseded legacy endpoints now return `Deprecation: true` and
+`Link: </api/v1/...>; rel="successor-version"`. Behavior is unchanged until
+the Phase 5 retirement gate; new consumer code must use the v1 successor.
 
 ## The response envelope
 
@@ -123,9 +158,26 @@ denominator is zero — never silently `0`.
 
 ## Errors and retries
 
-Slice 1 resources are read-only GETs; transient failures are safe to retry
-with backoff. A structured error catalogue ships with Slice 2 alongside the
-mutation endpoints' idempotency guide.
+All v1 resources are read-only GETs; transient failures are safe to retry
+with backoff. Contract errors use the structured shape (PRD §7.6):
+
+```jsonc
+{
+  "error": {
+    "code": "INVALID_CURSOR",        // stable, machine-readable
+    "message": "cursor is not valid base64",
+    "request_id": "…",
+    "resource": "/api/v1/transactions",
+    "retryable": false,
+    "recovery": "Restart pagination from the first page (omit `cursor`)."
+  }
+}
+```
+
+Current catalogue: `INVALID_CURSOR` (400). Validation failures on query
+parameters use FastAPI's standard 422 shape. Provider bodies, credentials,
+holdings, and balances never appear in errors. The operator-mutation
+idempotency guide ships with the sync-runs migration.
 
 ## Compatibility policy
 

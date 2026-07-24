@@ -13,6 +13,9 @@ Scenarios:
   * ``accounts.json``                    — canonical accounts incl. an excluded item
   * ``positioning.json``                 — Positioning cuts + equity fraction
   * ``health.json``                      — service health shape
+  * ``transactions.json``                — cursor-paginated normalized transactions
+  * ``cash-flows.json``                  — TWR-classified external flows
+  * ``securities.json``                  — security master + Classification
 
 Regenerate after changing any v1 model:
 
@@ -32,7 +35,14 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from portfolio_tracker.models import Account, Base, HoldingSnapshot, Item, Security
+from portfolio_tracker.models import (
+    Account,
+    Base,
+    HoldingSnapshot,
+    InvestmentTransaction,
+    Item,
+    Security,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "docs" / "api" / "fixtures" / "v1"
 
@@ -139,6 +149,52 @@ def _seed(
     snap(brokerage, stock_b, holdings_date, "50", "5800")
     snap(brokerage, mmf, holdings_date, "1000", "1000")
     snap(retired, stock_b, _ANCIENT, "50", "5500")
+
+    def tx(
+        txid: str,
+        d: date,
+        type_: str,
+        subtype: str | None,
+        amount: str,
+        name: str | None,
+        security: Security | None = None,
+        qty: str = "0",
+    ) -> None:
+        session.add(
+            InvestmentTransaction(
+                plaid_investment_transaction_id=txid,
+                account_id=brokerage.account_id,
+                security_id=security.security_id if security is not None else None,
+                date=d,
+                name=name,
+                quantity=Decimal(qty),
+                amount=Decimal(amount),
+                type=type_,
+                subtype=subtype,
+                currency="USD",
+            )
+        )
+
+    tx("fx-t4", holdings_date, "cash", "deposit", "1000", "ACH deposit")
+    tx("fx-t3", holdings_date - timedelta(days=3), "cash", "withdrawal", "250", "ACH withdrawal")
+    tx(
+        "fx-t2",
+        holdings_date - timedelta(days=5),
+        "cash",
+        "withdrawal",
+        "12",
+        "cash - DIVIDEND USD",
+    )
+    tx(
+        "fx-t1",
+        holdings_date - timedelta(days=7),
+        "buy",
+        "buy",
+        "-580",
+        "Buy Beta Corp",
+        security=stock_b,
+        qty="5",
+    )
     session.commit()
 
 
@@ -158,6 +214,11 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
     from portfolio_tracker.api.routes.v1 import HealthV1, ProviderHealthV1
     from portfolio_tracker.services.v1_accounts import build_accounts_result
     from portfolio_tracker.services.v1_common import V1_SCHEMA_VERSION
+    from portfolio_tracker.services.v1_history import (
+        build_cash_flows_page,
+        build_securities_result,
+        build_transactions_page,
+    )
     from portfolio_tracker.services.v1_snapshot import (
         build_portfolio_snapshot,
         build_positioning_v1,
@@ -165,6 +226,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
 
     def current(session: Session) -> dict[str, Any]:
         _seed(session, holdings_date=_FRESH)
+        window_start = FIXTURE_TODAY - timedelta(days=30)
         return {
             "accounts.json": build_accounts_result(
                 session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
@@ -178,6 +240,26 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
                 FIXTURE_TODAY,
                 today=FIXTURE_TODAY,
                 generated_at=FIXTURE_GENERATED_AT,
+            ).model_dump(mode="json"),
+            "transactions.json": build_transactions_page(
+                session,
+                start_date=window_start,
+                end_date=FIXTURE_TODAY,
+                limit=500,
+                cursor=None,
+                generated_at=FIXTURE_GENERATED_AT,
+            ).model_dump(mode="json"),
+            "cash-flows.json": build_cash_flows_page(
+                session,
+                start_date=window_start,
+                end_date=FIXTURE_TODAY,
+                include_internal=False,
+                limit=500,
+                cursor=None,
+                generated_at=FIXTURE_GENERATED_AT,
+            ).model_dump(mode="json"),
+            "securities.json": build_securities_result(
+                session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
             ).model_dump(mode="json"),
         }
 

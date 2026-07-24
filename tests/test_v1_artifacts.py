@@ -17,6 +17,11 @@ import json
 from portfolio_tracker.api.fixtures_v1 import FIXTURES_DIR, build_fixture_payloads, render
 from portfolio_tracker.api.openapi_v1 import ARTIFACT_PATH, render_v1_openapi
 from portfolio_tracker.services.v1_accounts import AccountsV1Result
+from portfolio_tracker.services.v1_history import (
+    CashFlowsV1Result,
+    SecuritiesV1Result,
+    TransactionsV1Result,
+)
 from portfolio_tracker.services.v1_snapshot import PortfolioSnapshotV1, PositioningV1Result
 
 
@@ -58,6 +63,15 @@ def test_fixtures_parse_into_response_models():
         PortfolioSnapshotV1.model_validate(snap)
     positioning = json.loads((FIXTURES_DIR / "positioning.json").read_text(encoding="utf-8"))
     PositioningV1Result.model_validate(positioning)
+    TransactionsV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "transactions.json").read_text(encoding="utf-8"))
+    )
+    CashFlowsV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "cash-flows.json").read_text(encoding="utf-8"))
+    )
+    SecuritiesV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "securities.json").read_text(encoding="utf-8"))
+    )
 
 
 def test_fixture_scenarios_express_their_states():
