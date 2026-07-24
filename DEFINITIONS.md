@@ -43,3 +43,28 @@ standardized.
 - **Correlation / beta (per ticker)** — a security's daily-return correlation
   and beta to a benchmark (`SPY`, `QQQ`, or the policy mix) over the window,
   via the OLS routine in `services/beta.py`. Cash is excluded.
+
+## Portfolio Data Service
+
+- **Portfolio Data Service** — the backend-first operating mode of Portfolio
+  Tracker. It owns linked-account ingestion, normalized portfolio records,
+  source-data corrections, provenance, freshness, and deterministic portfolio
+  calculations exposed through the versioned `/api/v1` HTTP contract consumed
+  by `earnings-summary` and `wealthplan`. It does not own research, valuation,
+  portfolio judgment, recommendations, or the Owner Decision journal. Defined
+  by `docs/design/portfolio_data_service_prd.md`; Phase 0 rulings in
+  `docs/design/phase0_decision_addendum.md`.
+
+- **Tax treatment (detailed, v1 API)** — the five-way account tax location the
+  `/api/v1` contract preserves distinctly: `taxable`, `pretax`, `roth`, `hsa`,
+  `unknown` (field `tax_treatment`, with `tax_treatment_evidence` and
+  `tax_treatment_confidence`). Refines the coarse Positioning **Tax
+  treatment** above (which may still group `Retirement / tax-advantaged` for
+  display); consumers requiring Roth/HSA distinction (wealthplan tax buckets)
+  must use the detailed field, never account-name inference.
+
+- **Canonical account** — the API-owned reconciliation of duplicate provider
+  representations of one real account. Every v1 account carries
+  `canonical_account_id`, `included_in_totals`, and `exclusion_reason`
+  (`duplicate_of_canonical` / `inactive` / `operator_excluded`); consumers
+  never deduplicate by comparing balances.
