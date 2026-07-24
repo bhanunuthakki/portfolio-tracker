@@ -45,9 +45,9 @@ def _seed(session) -> None:
     individual = Account(
         item_id=item.item_id,
         plaid_account_id="a-ind",
-        name="Self-directed",
+        name="Mystery Account",
         type="investment",
-        subtype="individual",  # bare individual -> unknown in the 4-way contract
+        subtype=None,  # no subtype, no recognizable name -> unknown
     )
     session.add_all([brokerage, roth, k401, individual])
     session.flush()
@@ -71,8 +71,8 @@ def _seed(session) -> None:
     session.add_all(
         [
             snap(brokerage, aapl, "60", "6000"),  # AAPL taxable lot
-            snap(roth, aapl, "40", "4000"),  # AAPL tax_free lot
-            snap(k401, msft, "10", "5000"),  # MSFT tax_deferred
+            snap(roth, aapl, "40", "4000"),  # AAPL roth lot
+            snap(k401, msft, "10", "5000"),  # MSFT pretax
             snap(individual, tsla, "20", "5000"),  # TSLA unknown
         ]
     )
@@ -93,16 +93,17 @@ def test_positions_v1(client, session):
     assert float(by_ticker["MSFT"]["percent_of_portfolio"]) == 25.0
     assert float(by_ticker["TSLA"]["percent_of_portfolio"]) == 25.0
 
-    # AAPL spans a taxable + a tax_free lot.
+    # AAPL spans a taxable + a roth lot.
     aapl_lots = {lot["account_name"]: lot["tax_treatment"] for lot in by_ticker["AAPL"]["accounts"]}
-    assert aapl_lots == {"Taxable Brokerage": "taxable", "Roth IRA": "tax_free"}
+    assert aapl_lots == {"Taxable Brokerage": "taxable", "Roth IRA": "roth"}
 
     buckets = {k: float(v) for k, v in data["by_tax_treatment"].items()}
     assert buckets == {
         "taxable": 6000.0,
-        "tax_deferred": 5000.0,
-        "tax_free": 4000.0,
-        "unknown": 5000.0,  # the bare "individual" account
+        "pretax": 5000.0,
+        "roth": 4000.0,
+        "hsa": 0.0,
+        "unknown": 5000.0,  # the subtype-less, unrecognizable account
     }
 
 
@@ -115,7 +116,8 @@ def test_positions_v1_empty_book(client):
     assert data["positions"] == []
     assert {k: float(v) for k, v in data["by_tax_treatment"].items()} == {
         "taxable": 0.0,
-        "tax_deferred": 0.0,
-        "tax_free": 0.0,
+        "pretax": 0.0,
+        "roth": 0.0,
+        "hsa": 0.0,
         "unknown": 0.0,
     }

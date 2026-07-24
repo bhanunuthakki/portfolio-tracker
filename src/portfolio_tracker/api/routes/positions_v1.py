@@ -2,7 +2,7 @@
 
 A first-class, server-derived view of consolidated positions: each carries a
 server-computed ``percent_of_portfolio`` and per-account lots tagged with a
-4-way ``tax_treatment``. The companion `earnings-summary` client used to derive
+five-way ``tax_treatment``. The companion `earnings-summary` client used to derive
 both locally by joining ``/api/portfolio/holdings`` with ``/api/plaid/items``;
 this endpoint moves that onto the server so the tracker owns the contract.
 
@@ -42,7 +42,7 @@ def positions(
 
     Each position is rolled up across every account holding the security (same
     consolidation the Holdings view uses), with ``percent_of_portfolio`` and a
-    4-way ``tax_treatment`` per account lot computed server-side. Returns an
+    five-way ``tax_treatment`` per account lot computed server-side. Returns an
     empty-but-valid payload when there are no active holdings.
     """
     rows = _latest_holding_rows(session)
@@ -51,6 +51,6 @@ def positions(
     snapshot_date = rows[0][0].snapshot_date
     overrides = _load_cost_basis_overrides(session)
     consolidated = _consolidate_holdings(snapshot_date, rows, overrides)
-    # account_id → 4-way tax bucket, from the Account type/subtype on each row.
-    account_tax = {a.account_id: tax_treatment(a.type, a.subtype) for _, a, _ in rows}
+    # account_id → five-way tax treatment, from the Account type/subtype on each row.
+    account_tax = {a.account_id: tax_treatment(a.type, a.subtype, a.name) for _, a, _ in rows}
     return build_positions_result(snapshot_date, consolidated, account_tax)

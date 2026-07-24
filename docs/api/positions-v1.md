@@ -6,8 +6,10 @@ locally — by joining `GET /api/portfolio/holdings` with `GET /api/plaid/items`
 — onto the server, so the tracker owns the contract:
 
 - each position's **`percent_of_portfolio`** (market value ÷ total book), and
-- a per-account-lot **`tax_treatment`** (`taxable` / `tax_deferred` /
-  `tax_free` / `unknown`) inferred from the account `type` + `subtype`.
+- a per-account-lot **`tax_treatment`** in the detailed five-way enum
+  (`taxable` / `pretax` / `roth` / `hsa` / `unknown`) inferred from the
+  account `type` + `subtype` (Phase 0 ruling SC-1,
+  `docs/design/phase0_decision_addendum.md`).
 
 This is the additive `/api/v1` namespace: it does not change or replace the
 existing `/api/portfolio/holdings` and `/api/plaid/items` endpoints, which keep
@@ -55,15 +57,16 @@ the active accounts (the same snapshot the Holdings view consolidates).
           "market_value": "4000.000000",
           "cost_basis": "3200.000000",
           "cost_basis_source": null,
-          "tax_treatment": "tax_free"
+          "tax_treatment": "roth"
         }
       ]
     }
   ],
   "by_tax_treatment": {                  // market value summed per bucket, at the LOT level
     "taxable": "6000.000000",
-    "tax_deferred": "5000.000000",
-    "tax_free": "4000.000000",
+    "pretax": "5000.000000",
+    "roth": "4000.000000",
+    "hsa": "0",
     "unknown": "5000.000000"
   },
   "notes": ["…"]
@@ -81,28 +84,39 @@ codebase's `weight_pct` convention. A position with no market value is omitted
 from the book total and reports `null`. When the book total is 0 (no priced
 positions), every position reports `null`.
 
-### `tax_treatment` (4-way)
+### `tax_treatment` (detailed five-way, SC-1)
 
-Inferred from each account's `type` + `subtype`. The mapping is the **finer
-4-way** contract — *not* the coarser 3-way
-`services/positioning.py:classify_tax_treatment`, which collapses HSA/Roth into
-a single "tax-advantaged" slice and maps a bare `individual` to taxable:
+Inferred from each account's `type` + `subtype`. The mapping is the ratified
+**detailed** contract — *not* the coarser
+`services/positioning.py:classify_tax_treatment`, which collapses everything
+tax-advantaged into a single display slice and maps a bare `individual` to
+taxable:
 
-| Bucket         | Matches                                                                                          |
-| -------------- | ------------------------------------------------------------------------------------------------ |
-| `tax_free`     | subtype contains `roth` (incl. Roth 401k/IRA), or subtype is `hsa`                                |
-| `tax_deferred` | subtype contains `401k` or `ira`, or is one of `403b`/`457b`/`sep`/`simple`/`pension`/`keogh`/`retirement`/`rrsp`/`sarsep`/`profit sharing plan` |
-| `taxable`      | subtype contains `brokerage`, or account `type` is `brokerage`                                    |
-| `unknown`      | everything else — including a bare `individual` / `joint` subtype with no `brokerage` token       |
+| Value     | Matches (in precedence order)                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| `roth`    | subtype contains `roth` (incl. Roth 401k/IRA); or account NAME contains `roth`                    |
+| `hsa`     | subtype is `hsa`; or name contains `hsa` / `health savings`                                       |
+| `pretax`  | subtype contains `401k` or `ira`, or is one of `403b`/`457b`/`sep`/`simple`/`pension`/`keogh`/`retirement`/`rrsp`/`sarsep`/`profit sharing plan`; or name contains `401k`/`401(k)`/word-ish `ira`/`retirement`/`brokeragelink` |
+| `taxable` | subtype contains `brokerage`; cash-account subtype (`checking`/`savings`/`cash management`); name contains `brokerage`/`self-directed`/`taxable`; account `type` is `brokerage`; or a bare `individual`/`joint` subtype (LOW confidence) |
+| `unknown` | everything else                                                                                   |
 
-The `roth` check runs first, so "roth ira" / "roth 401k" land in `tax_free`,
-not `tax_deferred`. Bucketing is done at the **lot** level, so a position held
-in both a Roth IRA and a taxable brokerage contributes to both `tax_free` and
-`taxable` in `by_tax_treatment`.
+Subtype evidence is `high` confidence; cash-subtype/name/type tiers are
+`medium`; the bare `individual`/`joint` fallback is `low`. The name tier
+exists because SnapTrade omits `subtype` for some institutions (Fidelity
+"BrokerageLink", "Health Savings Account") — it centralizes, in the provider,
+the heuristics the consumers used to hand-roll. A bare "BrokerageLink" is the
+self-directed 401(k) window (owner-confirmed) → `pretax`.
 
-This mapping mirrors the earnings-summary client's `tax_treatment()` exactly,
-so switching the client to this endpoint yields the same buckets it derived by
-hand.
+The `roth` check runs first at every tier, so "roth ira" / "BrokerageLink
+Roth" land in `roth`, not `pretax`. Bucketing is done at the **lot** level, so
+a position held in both a Roth IRA and a taxable brokerage contributes to both
+`roth` and `taxable` in `by_tax_treatment`.
+
+Roth and HSA stay distinct because wealthplan models their cash-flow and
+withdrawal behavior separately. Consumers needing the old coarse buckets map
+`pretax→tax_deferred` and `roth`+`hsa`→`tax_free`. Account-level treatment
+with evidence and confidence ships on `GET /api/v1/accounts` (see
+`v1-overview.md`).
 
 ## Empty book
 

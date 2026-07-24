@@ -1,0 +1,3838 @@
+{
+  "components": {
+    "schemas": {
+      "AccountV1": {
+        "description": "One normalized account with provenance \u2014 the SC-1/SC-2 contract.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "canonical_account_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Account Id"
+          },
+          "exclusion_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exclusion Reason"
+          },
+          "holdings_as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Holdings As Of"
+          },
+          "included_in_totals": {
+            "title": "Included In Totals",
+            "type": "boolean"
+          },
+          "institution": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Institution"
+          },
+          "last_successful_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Successful Sync At"
+          },
+          "mask": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mask"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "official_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Official Name"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "tax_treatment": {
+            "title": "Tax Treatment",
+            "type": "string"
+          },
+          "tax_treatment_confidence": {
+            "title": "Tax Treatment Confidence",
+            "type": "string"
+          },
+          "tax_treatment_evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tax Treatment Evidence"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "value_currency": {
+            "title": "Value Currency",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/V1Warning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "account_id",
+          "canonical_account_id",
+          "provider",
+          "institution",
+          "name",
+          "official_name",
+          "type",
+          "subtype",
+          "mask",
+          "active",
+          "included_in_totals",
+          "exclusion_reason",
+          "tax_treatment",
+          "tax_treatment_evidence",
+          "tax_treatment_confidence",
+          "value",
+          "value_currency",
+          "holdings_as_of",
+          "last_successful_sync_at",
+          "warnings"
+        ],
+        "title": "AccountV1",
+        "type": "object"
+      },
+      "AccountsV1Result": {
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/AccountV1"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          }
+        },
+        "required": [
+          "meta",
+          "accounts"
+        ],
+        "title": "AccountsV1Result",
+        "type": "object"
+      },
+      "BetaResult": {
+        "properties": {
+          "alpha_annualized_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Annualized Pct"
+          },
+          "alpha_significant": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Significant"
+          },
+          "alpha_std_error_annualized_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Std Error Annualized Pct"
+          },
+          "alpha_t_stat": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha T Stat"
+          },
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "benchmark_volatility_annualized": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Volatility Annualized"
+          },
+          "beta": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta"
+          },
+          "correlation": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation"
+          },
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "information_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Information Ratio"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "portfolio_volatility_annualized": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Volatility Annualized"
+          },
+          "r_squared": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "R Squared"
+          },
+          "risk_free_annual": {
+            "title": "Risk Free Annual",
+            "type": "number"
+          },
+          "sample_size": {
+            "title": "Sample Size",
+            "type": "integer"
+          },
+          "sharpe": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharpe"
+          },
+          "sortino": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sortino"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "tracking_error_annualized": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tracking Error Annualized"
+          }
+        },
+        "required": [
+          "benchmark",
+          "start_date",
+          "end_date",
+          "sample_size",
+          "risk_free_annual",
+          "beta",
+          "alpha_annualized_pct",
+          "r_squared",
+          "correlation",
+          "alpha_t_stat",
+          "alpha_std_error_annualized_pct",
+          "alpha_significant",
+          "sharpe",
+          "sortino",
+          "information_ratio",
+          "portfolio_volatility_annualized",
+          "benchmark_volatility_annualized",
+          "tracking_error_annualized",
+          "notes"
+        ],
+        "title": "BetaResult",
+        "type": "object"
+      },
+      "CashFlowV1": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "classification_source": {
+            "title": "Classification Source",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "signed_external_amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Signed External Amount",
+            "type": "string"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "transaction_id": {
+            "title": "Transaction Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account_id",
+          "account_name",
+          "date",
+          "name",
+          "type",
+          "subtype",
+          "amount",
+          "signed_external_amount",
+          "classification",
+          "classification_source",
+          "currency"
+        ],
+        "title": "CashFlowV1",
+        "type": "object"
+      },
+      "CashFlowsV1Result": {
+        "properties": {
+          "cash_flows": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowV1"
+            },
+            "title": "Cash Flows",
+            "type": "array"
+          },
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "include_internal": {
+            "title": "Include Internal",
+            "type": "boolean"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "net_external_cashflow_in": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Net External Cashflow In",
+            "type": "string"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "meta",
+          "start_date",
+          "end_date",
+          "include_internal",
+          "cash_flows",
+          "net_external_cashflow_in",
+          "next_cursor"
+        ],
+        "title": "CashFlowsV1Result",
+        "type": "object"
+      },
+      "ConcentrationOut": {
+        "description": "Concentration summary across consolidated-by-security positions.",
+        "properties": {
+          "effective_holdings": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Holdings"
+          },
+          "hhi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hhi"
+          },
+          "num_positions": {
+            "title": "Num Positions",
+            "type": "integer"
+          },
+          "top10_weight_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top10 Weight Pct"
+          },
+          "top1_weight_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top1 Weight Pct"
+          },
+          "top5_weight_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Top5 Weight Pct"
+          }
+        },
+        "required": [
+          "num_positions",
+          "top1_weight_pct",
+          "top5_weight_pct",
+          "top10_weight_pct",
+          "hhi",
+          "effective_holdings"
+        ],
+        "title": "ConcentrationOut",
+        "type": "object"
+      },
+      "DataQualityFindingOut": {
+        "description": "A single data-quality issue surfaced for the user.\n\n`severity` ranks user attention:\n  * `info`    \u2014 known limitation, no action required (e.g., SoFi\n                doesn't expose cost basis through Plaid).\n  * `warning` \u2014 affects accuracy of derived metrics (TWR, P&L)\n                but the rest of the data is fine.\n  * `error`   \u2014 broken contract; something needs fixing.\n\n`recommended_action` is rendered on the UI as the next-step text.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "context": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Context",
+            "type": "object"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "recommended_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Action"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "severity",
+          "title",
+          "detail"
+        ],
+        "title": "DataQualityFindingOut",
+        "type": "object"
+      },
+      "DataQualityReportOut": {
+        "properties": {
+          "findings": {
+            "items": {
+              "$ref": "#/components/schemas/DataQualityFindingOut"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "summary_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Summary Counts",
+            "type": "object"
+          }
+        },
+        "required": [
+          "generated_at",
+          "findings",
+          "summary_counts"
+        ],
+        "title": "DataQualityReportOut",
+        "type": "object"
+      },
+      "DataQualityV1Result": {
+        "description": "``GET /api/v1/data-quality`` \u2014 the existing machine-readable findings\nreport under the shared envelope.",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "report": {
+            "$ref": "#/components/schemas/DataQualityReportOut"
+          }
+        },
+        "required": [
+          "meta",
+          "report"
+        ],
+        "title": "DataQualityV1Result",
+        "type": "object"
+      },
+      "DrawdownResult": {
+        "properties": {
+          "annualized_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annualized Return Pct"
+          },
+          "calmar": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calmar"
+          },
+          "current_drawdown_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Drawdown Pct"
+          },
+          "days_to_recovery": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days To Recovery"
+          },
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "max_drawdown_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Drawdown Pct"
+          },
+          "peak_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Peak Date"
+          },
+          "recovery_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recovery Date"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "trough_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trough Date"
+          },
+          "underwater": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/UnderwaterPoint"
+            },
+            "title": "Underwater",
+            "type": "array"
+          }
+        },
+        "required": [
+          "start_date",
+          "end_date",
+          "max_drawdown_pct",
+          "peak_date",
+          "trough_date",
+          "recovery_date",
+          "days_to_recovery",
+          "current_drawdown_pct",
+          "annualized_return_pct",
+          "calmar"
+        ],
+        "title": "DrawdownResult",
+        "type": "object"
+      },
+      "EquityFractionV1": {
+        "description": "The SC-3 versioned Positioning fact (PRD \u00a77.2).\n\n``equity_fraction`` is a FRACTION in [0, 1] (``unit`` says so explicitly);\nNone when the denominator is zero or there is no data \u2014 never silently 0.",
+        "properties": {
+          "cash_equivalent_policy": {
+            "title": "Cash Equivalent Policy",
+            "type": "string"
+          },
+          "denominator_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Denominator Value",
+            "type": "string"
+          },
+          "equity_fraction": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Equity Fraction"
+          },
+          "equity_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Equity Value",
+            "type": "string"
+          },
+          "excluded_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Excluded Account Ids",
+            "type": "array"
+          },
+          "holdings_as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Holdings As Of"
+          },
+          "included_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Included Account Ids",
+            "type": "array"
+          },
+          "is_partial": {
+            "title": "Is Partial",
+            "type": "boolean"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "methodology": {
+            "title": "Methodology",
+            "type": "string"
+          },
+          "methodology_version": {
+            "title": "Methodology Version",
+            "type": "string"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/V1Warning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "equity_value",
+          "denominator_value",
+          "equity_fraction",
+          "unit",
+          "cash_equivalent_policy",
+          "included_account_ids",
+          "excluded_account_ids",
+          "holdings_as_of",
+          "is_partial",
+          "is_stale",
+          "warnings",
+          "methodology",
+          "methodology_version"
+        ],
+        "title": "EquityFractionV1",
+        "type": "object"
+      },
+      "ExitQualityResult": {
+        "properties": {
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/ExitQualityRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "total_exit_alpha_vs_spy": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Exit Alpha Vs Spy",
+            "type": "string"
+          },
+          "total_regret_vs_hold": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Regret Vs Hold",
+            "type": "string"
+          },
+          "total_sold_proceeds": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Sold Proceeds",
+            "type": "string"
+          },
+          "total_value_if_held": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Value If Held",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_date",
+          "end_date",
+          "rows",
+          "total_sold_proceeds",
+          "total_value_if_held",
+          "total_regret_vs_hold",
+          "total_exit_alpha_vs_spy"
+        ],
+        "title": "ExitQualityResult",
+        "type": "object"
+      },
+      "ExitQualityRow": {
+        "properties": {
+          "avg_sell_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Sell Price"
+          },
+          "exit_alpha_vs_spy": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Exit Alpha Vs Spy",
+            "type": "string"
+          },
+          "incomplete": {
+            "title": "Incomplete",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "price_now": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Now"
+          },
+          "regret_vs_hold": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Regret Vs Hold",
+            "type": "string"
+          },
+          "sold_proceeds": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Sold Proceeds",
+            "type": "string"
+          },
+          "sold_shares": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Sold Shares",
+            "type": "string"
+          },
+          "spy_value_if_reinvested": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Spy Value If Reinvested",
+            "type": "string"
+          },
+          "still_held": {
+            "title": "Still Held",
+            "type": "boolean"
+          },
+          "ticker": {
+            "title": "Ticker",
+            "type": "string"
+          },
+          "value_if_held": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value If Held",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "name",
+          "sold_shares",
+          "sold_proceeds",
+          "avg_sell_price",
+          "price_now",
+          "value_if_held",
+          "regret_vs_hold",
+          "spy_value_if_reinvested",
+          "exit_alpha_vs_spy",
+          "still_held",
+          "incomplete"
+        ],
+        "title": "ExitQualityRow",
+        "type": "object"
+      },
+      "ExitQualityV1Result": {
+        "description": "Sell-side quality facts: regret vs holding and exit alpha vs SPY.",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ExitQualityResult"
+          }
+        },
+        "required": [
+          "meta",
+          "result"
+        ],
+        "title": "ExitQualityV1Result",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthV1": {
+        "description": "``GET /api/v1/health`` \u2014 service, database, migration, provider, and\ncontract health. Contains no holdings, balances, or account details.",
+        "properties": {
+          "active_account_count": {
+            "title": "Active Account Count",
+            "type": "integer"
+          },
+          "database_ok": {
+            "title": "Database Ok",
+            "type": "boolean"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "latest_snapshot_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Snapshot Date"
+          },
+          "links": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Links",
+            "type": "object"
+          },
+          "migration_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Migration Version"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderHealthV1"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "schema_version",
+          "generated_at",
+          "database_ok",
+          "migration_version",
+          "providers",
+          "active_account_count",
+          "latest_snapshot_date",
+          "is_stale",
+          "links"
+        ],
+        "title": "HealthV1",
+        "type": "object"
+      },
+      "PerformancePoint": {
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "policy_equivalent_value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Equivalent Value"
+          },
+          "policy_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Return Pct"
+          },
+          "portfolio_return_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Portfolio Return Pct",
+            "type": "string"
+          },
+          "portfolio_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Portfolio Value",
+            "type": "string"
+          },
+          "qqq_equivalent_value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qqq Equivalent Value"
+          },
+          "qqq_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qqq Return Pct"
+          },
+          "spy_equivalent_value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Equivalent Value"
+          },
+          "spy_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Return Pct"
+          }
+        },
+        "required": [
+          "date",
+          "portfolio_value",
+          "portfolio_return_pct",
+          "spy_return_pct",
+          "qqq_return_pct",
+          "policy_return_pct",
+          "spy_equivalent_value",
+          "qqq_equivalent_value",
+          "policy_equivalent_value"
+        ],
+        "title": "PerformancePoint",
+        "type": "object"
+      },
+      "PerformanceSeries": {
+        "properties": {
+          "backfill_start_unreliable": {
+            "default": false,
+            "title": "Backfill Start Unreliable",
+            "type": "boolean"
+          },
+          "base_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Base Value",
+            "type": "string"
+          },
+          "earliest_observed_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Earliest Observed Date"
+          },
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "net_external_cashflow_in": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Net External Cashflow In",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/PerformancePoint"
+            },
+            "title": "Points",
+            "type": "array"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_date",
+          "end_date",
+          "base_value",
+          "points"
+        ],
+        "title": "PerformanceSeries",
+        "type": "object"
+      },
+      "PerformanceV1Result": {
+        "description": "Modified-Dietz TWR vs cashflow-matched benchmark counterfactuals.",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "series": {
+            "$ref": "#/components/schemas/PerformanceSeries"
+          }
+        },
+        "required": [
+          "meta",
+          "series"
+        ],
+        "title": "PerformanceV1Result",
+        "type": "object"
+      },
+      "PortfolioSnapshotV1": {
+        "description": "The bulk read model \u2014 one consistent snapshot for both consumers.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/AccountV1"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "by_tax_treatment": {
+            "additionalProperties": {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            "title": "By Tax Treatment",
+            "type": "object"
+          },
+          "equity_fraction": {
+            "$ref": "#/components/schemas/EquityFractionV1"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/PositionV1"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "total_market_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Market Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "meta",
+          "accounts",
+          "total_market_value",
+          "by_tax_treatment",
+          "positions",
+          "equity_fraction"
+        ],
+        "title": "PortfolioSnapshotV1",
+        "type": "object"
+      },
+      "PositionAlphaResult": {
+        "properties": {
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "has_policy": {
+            "default": false,
+            "title": "Has Policy",
+            "type": "boolean"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/PositionAlphaRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "series": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PositionAlphaTimePoint"
+            },
+            "title": "Series",
+            "type": "array"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "total_actual_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Actual Pl",
+            "type": "string"
+          },
+          "total_alpha": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Alpha",
+            "type": "string"
+          },
+          "total_alpha_vs_policy": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Alpha Vs Policy",
+            "type": "string"
+          },
+          "total_alpha_vs_qqq": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Alpha Vs Qqq",
+            "type": "string"
+          },
+          "total_policy_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Policy Pl",
+            "type": "string"
+          },
+          "total_qqq_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Qqq Pl",
+            "type": "string"
+          },
+          "total_spy_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Spy Pl",
+            "type": "string"
+          },
+          "v_end": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "V End",
+            "type": "string"
+          },
+          "v_start": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "V Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "start_date",
+          "end_date",
+          "rows",
+          "total_actual_pl",
+          "total_spy_pl",
+          "total_qqq_pl",
+          "total_policy_pl",
+          "total_alpha",
+          "total_alpha_vs_qqq",
+          "total_alpha_vs_policy"
+        ],
+        "title": "PositionAlphaResult",
+        "type": "object"
+      },
+      "PositionAlphaRow": {
+        "properties": {
+          "actual_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Actual Pl",
+            "type": "string"
+          },
+          "alpha": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Alpha",
+            "type": "string"
+          },
+          "alpha_vs_policy": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Alpha Vs Policy",
+            "type": "string"
+          },
+          "alpha_vs_qqq": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Alpha Vs Qqq",
+            "type": "string"
+          },
+          "bought_in_window": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Bought In Window",
+            "type": "string"
+          },
+          "incomplete": {
+            "title": "Incomplete",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "policy_counterfactual_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Policy Counterfactual Pl",
+            "type": "string"
+          },
+          "qqq_counterfactual_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Qqq Counterfactual Pl",
+            "type": "string"
+          },
+          "sold_in_window": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Sold In Window",
+            "type": "string"
+          },
+          "spy_counterfactual_pl": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Spy Counterfactual Pl",
+            "type": "string"
+          },
+          "ticker": {
+            "title": "Ticker",
+            "type": "string"
+          },
+          "value_at_end": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value At End",
+            "type": "string"
+          },
+          "value_at_start": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value At Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "name",
+          "value_at_start",
+          "bought_in_window",
+          "sold_in_window",
+          "value_at_end",
+          "actual_pl",
+          "spy_counterfactual_pl",
+          "qqq_counterfactual_pl",
+          "policy_counterfactual_pl",
+          "alpha",
+          "alpha_vs_qqq",
+          "alpha_vs_policy",
+          "incomplete"
+        ],
+        "title": "PositionAlphaRow",
+        "type": "object"
+      },
+      "PositionAlphaTimePoint": {
+        "description": "One day on the dashboard chart.\n\n`portfolio_value` is the aggregate position dollar value at day d.\nThe benchmark `*_counterfactual_value` fields apply the same starting-\ncapital + dollar-matched-cashflow methodology to each benchmark.\n\n`position_cashflow` is the net $ that moved INTO active positions on\nday d (buys minus sells). Used by the risk-metrics regression to\nsubtract trade-driven V changes from daily returns so the regression\ncaptures only market-driven moves.",
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "policy_counterfactual_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Policy Counterfactual Value",
+            "type": "string"
+          },
+          "portfolio_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Portfolio Value",
+            "type": "string"
+          },
+          "position_cashflow": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Position Cashflow",
+            "type": "string"
+          },
+          "qqq_counterfactual_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Qqq Counterfactual Value",
+            "type": "string"
+          },
+          "spy_counterfactual_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Spy Counterfactual Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "portfolio_value",
+          "spy_counterfactual_value",
+          "qqq_counterfactual_value",
+          "policy_counterfactual_value"
+        ],
+        "title": "PositionAlphaTimePoint",
+        "type": "object"
+      },
+      "PositionCorrelationRow": {
+        "description": "Per-ticker correlation + beta to each benchmark over the window.\n\nEach `correlation_*` / `beta_*` is None when that security lacks enough\noverlapping price history with the benchmark (see `sample_size`).",
+        "properties": {
+          "beta_policy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Policy"
+          },
+          "beta_qqq": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Qqq"
+          },
+          "beta_spy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Beta Spy"
+          },
+          "correlation_policy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Policy"
+          },
+          "correlation_qqq": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Qqq"
+          },
+          "correlation_spy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correlation Spy"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sample_size": {
+            "title": "Sample Size",
+            "type": "integer"
+          },
+          "security_id": {
+            "title": "Security Id",
+            "type": "integer"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
+          "value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value",
+            "type": "string"
+          },
+          "weight_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Weight Pct",
+            "type": "string"
+          }
+        },
+        "required": [
+          "security_id",
+          "ticker",
+          "name",
+          "value",
+          "weight_pct",
+          "sample_size",
+          "correlation_spy",
+          "beta_spy",
+          "correlation_qqq",
+          "beta_qqq",
+          "correlation_policy",
+          "beta_policy"
+        ],
+        "title": "PositionCorrelationRow",
+        "type": "object"
+      },
+      "PositionLotV1": {
+        "description": "One account's slice of a consolidated position, tagged with its tax\ntreatment. One position can span accounts with different treatments (e.g.\nthe same name held in a Roth IRA and a taxable brokerage).",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "cost_basis": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "cost_basis_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis Source"
+          },
+          "market_value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "tax_treatment": {
+            "title": "Tax Treatment",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "account_name",
+          "quantity",
+          "market_value",
+          "cost_basis",
+          "cost_basis_source",
+          "tax_treatment"
+        ],
+        "title": "PositionLotV1",
+        "type": "object"
+      },
+      "PositionPerformanceV1Result": {
+        "description": "Per-ticker dollar alpha vs dollar-matched benchmark counterfactuals.",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "result": {
+            "$ref": "#/components/schemas/PositionAlphaResult"
+          }
+        },
+        "required": [
+          "meta",
+          "result"
+        ],
+        "title": "PositionPerformanceV1Result",
+        "type": "object"
+      },
+      "PositionSnapshotV1": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "institution_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Institution Price"
+          },
+          "institution_value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Institution Value"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "security_id": {
+            "title": "Security Id",
+            "type": "integer"
+          },
+          "snapshot_date": {
+            "format": "date",
+            "title": "Snapshot Date",
+            "type": "string"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          }
+        },
+        "required": [
+          "snapshot_date",
+          "account_id",
+          "account_name",
+          "security_id",
+          "ticker",
+          "quantity",
+          "institution_price",
+          "institution_value",
+          "currency",
+          "origin"
+        ],
+        "title": "PositionSnapshotV1",
+        "type": "object"
+      },
+      "PositionSnapshotsV1Result": {
+        "properties": {
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "snapshots": {
+            "items": {
+              "$ref": "#/components/schemas/PositionSnapshotV1"
+            },
+            "title": "Snapshots",
+            "type": "array"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "meta",
+          "start_date",
+          "end_date",
+          "snapshots",
+          "next_cursor"
+        ],
+        "title": "PositionSnapshotsV1Result",
+        "type": "object"
+      },
+      "PositionV1": {
+        "description": "A position rolled up across every account that holds the security.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/PositionLotV1"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "cost_basis": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "market_value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "percent_of_portfolio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent Of Portfolio"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "security_id": {
+            "title": "Security Id",
+            "type": "integer"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
+          "unrealized_pnl": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Pnl"
+          }
+        },
+        "required": [
+          "security_id",
+          "ticker",
+          "name",
+          "quantity",
+          "market_value",
+          "cost_basis",
+          "unrealized_pnl",
+          "percent_of_portfolio",
+          "accounts"
+        ],
+        "title": "PositionV1",
+        "type": "object"
+      },
+      "PositioningBucketOut": {
+        "description": "One slice of a breakdown: a labeled bucket with its share of the book.",
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value",
+            "type": "string"
+          },
+          "weight_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Weight Pct",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "value",
+          "weight_pct",
+          "count"
+        ],
+        "title": "PositioningBucketOut",
+        "type": "object"
+      },
+      "PositioningOut": {
+        "description": "Everything the Holdings positioning section renders in one payload.",
+        "properties": {
+          "by_account_type": {
+            "items": {
+              "$ref": "#/components/schemas/PositioningBucketOut"
+            },
+            "title": "By Account Type",
+            "type": "array"
+          },
+          "by_asset_type": {
+            "items": {
+              "$ref": "#/components/schemas/PositioningBucketOut"
+            },
+            "title": "By Asset Type",
+            "type": "array"
+          },
+          "by_region": {
+            "items": {
+              "$ref": "#/components/schemas/PositioningBucketOut"
+            },
+            "title": "By Region",
+            "type": "array"
+          },
+          "by_sector": {
+            "items": {
+              "$ref": "#/components/schemas/PositioningBucketOut"
+            },
+            "title": "By Sector",
+            "type": "array"
+          },
+          "concentration": {
+            "$ref": "#/components/schemas/ConcentrationOut"
+          },
+          "correlations": {
+            "items": {
+              "$ref": "#/components/schemas/PositionCorrelationRow"
+            },
+            "title": "Correlations",
+            "type": "array"
+          },
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "has_policy": {
+            "title": "Has Policy",
+            "type": "boolean"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "snapshot_date": {
+            "format": "date",
+            "title": "Snapshot Date",
+            "type": "string"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "total_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Value",
+            "type": "string"
+          },
+          "weighted_avg_correlation_spy": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weighted Avg Correlation Spy"
+          }
+        },
+        "required": [
+          "snapshot_date",
+          "start_date",
+          "end_date",
+          "total_value",
+          "by_asset_type",
+          "by_sector",
+          "by_region",
+          "by_account_type",
+          "concentration",
+          "correlations",
+          "weighted_avg_correlation_spy",
+          "has_policy",
+          "notes"
+        ],
+        "title": "PositioningOut",
+        "type": "object"
+      },
+      "PositioningV1Result": {
+        "description": "``GET /api/v1/analytics/positioning`` \u2014 the existing deterministic\nPositioning cuts wrapped in the shared envelope, plus the SC-3 equity\nfraction in full detail.",
+        "properties": {
+          "equity_fraction": {
+            "$ref": "#/components/schemas/EquityFractionV1"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "positioning": {
+            "$ref": "#/components/schemas/PositioningOut"
+          }
+        },
+        "required": [
+          "meta",
+          "positioning",
+          "equity_fraction"
+        ],
+        "title": "PositioningV1Result",
+        "type": "object"
+      },
+      "PositionsV1Result": {
+        "description": "``GET /api/v1/portfolio/positions`` \u2014 consolidated positions with\nserver-computed weights + per-lot tax treatment.",
+        "properties": {
+          "by_tax_treatment": {
+            "additionalProperties": {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            "title": "By Tax Treatment",
+            "type": "object"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "positions": {
+            "items": {
+              "$ref": "#/components/schemas/PositionV1"
+            },
+            "title": "Positions",
+            "type": "array"
+          },
+          "snapshot_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Date"
+          },
+          "total_market_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Market Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "snapshot_date",
+          "total_market_value",
+          "positions",
+          "by_tax_treatment",
+          "notes"
+        ],
+        "title": "PositionsV1Result",
+        "type": "object"
+      },
+      "ProviderHealthV1": {
+        "description": "Per-provider link health \u2014 counts and times only, never balances.",
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "items_active": {
+            "title": "Items Active",
+            "type": "integer"
+          },
+          "items_linked": {
+            "title": "Items Linked",
+            "type": "integer"
+          },
+          "last_successful_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Successful Sync At"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "configured",
+          "items_linked",
+          "items_active",
+          "last_successful_sync_at"
+        ],
+        "title": "ProviderHealthV1",
+        "type": "object"
+      },
+      "RiskV1Result": {
+        "description": "Correlation/beta/volatility (regression + risk-adjusted stats) and\ndrawdown/recovery in one read.",
+        "properties": {
+          "beta": {
+            "$ref": "#/components/schemas/BetaResult"
+          },
+          "drawdown": {
+            "$ref": "#/components/schemas/DrawdownResult"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          }
+        },
+        "required": [
+          "meta",
+          "beta",
+          "drawdown"
+        ],
+        "title": "RiskV1Result",
+        "type": "object"
+      },
+      "SecuritiesV1Result": {
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "securities": {
+            "items": {
+              "$ref": "#/components/schemas/SecurityV1"
+            },
+            "title": "Securities",
+            "type": "array"
+          }
+        },
+        "required": [
+          "meta",
+          "securities"
+        ],
+        "title": "SecuritiesV1Result",
+        "type": "object"
+      },
+      "SecurityV1": {
+        "properties": {
+          "asset_type": {
+            "title": "Asset Type",
+            "type": "string"
+          },
+          "classification_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification Source"
+          },
+          "classification_updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification Updated At"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "cusip": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cusip"
+          },
+          "is_cash_equivalent": {
+            "title": "Is Cash Equivalent",
+            "type": "boolean"
+          },
+          "isin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Isin"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "region": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Region"
+          },
+          "sector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sector"
+          },
+          "security_id": {
+            "title": "Security Id",
+            "type": "integer"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          }
+        },
+        "required": [
+          "security_id",
+          "ticker",
+          "name",
+          "cusip",
+          "isin",
+          "type",
+          "currency",
+          "is_cash_equivalent",
+          "asset_type",
+          "sector",
+          "region",
+          "classification_source",
+          "classification_updated_at"
+        ],
+        "title": "SecurityV1",
+        "type": "object"
+      },
+      "TransactionV1": {
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "account_name": {
+            "title": "Account Name",
+            "type": "string"
+          },
+          "amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "effective_classification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Classification"
+          },
+          "fees": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fees"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "override_classification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Override Classification"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "security_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Id"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
+          "transaction_id": {
+            "title": "Transaction Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account_id",
+          "account_name",
+          "security_id",
+          "ticker",
+          "date",
+          "name",
+          "quantity",
+          "amount",
+          "price",
+          "fees",
+          "type",
+          "subtype",
+          "currency",
+          "override_classification",
+          "effective_classification"
+        ],
+        "title": "TransactionV1",
+        "type": "object"
+      },
+      "TransactionsV1Result": {
+        "properties": {
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "transactions": {
+            "items": {
+              "$ref": "#/components/schemas/TransactionV1"
+            },
+            "title": "Transactions",
+            "type": "array"
+          }
+        },
+        "required": [
+          "meta",
+          "start_date",
+          "end_date",
+          "transactions",
+          "next_cursor"
+        ],
+        "title": "TransactionsV1Result",
+        "type": "object"
+      },
+      "UnderwaterPoint": {
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "drawdown_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Drawdown Pct",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "drawdown_pct"
+        ],
+        "title": "UnderwaterPoint",
+        "type": "object"
+      },
+      "V1AccountCoverage": {
+        "description": "Which accounts contributed to this response.\n\n``lagging_account_ids`` are included accounts whose own latest holdings\nsnapshot is older than the response ``as_of`` \u2014 the v1 heuristic for a\none-provider refresh failure (its rows stop advancing while others move).",
+        "properties": {
+          "excluded_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Excluded Account Ids",
+            "type": "array"
+          },
+          "included_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Included Account Ids",
+            "type": "array"
+          },
+          "lagging_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Lagging Account Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "included_account_ids",
+          "excluded_account_ids",
+          "lagging_account_ids"
+        ],
+        "title": "V1AccountCoverage",
+        "type": "object"
+      },
+      "V1Meta": {
+        "description": "The shared envelope (PRD \u00a77.3). Attached as ``meta`` on every v1\ndecision-support response.",
+        "properties": {
+          "account_coverage": {
+            "$ref": "#/components/schemas/V1AccountCoverage"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "is_partial": {
+            "title": "Is Partial",
+            "type": "boolean"
+          },
+          "is_stale": {
+            "title": "Is Stale",
+            "type": "boolean"
+          },
+          "last_successful_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Successful Sync At"
+          },
+          "links": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Links",
+            "type": "object"
+          },
+          "methodology": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Methodology"
+          },
+          "methodology_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Methodology Version"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "source_providers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Providers",
+            "type": "array"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/V1Warning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "generated_at",
+          "as_of",
+          "currency",
+          "source_providers",
+          "account_coverage",
+          "last_successful_sync_at",
+          "is_partial",
+          "is_stale",
+          "warnings",
+          "links"
+        ],
+        "title": "V1Meta",
+        "type": "object"
+      },
+      "V1Warning": {
+        "description": "A structured, machine-readable warning attached to a v1 response.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "V1Warning",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Versioned consumer-read contract for portfolio facts. See docs/api/v1-overview.md for envelope and freshness semantics.",
+    "title": "Portfolio Data Service API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/accounts": {
+      "get": {
+        "description": "Normalized accounts: canonical identity, inclusion state, detailed Tax\ntreatment with evidence, per-account value + observation date, freshness.",
+        "operationId": "accounts_api_v1_accounts_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountsV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Accounts",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/exit-quality": {
+      "get": {
+        "description": "Sell-side quality facts: regret vs holding and exit alpha vs SPY.",
+        "operationId": "analytics_exit_quality_api_v1_analytics_exit_quality_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExitQualityV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Exit Quality",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/performance": {
+      "get": {
+        "description": "Modified-Dietz TWR + benchmark counterfactuals (same calculation as the\nlegacy `/api/portfolio/performance`, now enveloped and versioned).",
+        "operationId": "analytics_performance_api_v1_analytics_performance_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_backfill",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Backfill",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reserve_amount",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0,
+              "title": "Reserve Amount",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_index_etfs",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Exclude Index Etfs",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PerformanceV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Performance",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/position-performance": {
+      "get": {
+        "description": "Per-ticker dollar alpha vs dollar-matched SPY/QQQ/policy counterfactuals.",
+        "operationId": "analytics_position_performance_api_v1_analytics_position_performance_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_broad_index",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Exclude Broad Index",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositionPerformanceV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Position Performance",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/positioning": {
+      "get": {
+        "operationId": "analytics_positioning_api_v1_analytics_positioning_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositioningV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Positioning",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/risk": {
+      "get": {
+        "description": "Beta/alpha/R\u00b2, Sharpe/Sortino, tracking error, volatility, plus max\ndrawdown and recovery \u2014 one risk read for consumers.",
+        "operationId": "analytics_risk_api_v1_analytics_risk_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "benchmark",
+            "required": false,
+            "schema": {
+              "default": "SPY",
+              "title": "Benchmark",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "risk_free_annual",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Risk Free Annual"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_index_etfs",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Exclude Index Etfs",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reserve_amount",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0,
+              "title": "Reserve Amount",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RiskV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Risk",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/cash-flows": {
+      "get": {
+        "description": "Deterministically classified cash flows, using the exact TWR-pipeline\nprecedence (override \u2192 name hint \u2192 subtype heuristic).",
+        "operationId": "cash_flows_v1_api_v1_cash_flows_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "description": "Include internal (zeroed) cashflow events alongside external ones.",
+            "in": "query",
+            "name": "include_internal",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Include internal (zeroed) cashflow events alongside external ones.",
+              "title": "Include Internal",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CashFlowsV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cash Flows V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/data-quality": {
+      "get": {
+        "operationId": "data_quality_v1_api_v1_data_quality_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataQualityV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Data Quality V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/health": {
+      "get": {
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthV1"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/portfolio-snapshot": {
+      "get": {
+        "description": "The bulk consumer read model \u2014 accounts, positions, five-way tax-bucket\ntotals, and the versioned equity fraction in one consistent read.",
+        "operationId": "portfolio_snapshot_api_v1_portfolio_snapshot_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioSnapshotV1"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Portfolio Snapshot",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/portfolio/positions": {
+      "get": {
+        "description": "Consolidated positions with server-computed weights + per-lot tax bucket.\n\nEach position is rolled up across every account holding the security (same\nconsolidation the Holdings view uses), with ``percent_of_portfolio`` and a\nfive-way ``tax_treatment`` per account lot computed server-side. Returns an\nempty-but-valid payload when there are no active holdings.",
+        "operationId": "positions_api_v1_portfolio_positions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositionsV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Positions",
+        "tags": [
+          "positions-v1"
+        ]
+      }
+    },
+    "/api/v1/position-snapshots": {
+      "get": {
+        "description": "Historical observed holdings rows with explicit date bounds and origin\nmarkers (broker vs manual gap-fill). Default window: trailing 90 days.",
+        "operationId": "position_snapshots_v1_api_v1_position_snapshots_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositionSnapshotsV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Position Snapshots V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/securities": {
+      "get": {
+        "description": "The security master: identifiers, cash-equivalent status, asset type,\nand sector/region Classification with source.",
+        "operationId": "securities_v1_api_v1_securities_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecuritiesV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Securities V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/transactions": {
+      "get": {
+        "description": "Cursor-paginated normalized transactions with override + effective\ncashflow classification. Follow `next_cursor` until null \u2014 no hidden cap.\nDefault window: trailing 730 days (provider retention).",
+        "operationId": "transactions_v1_api_v1_transactions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 500,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionsV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transactions V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    }
+  }
+}

@@ -5,17 +5,17 @@ locally — by joining `GET /api/portfolio/holdings` with `GET /api/plaid/items`
 — onto the server, so the tracker owns the contract:
 
   * each position's ``percent_of_portfolio`` (market value / total book), and
-  * a per-account-lot ``tax_treatment`` (``taxable`` / ``tax_deferred`` /
-    ``tax_free`` / ``unknown``) inferred from the account ``type`` + ``subtype``.
+  * a per-account-lot ``tax_treatment`` in the ratified five-way detailed enum
+    (``taxable`` / ``pretax`` / ``roth`` / ``hsa`` / ``unknown``) inferred from
+    the account ``type`` + ``subtype``.
 
-The 4-way :func:`tax_treatment` mapping mirrors that client's function
-*exactly* (see `earnings-summary/src/integrations/portfolio_tracker_client.py`)
-so switching the client to ``GET /api/v1/portfolio/positions`` produces the
-same buckets it derived by hand. This is intentionally NOT the coarser 3-way
-``services.positioning.classify_tax_treatment`` (which collapses HSA/Roth into
-one "tax-advantaged" slice and maps a bare ``individual`` subtype to taxable) —
-the v1 contract needs the finer split, and a bare ``individual`` is ``unknown``
-here, not ``taxable``.
+The five-way enum is the Phase 0 SC-1 ruling
+(`docs/design/phase0_decision_addendum.md`): Roth and HSA stay distinct because
+wealthplan models their cash-flow and withdrawal behavior separately. This is
+intentionally NOT the coarser ``services.positioning.classify_tax_treatment``
+(one collapsed tax-advantaged display slice) — the v1 contract needs the finer
+split, with evidence + confidence on every inference tier (subtype high; cash
+subtype / account-name / type medium; bare individual-joint low).
 
 This module is split so the math is testable without a database: the pure
 :func:`tax_treatment` mapping and :func:`build_positions_result` assembler know
@@ -33,14 +33,14 @@ from pydantic import BaseModel
 
 from portfolio_tracker.schemas import ConsolidatedHoldingOut
 
-# Tax-treatment buckets, in display order. Mirrors the earnings-summary
-# client's ``TAX_BUCKETS`` so the two projects agree on the bucket set.
-TAX_TREATMENTS: tuple[str, ...] = ("taxable", "tax_deferred", "tax_free", "unknown")
+# Detailed tax-treatment values, in display order. The SC-1 five-way enum used
+# by every `/api/v1` resource; consumers (wealthplan `TaxBucket`, the
+# earnings-summary client) map from these values and never from account names.
+TAX_TREATMENTS: tuple[str, ...] = ("taxable", "pretax", "roth", "hsa", "unknown")
 
-# Traditional / tax-deferred subtypes checked by exact match (the ``401k`` /
-# ``ira`` tokens are matched as substrings before this set). Kept verbatim from
-# the earnings-summary client.
-_TAX_DEFERRED_SUBTYPES: frozenset[str] = frozenset(
+# Traditional / pretax subtypes checked by exact match (the ``401k`` / ``ira``
+# tokens are matched as substrings before this set).
+_PRETAX_SUBTYPES: frozenset[str] = frozenset(
     {
         "403b",
         "457b",
@@ -56,27 +56,106 @@ _TAX_DEFERRED_SUBTYPES: frozenset[str] = frozenset(
 )
 
 
-def tax_treatment(account_type: str | None, subtype: str | None) -> str:
-    """Map an account ``type`` + ``subtype`` to a 4-way tax bucket.
+# Cash-account subtypes some providers attach to brokerage cash-management
+# sleeves (e.g. Robinhood "Cash Management"/"Spending" arrive as CHECKING via
+# SnapTrade). Outside any tax shelter -> taxable, at medium confidence.
+_CASH_ACCOUNT_SUBTYPES: frozenset[str] = frozenset(
+    {"checking", "savings", "cash management", "cash"}
+)
 
-    Roth (incl. Roth 401k/IRA) + HSA grow tax-free; traditional 401k/IRA/SEP/etc.
-    are tax-deferred; an ordinary brokerage is taxable. The ``roth`` check runs
-    first so "roth ira" / "roth 401k" land in ``tax_free``, not ``tax_deferred``.
-    A bare ``individual`` / ``joint`` (no ``brokerage`` token) is ``unknown`` —
-    the finer contract doesn't guess taxable from those alone.
 
-    Mirrors the earnings-summary client's ``tax_treatment`` exactly so the
-    client can drop its local derivation and consume this verbatim.
+class TaxTreatmentDetail(BaseModel):
+    """The SC-1 detailed tax treatment plus its evidence trail.
+
+    ``evidence`` names the account field + value that decided the treatment
+    (e.g. ``subtype:roth ira``, ``name:brokeragelink``); ``confidence`` is
+    ``high`` for an explicit subtype match, ``medium`` for a name/type/cash
+    fallback tier, ``low`` for the weakest tier (bare individual/joint) or an
+    ``unknown`` treatment.
+    """
+
+    treatment: str
+    evidence: str | None
+    confidence: str
+
+
+def _name_tier(name: str | None) -> TaxTreatmentDetail | None:
+    """Provider-owned account-NAME heuristics (confidence ``medium``).
+
+    Centralizes the fallbacks both consumers used to hand-roll — needed
+    because SnapTrade omits ``subtype`` entirely for some institutions, so the
+    name is the only evidence (e.g. Fidelity "BrokerageLink Roth", "Health
+    Savings Account", "META PLATFORMS, INC. 401(K) PLAN"). Rules:
+
+      * ``roth`` anywhere -> roth (checked first, so "BrokerageLink Roth" wins);
+      * ``hsa`` / ``health savings`` -> hsa;
+      * ``401k`` / ``401(k)`` / word-ish `` ira `` / ``retirement`` /
+        ``brokeragelink`` -> pretax — a bare BrokerageLink is the self-directed
+        401(k) window (owner-confirmed, carried over from the wealthplan
+        adapter this replaces);
+      * ``brokerage`` / ``self-directed`` / ``taxable`` -> taxable.
+    """
+    n = (name or "").strip().lower()
+    if not n:
+        return None
+    if "roth" in n:
+        return TaxTreatmentDetail(treatment="roth", evidence=f"name:{n}", confidence="medium")
+    if "hsa" in n or "health savings" in n:
+        return TaxTreatmentDetail(treatment="hsa", evidence=f"name:{n}", confidence="medium")
+    padded = f" {n} "
+    if (
+        "401k" in n
+        or "401(k)" in n
+        or " ira " in padded
+        or "retirement" in n
+        or "brokeragelink" in n
+        or "brokerage link" in n
+    ):
+        return TaxTreatmentDetail(treatment="pretax", evidence=f"name:{n}", confidence="medium")
+    if "brokerage" in n or "self-directed" in n or "taxable" in n:
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"name:{n}", confidence="medium")
+    return None
+
+
+def tax_treatment_detail(
+    account_type: str | None, subtype: str | None, name: str | None = None
+) -> TaxTreatmentDetail:
+    """Map an account to the detailed five-way treatment, with evidence.
+
+    Precedence: explicit subtype (high) -> cash-account subtype (medium) ->
+    account-name heuristics (medium) -> brokerage type / individual-joint
+    subtype (medium/low) -> unknown (low). The ``roth`` check runs first at
+    every tier so "roth ira" / "BrokerageLink Roth" land in ``roth``.
     """
     s = (subtype or "").strip().lower()
     t = (account_type or "").strip().lower()
-    if "roth" in s or s == "hsa":
-        return "tax_free"
-    if "401k" in s or "ira" in s or s in _TAX_DEFERRED_SUBTYPES:
-        return "tax_deferred"
-    if "brokerage" in s or t == "brokerage":
-        return "taxable"
-    return "unknown"
+    if "roth" in s:
+        return TaxTreatmentDetail(treatment="roth", evidence=f"subtype:{s}", confidence="high")
+    if s == "hsa":
+        return TaxTreatmentDetail(treatment="hsa", evidence=f"subtype:{s}", confidence="high")
+    if "401k" in s or "ira" in s or s in _PRETAX_SUBTYPES:
+        return TaxTreatmentDetail(treatment="pretax", evidence=f"subtype:{s}", confidence="high")
+    if "brokerage" in s:
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"subtype:{s}", confidence="high")
+    if s in _CASH_ACCOUNT_SUBTYPES:
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"subtype:{s}", confidence="medium")
+    named = _name_tier(name)
+    if named is not None:
+        return named
+    if t == "brokerage":
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"type:{t}", confidence="medium")
+    if s in ("individual", "joint"):
+        # Weakest positive signal: an individual/joint sleeve with no shelter
+        # marker is a taxable account in practice (both consumers' legacy
+        # heuristics agreed). Low confidence so operators can review.
+        return TaxTreatmentDetail(treatment="taxable", evidence=f"subtype:{s}", confidence="low")
+    evidence = f"subtype:{s}" if s else (f"type:{t}" if t else None)
+    return TaxTreatmentDetail(treatment="unknown", evidence=evidence, confidence="low")
+
+
+def tax_treatment(account_type: str | None, subtype: str | None, name: str | None = None) -> str:
+    """The five-way treatment value alone (see :func:`tax_treatment_detail`)."""
+    return tax_treatment_detail(account_type, subtype, name).treatment
 
 
 class PositionLotV1(BaseModel):
@@ -116,7 +195,7 @@ class PositionsV1Result(BaseModel):
     snapshot_date: date | None
     total_market_value: Decimal
     positions: list[PositionV1]
-    # Market value summed into each tax bucket, bucketed at the LOT level so a
+    # Market value summed into each treatment, bucketed at the LOT level so a
     # position split across a Roth and a taxable account contributes to both.
     by_tax_treatment: dict[str, Decimal]
     notes: list[str]
@@ -134,9 +213,9 @@ def build_positions_result(
 
     Pure (no DB): ``consolidated`` is the output of
     `api/routes/portfolio.py:_consolidate_holdings`; ``account_tax`` maps each
-    contributing ``account_id`` to its 4-way :func:`tax_treatment`. The total
-    book is the sum of position market values; ``percent_of_portfolio`` is
-    ``market_value / total × 100`` (matching the earnings-summary client's
+    contributing ``account_id`` to its five-way :func:`tax_treatment`. The
+    total book is the sum of position market values; ``percent_of_portfolio``
+    is ``market_value / total × 100`` (matching the earnings-summary client's
     100× percent convention and the codebase's ``weight_pct`` cuts).
     """
     total = sum((c.total_value or Decimal(0) for c in consolidated), Decimal(0))
@@ -184,8 +263,8 @@ def build_positions_result(
         "percent_of_portfolio is market_value / total book × 100 (percent), "
         "over the latest snapshot's positions; a position with no market value "
         "is omitted from the total and reports null.",
-        "tax_treatment is a 4-way bucket (taxable / tax_deferred / tax_free / "
-        "unknown) inferred from each account's type + subtype; a bare "
+        "tax_treatment is the detailed five-way value (taxable / pretax / roth "
+        "/ hsa / unknown) inferred from each account's type + subtype; a bare "
         "'individual' / 'joint' subtype with no 'brokerage' token is 'unknown'.",
     ]
     if not consolidated:

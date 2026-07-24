@@ -30,3 +30,19 @@ Pre-push, in order (global order applies):
 ## Secret & data files — never commit, never log (global Safety Rules 1, 3, 4)
 
 `credentials.json` and `token.json` (Gmail OAuth, repo root), `.env` / `.env.*` (Plaid/SnapTrade keys + Fernet key), and every `*.db` / `*.bak` (`portfolio.db`, `*.db.*.bak` — real holdings + balances) plus `CIO_CONTEXT.local.md` / `*.local.md` and `tax_forms/` are the files the global redaction + commit-halt + no-log rules cover here. All are gitignored; if any appears in a staged diff, halt. Access tokens are Fernet-encrypted at rest via `crypto.py` — never decrypt-and-print.
+
+## Financial-data correctness and state changes
+
+- Outputs are decision support, not personalized financial or tax advice.
+  Display valuation/price timestamps, data provider, account coverage, and any
+  stale or partial-ingest warning next to affected metrics.
+- Reconcile aggregator identifiers and transactions before computing returns;
+  never silently substitute the last good balance for a failed refresh.
+- Any schema migration, backfill, account relink, or destructive correction
+  requires a verified backup and an explicit preview of affected accounts,
+  date range, and row counts. Ask before operating on the user's live database.
+- Restore is part of backup verification: prove a backup opens and passes basic
+  integrity checks without exposing holdings in logs.
+- Keep deterministic portfolio math separate from LLM coaching. The panel may
+  explain or challenge calculated results but may not invent holdings, prices,
+  transactions, or tax facts.
