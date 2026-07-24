@@ -16,9 +16,18 @@ import json
 
 from portfolio_tracker.api.fixtures_v1 import FIXTURES_DIR, build_fixture_payloads, render
 from portfolio_tracker.api.openapi_v1 import ARTIFACT_PATH, render_v1_openapi
+from portfolio_tracker.api.routes.v1 import DataQualityV1Result
+from portfolio_tracker.services.positions_v1 import PositionsV1Result
 from portfolio_tracker.services.v1_accounts import AccountsV1Result
+from portfolio_tracker.services.v1_analytics import (
+    ExitQualityV1Result,
+    PerformanceV1Result,
+    PositionPerformanceV1Result,
+    RiskV1Result,
+)
 from portfolio_tracker.services.v1_history import (
     CashFlowsV1Result,
+    PositionSnapshotsV1Result,
     SecuritiesV1Result,
     TransactionsV1Result,
 )
@@ -71,6 +80,27 @@ def test_fixtures_parse_into_response_models():
     )
     SecuritiesV1Result.model_validate(
         json.loads((FIXTURES_DIR / "securities.json").read_text(encoding="utf-8"))
+    )
+    PositionsV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "positions.json").read_text(encoding="utf-8"))
+    )
+    PositionSnapshotsV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "position-snapshots.json").read_text(encoding="utf-8"))
+    )
+    DataQualityV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "data-quality.json").read_text(encoding="utf-8"))
+    )
+    PerformanceV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    )
+    PositionPerformanceV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "position-performance.json").read_text(encoding="utf-8"))
+    )
+    RiskV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "risk.json").read_text(encoding="utf-8"))
+    )
+    ExitQualityV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "exit-quality.json").read_text(encoding="utf-8"))
     )
 
 
