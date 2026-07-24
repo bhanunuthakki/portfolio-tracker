@@ -314,8 +314,6 @@ function BulkActionBar({
         ),
       );
       queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["performance"] });
-      queryClient.invalidateQueries({ queryKey: ["cashflow-audit"] });
       onClear();
     } finally {
       setIsPending(false);
@@ -446,8 +444,6 @@ function ClassificationCell({
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["performance"] });
-      queryClient.invalidateQueries({ queryKey: ["cashflow-audit"] });
       onCloseEdit();
     },
   });
@@ -456,8 +452,6 @@ function ClassificationCell({
       api.deleteTransactionOverride(tx.plaid_investment_transaction_id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["transactions"] });
-      queryClient.invalidateQueries({ queryKey: ["performance"] });
-      queryClient.invalidateQueries({ queryKey: ["cashflow-audit"] });
       onCloseEdit();
     },
   });

@@ -24,7 +24,6 @@ from portfolio_tracker.schemas import (
     CashflowGroupOut,
     ConsolidatedHoldingOut,
     DataQualityReportOut,
-    EarningsEnrichment,
     HoldingByAccountOut,
     HoldingOut,
     InvestmentTransactionOut,
@@ -36,12 +35,9 @@ from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import brinson as brinson_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import drawdown as drawdown_service
-from portfolio_tracker.services import earnings_summary as earnings_summary_svc
 from portfolio_tracker.services import exit_quality as exit_quality_service
 from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
-from portfolio_tracker.services import trade_analysis as trade_analysis_service
-from portfolio_tracker.services import trade_timeline as trade_timeline_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.performance import (
@@ -50,8 +46,6 @@ from portfolio_tracker.services.performance import (
     _signed_cashflow,  # pyright: ignore[reportPrivateUsage]
     effective_classification,
 )
-from portfolio_tracker.services.trade_analysis import TradeAnalysisResult
-from portfolio_tracker.services.trade_timeline import TradeTimelineResult
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -68,36 +62,13 @@ def latest_holdings_consolidated(
 
     Cost basis falls back to `cost_basis_overrides` when the snapshot's
     value is NULL — see `services/overrides.py` for the merge logic.
-
-    Each row is also enriched with cross-project data from
-    `earnings-summary` (next earnings date, thesis status, brief link)
-    when that companion project's DB is reachable.
     """
     rows = _latest_holding_rows(session)
     if not rows:
         return []
     snapshot_date = rows[0][0].snapshot_date
     overrides = _load_cost_basis_overrides(session)
-    consolidated = _consolidate_holdings(snapshot_date, rows, overrides)
-    # Enrich with earnings-summary data (no-op when unavailable)
-    tickers = [c.ticker for c in consolidated if c.ticker]
-    enrichment = earnings_summary_svc.summary_by_ticker(tickers)
-    for c in consolidated:
-        if not c.ticker:
-            continue
-        es = enrichment.get(c.ticker.upper())
-        if es is None or (not es.tracked and not es.has_brief and es.next_earnings_date is None):
-            continue
-        c.earnings = EarningsEnrichment(
-            tracked=es.tracked,
-            list_type=es.list_type,
-            next_earnings_date=es.next_earnings_date,
-            thesis_status=es.thesis_status,
-            thesis_summary=es.thesis_summary,
-            has_brief=es.has_brief,
-            latest_brief_iso_date=es.latest_brief_iso_date,
-        )
-    return consolidated
+    return _consolidate_holdings(snapshot_date, rows, overrides)
 
 
 def _load_cost_basis_overrides(
@@ -734,48 +705,3 @@ def data_quality_report(
     which need manual fixes (e.g., entering cost basis for SoFi positions)
     and which are inherent limits (e.g., yfinance can't price options)."""
     return data_quality.build_report(session)
-
-
-@router.get("/trade-analysis", response_model=TradeAnalysisResult)
-def trade_analysis_endpoint(
-    session: Annotated[Session, Depends(get_session)],
-    start_date: date | None = Query(default=None),
-    end_date: date | None = Query(default=None),
-) -> TradeAnalysisResult:
-    """Per-ticker buy/sell summary + trading-activity stats.
-
-    Surfaced on the dashboard's Trade Analysis card so the user can see
-    which names made or lost money and whether trading frequency is
-    eating into returns. P&L = today's mark + cumulative sells − cumulative
-    buys, which works for closed and open positions alike. Defaults to
-    the entire transaction history when dates aren't pinned.
-    """
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        # Default to ~24 months — matches Plaid's transaction-retention
-        # window so we don't pretend to analyze data we don't have.
-        start_date = end_date - timedelta(days=730)
-    return trade_analysis_service.analyze_trades(session, start_date, end_date)
-
-
-@router.get("/trade-timeline", response_model=TradeTimelineResult)
-def trade_timeline_endpoint(
-    session: Annotated[Session, Depends(get_session)],
-    year: int | None = Query(
-        default=None,
-        description="Tax year filter (applies to 1099 closed-lot rows only). Omit for all years.",
-    ),
-    include_open: bool = Query(
-        default=True,
-        description="Include currently-held positions with unrealized P&L.",
-    ),
-) -> TradeTimelineResult:
-    """Chronological trade timeline with SPY counterfactual.
-
-    Combines 1099 realized lots (authoritative historical) with current open
-    positions (broker snapshots) and computes per-row alpha vs SPY for the
-    same holding window. Designed for a 'which trades earned/cost me alpha'
-    timeline on the dashboard.
-    """
-    return trade_timeline_service.build_timeline(session, year=year, include_open=include_open)

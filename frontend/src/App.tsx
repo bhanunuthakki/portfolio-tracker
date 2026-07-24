@@ -2,33 +2,13 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 
 import { Accounts } from "./pages/Accounts";
-import { Advisor } from "./pages/Advisor";
-import { Cockpit } from "./pages/Cockpit";
-import { Contributions } from "./pages/Contributions";
-import { Dashboard } from "./pages/Dashboard";
-import { Earnings } from "./pages/Earnings";
 import { Holdings } from "./pages/Holdings";
-import { Review } from "./pages/Review";
-import { Scorecard } from "./pages/Scorecard";
-import { ThesisHealth } from "./pages/ThesisHealth";
-import { TradeAnalysis } from "./pages/TradeAnalysis";
-import { TradeTimeline } from "./pages/TradeTimeline";
 import { Transactions } from "./pages/Transactions";
 
 const navItems: { to: string; label: string }[] = [
-  { to: "/", label: "Cockpit" },
-  { to: "/thesis", label: "Thesis health" },
+  { to: "/", label: "Accounts" },
   { to: "/holdings", label: "Holdings" },
-  { to: "/dashboard", label: "Performance" },
-  { to: "/trade-analysis", label: "Trade analysis" },
-  { to: "/trade-timeline", label: "Trade timeline" },
-  { to: "/scorecard", label: "Scorecard" },
-  { to: "/review", label: "Review" },
-  { to: "/advisor", label: "Advisor" },
-  { to: "/contributions", label: "Contributions" },
   { to: "/transactions", label: "Transactions" },
-  { to: "/earnings", label: "Earnings" },
-  { to: "/accounts", label: "Accounts" },
 ];
 
 type Theme = "light" | "dark";
@@ -134,19 +114,9 @@ export function App(): JSX.Element {
       <main className="flex-1">
         <div className="mx-auto max-w-7xl px-6 py-7">
           <Routes>
-            <Route path="/" element={<Cockpit />} />
-            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/" element={<Accounts />} />
             <Route path="/holdings" element={<Holdings />} />
-            <Route path="/thesis" element={<ThesisHealth />} />
             <Route path="/transactions" element={<Transactions />} />
-            <Route path="/contributions" element={<Contributions />} />
-            <Route path="/trade-analysis" element={<TradeAnalysis />} />
-            <Route path="/trade-timeline" element={<TradeTimeline />} />
-            <Route path="/scorecard" element={<Scorecard />} />
-            <Route path="/review" element={<Review />} />
-            <Route path="/advisor" element={<Advisor />} />
-            <Route path="/earnings" element={<Earnings />} />
-            <Route path="/accounts" element={<Accounts />} />
           </Routes>
         </div>
       </main>

@@ -144,7 +144,6 @@ function OverrideDisagreementResolver({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["data-quality"] });
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
-      queryClient.invalidateQueries({ queryKey: ["trade-analysis"] });
     },
   });
 
@@ -207,7 +206,6 @@ function CostBasisOverrideForm({
       setNotes("");
       queryClient.invalidateQueries({ queryKey: ["data-quality"] });
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
-      queryClient.invalidateQueries({ queryKey: ["trade-timeline"] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "Save failed"),
   });
