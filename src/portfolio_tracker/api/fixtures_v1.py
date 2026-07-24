@@ -16,6 +16,13 @@ Scenarios:
   * ``transactions.json``                — cursor-paginated normalized transactions
   * ``cash-flows.json``                  — TWR-classified external flows
   * ``securities.json``                  — security master + Classification
+  * ``positions.json``                   — consolidated positions (older positions-v1 shape)
+  * ``position-snapshots.json``          — historical observed holdings, bounded window
+  * ``data-quality.json``                — enveloped data-quality findings
+  * ``performance.json``                 — Modified-Dietz TWR + benchmark counterfactuals
+  * ``position-performance.json``        — per-ticker dollar alpha
+  * ``risk.json``                        — beta/volatility + drawdown
+  * ``exit-quality.json``                — sell-side quality facts
 
 Regenerate after changing any v1 model:
 
@@ -211,11 +218,34 @@ def _with_session(fn: Callable[[Session], dict[str, Any]]) -> dict[str, Any]:
 
 
 def build_fixture_payloads() -> dict[str, dict[str, Any]]:
-    from portfolio_tracker.api.routes.v1 import HealthV1, ProviderHealthV1
+    from portfolio_tracker.api.routes.portfolio import (
+        _consolidate_holdings,  # pyright: ignore[reportPrivateUsage]
+        _latest_holding_rows,  # pyright: ignore[reportPrivateUsage]
+        _load_cost_basis_overrides,  # pyright: ignore[reportPrivateUsage]
+    )
+    from portfolio_tracker.api.routes.v1 import DataQualityV1Result, HealthV1, ProviderHealthV1
+    from portfolio_tracker.services import data_quality as data_quality_service
+    from portfolio_tracker.services.beta import compute_beta
+    from portfolio_tracker.services.drawdown import compute_drawdown
+    from portfolio_tracker.services.exit_quality import compute_exit_quality
+    from portfolio_tracker.services.performance import compute_performance_series
+    from portfolio_tracker.services.position_alpha import compute_position_alpha
+    from portfolio_tracker.services.positions_v1 import build_positions_result, tax_treatment
     from portfolio_tracker.services.v1_accounts import build_accounts_result
-    from portfolio_tracker.services.v1_common import V1_SCHEMA_VERSION
+    from portfolio_tracker.services.v1_analytics import (
+        ExitQualityV1Result,
+        PerformanceV1Result,
+        PositionPerformanceV1Result,
+        RiskV1Result,
+        exit_quality_meta,
+        performance_meta,
+        position_performance_meta,
+        risk_meta,
+    )
+    from portfolio_tracker.services.v1_common import V1_SCHEMA_VERSION, build_meta
     from portfolio_tracker.services.v1_history import (
         build_cash_flows_page,
+        build_position_snapshots_page,
         build_securities_result,
         build_transactions_page,
     )
@@ -261,6 +291,92 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             "securities.json": build_securities_result(
                 session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
             ).model_dump(mode="json"),
+        }
+
+    def detail_and_analytics(session: Session) -> dict[str, Any]:
+        """The remaining focused resources + the enveloped analytics endpoints.
+
+        Positions / position-snapshots / data-quality are populated from the
+        holdings+transaction seed. The four analytics fixtures exercise the
+        shared envelope + methodology contract; their inner series are sparse
+        because the seed carries no price/benchmark history (the documented
+        "insufficient history" degradation path), so a consumer's contract
+        test validates deserialization + envelope, not populated return rows.
+        """
+        _seed(session, holdings_date=_FRESH)
+        window_start = FIXTURE_TODAY - timedelta(days=365)
+
+        rows = _latest_holding_rows(session)
+        if rows:
+            snapshot_date = rows[0][0].snapshot_date
+            overrides = _load_cost_basis_overrides(session)
+            consolidated = _consolidate_holdings(snapshot_date, rows, overrides)
+            account_tax = {
+                a.account_id: tax_treatment(a.type, a.subtype, a.name) for _, a, _ in rows
+            }
+            positions = build_positions_result(snapshot_date, consolidated, account_tax)
+        else:
+            positions = build_positions_result(None, [], {})
+
+        dq_meta_src = build_accounts_result(
+            session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
+        ).meta
+        report = data_quality_service.build_report(session).model_copy(
+            update={"generated_at": FIXTURE_GENERATED_AT}
+        )
+        data_quality = DataQualityV1Result(
+            meta=build_meta(
+                as_of=dq_meta_src.as_of,
+                source_providers=dq_meta_src.source_providers,
+                coverage=dq_meta_src.account_coverage,
+                last_successful_sync_at=dq_meta_src.last_successful_sync_at,
+                warnings=[],
+                links={"health": "/api/v1/health", "accounts": "/api/v1/accounts"},
+                methodology="data_quality.findings",
+                methodology_version="1",
+                today=FIXTURE_TODAY,
+                generated_at=FIXTURE_GENERATED_AT,
+            ),
+            report=report,
+        )
+
+        performance = PerformanceV1Result(
+            meta=performance_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
+            series=compute_performance_series(
+                session, window_start, FIXTURE_TODAY, Decimal(0), False
+            ),
+        )
+        position_performance = PositionPerformanceV1Result(
+            meta=position_performance_meta(
+                session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
+            ),
+            result=compute_position_alpha(session, window_start, FIXTURE_TODAY),
+        )
+        risk = RiskV1Result(
+            meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
+            beta=compute_beta(session, window_start, FIXTURE_TODAY, "SPY", None, False, Decimal(0)),
+            drawdown=compute_drawdown(session, window_start, FIXTURE_TODAY, Decimal(0), False),
+        )
+        exit_quality = ExitQualityV1Result(
+            meta=exit_quality_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
+            result=compute_exit_quality(session, window_start, FIXTURE_TODAY),
+        )
+
+        return {
+            "positions.json": positions.model_dump(mode="json"),
+            "position-snapshots.json": build_position_snapshots_page(
+                session,
+                start_date=FIXTURE_TODAY - timedelta(days=90),
+                end_date=FIXTURE_TODAY,
+                limit=500,
+                cursor=None,
+                generated_at=FIXTURE_GENERATED_AT,
+            ).model_dump(mode="json"),
+            "data-quality.json": data_quality.model_dump(mode="json"),
+            "performance.json": performance.model_dump(mode="json"),
+            "position-performance.json": position_performance.model_dump(mode="json"),
+            "risk.json": risk.model_dump(mode="json"),
+            "exit-quality.json": exit_quality.model_dump(mode="json"),
         }
 
     def partial(session: Session) -> dict[str, Any]:
@@ -315,6 +431,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
 
     payloads: dict[str, dict[str, Any]] = {}
     payloads.update(_with_session(current))
+    payloads.update(_with_session(detail_and_analytics))
     payloads.update(_with_session(partial))
     payloads.update(_with_session(stale))
     payloads["health.json"] = health.model_dump(mode="json")

@@ -13,7 +13,7 @@ inputs is still stale").
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -33,8 +33,9 @@ def _analytics_meta(
     methodology: str,
     links: dict[str, str],
     today: date | None = None,
+    generated_at: datetime | None = None,
 ) -> V1Meta:
-    accounts_meta = build_accounts_result(session, today=today).meta
+    accounts_meta = build_accounts_result(session, today=today, generated_at=generated_at).meta
     return build_meta(
         as_of=accounts_meta.as_of,
         source_providers=accounts_meta.source_providers,
@@ -45,6 +46,7 @@ def _analytics_meta(
         methodology=methodology,
         methodology_version="1",
         today=today,
+        generated_at=generated_at,
     )
 
 
@@ -78,7 +80,9 @@ class ExitQualityV1Result(BaseModel):
     result: ExitQualityResult
 
 
-def performance_meta(session: Session, *, today: date | None = None) -> V1Meta:
+def performance_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
     return _analytics_meta(
         session,
         methodology="performance.modified_dietz",
@@ -88,19 +92,25 @@ def performance_meta(session: Session, *, today: date | None = None) -> V1Meta:
             "cash_flows": "/api/v1/cash-flows",
         },
         today=today,
+        generated_at=generated_at,
     )
 
 
-def position_performance_meta(session: Session, *, today: date | None = None) -> V1Meta:
+def position_performance_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
     return _analytics_meta(
         session,
         methodology="position_alpha.dollar_matched_counterfactual",
         links={"performance": "/api/v1/analytics/performance"},
         today=today,
+        generated_at=generated_at,
     )
 
 
-def risk_meta(session: Session, *, today: date | None = None) -> V1Meta:
+def risk_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
     return _analytics_meta(
         session,
         methodology="risk.beta_drawdown",
@@ -109,13 +119,17 @@ def risk_meta(session: Session, *, today: date | None = None) -> V1Meta:
             "positioning": "/api/v1/analytics/positioning",
         },
         today=today,
+        generated_at=generated_at,
     )
 
 
-def exit_quality_meta(session: Session, *, today: date | None = None) -> V1Meta:
+def exit_quality_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
     return _analytics_meta(
         session,
         methodology="exit_quality.repricing",
         links={"transactions": "/api/v1/transactions"},
         today=today,
+        generated_at=generated_at,
     )
