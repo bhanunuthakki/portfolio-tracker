@@ -405,6 +405,23 @@
         "title": "BetaResult",
         "type": "object"
       },
+      "BetaV1Result": {
+        "description": "The regression half of `RiskV1Result`, for consumers that only need\nvolatility/beta and shouldn't pay for the drawdown walk.",
+        "properties": {
+          "beta": {
+            "$ref": "#/components/schemas/BetaResult"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          }
+        },
+        "required": [
+          "meta",
+          "beta"
+        ],
+        "title": "BetaV1Result",
+        "type": "object"
+      },
       "CashFlowV1": {
         "properties": {
           "account_id": {
@@ -846,6 +863,23 @@
           "calmar"
         ],
         "title": "DrawdownResult",
+        "type": "object"
+      },
+      "DrawdownV1Result": {
+        "description": "The loss-shaped half of `RiskV1Result`, for consumers that only need\ndrawdown/recovery and shouldn't pay for the beta regression.",
+        "properties": {
+          "drawdown": {
+            "$ref": "#/components/schemas/DrawdownResult"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          }
+        },
+        "required": [
+          "meta",
+          "drawdown"
+        ],
+        "title": "DrawdownV1Result",
         "type": "object"
       },
       "EquityFractionV1": {
@@ -2994,6 +3028,210 @@
           }
         },
         "summary": "Accounts",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/beta": {
+      "get": {
+        "description": "Beta/alpha/R\u00b2, Sharpe/Sortino, tracking error, volatility only.\n\nThe regression half of `/analytics/risk`, split out so a consumer that\nonly needs volatility does not also pay for the drawdown walk (and vice\nversa \u2014 see `/analytics/drawdown`). `/analytics/risk` still returns both\ntogether for consumers that want one call.",
+        "operationId": "analytics_beta_api_v1_analytics_beta_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "benchmark",
+            "required": false,
+            "schema": {
+              "default": "SPY",
+              "title": "Benchmark",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "risk_free_annual",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Risk Free Annual"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_index_etfs",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Exclude Index Etfs",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reserve_amount",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0,
+              "title": "Reserve Amount",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BetaV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Beta",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/drawdown": {
+      "get": {
+        "description": "Max drawdown, underwater curve, time-to-recovery, and Calmar only.\n\nThe cheap half of `/analytics/risk`: this walk does not run the beta\nregression, so a consumer needing only loss-shaped risk gets it without\nthe regression's cost.",
+        "operationId": "analytics_drawdown_api_v1_analytics_drawdown_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "exclude_index_etfs",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Exclude Index Etfs",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reserve_amount",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0,
+              "title": "Reserve Amount",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrawdownV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Drawdown",
         "tags": [
           "v1"
         ]

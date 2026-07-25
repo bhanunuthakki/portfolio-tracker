@@ -23,6 +23,7 @@ is sufficient.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
@@ -483,28 +484,91 @@ def _policy_counterfactual_pl(
     Missing-data handling: components with no price on a given date are
     skipped, with remaining weights renormalized to sum to 1.
     """
+    # Sort each policy ticker's price series once; every lot below reuses the
+    # same date-memoized index (see `_BasketIndex`).
+    index = _BasketIndex(weights, closes_per_ticker)
     end_value = Decimal(0)
     # V_start lot, split across policy tickers
-    end_value += _basket_value_at(
-        v_start,
-        weights,
-        closes_per_ticker,
-        start_date,
-        end_date,
-    )
+    end_value += _basket_value_at(v_start, index, start_date, end_date)
     # Each buy: add $ to basket on buy date
     for d, a in buys:
-        end_value += _basket_value_at(a, weights, closes_per_ticker, d, end_date)
+        end_value += _basket_value_at(a, index, d, end_date)
     # Each sell: remove $ from basket on sell date (basket "sells" same $)
     for d, a in sells:
-        end_value -= _basket_value_at(a, weights, closes_per_ticker, d, end_date)
+        end_value -= _basket_value_at(a, index, d, end_date)
     return end_value + sold_sum - bought_sum - v_start
+
+
+class _BasketIndex:
+    """Precomputed price lookups for the policy-basket counterfactual.
+
+    `_basket_value_at` runs once per (buy/sell lot × policy ticker) — half a
+    million times over a year of history — and each call used to scan the
+    ticker's entire price series twice via `_last_known_price`, which builds
+    a list of every date <= target and takes `max`. That linear scan made the
+    policy counterfactual quadratic and dominated `/api/v1/analytics/risk`
+    (which reaches it through `compute_beta` → `compute_position_alpha`).
+
+    Two observations collapse it:
+
+      * each series is sorted once here, so the purchase-date lookup becomes
+        an O(log n) `bisect` instead of an O(n) scan; and
+      * `eval_date` is the same for every call in a run, so each ticker's
+        price at that date is resolved once up front rather than re-derived
+        per lot.
+
+    Prices are as-of (last close at or before the target), identical to
+    `_last_known_price` — this is a speed change, not a methodology change.
+    """
+
+    __slots__ = ("_by_date", "_closes", "_dates", "_weights")
+
+    def __init__(
+        self,
+        weights: dict[str, Decimal],
+        closes_per_ticker: dict[str, dict[date, Decimal]],
+    ) -> None:
+        self._weights = weights
+        self._closes: dict[str, dict[date, Decimal]] = {}
+        self._dates: dict[str, list[date]] = {}
+        # target date -> {ticker: as-of price}. The callers evaluate the same
+        # handful of dates over and over (every lot against every series day),
+        # so memoizing by date collapses ~500k lookups to one bisect per
+        # (date, ticker) actually seen.
+        self._by_date: dict[date, dict[str, Decimal]] = {}
+        for ticker in weights:
+            series = closes_per_ticker.get(ticker) or {}
+            if not series:
+                continue
+            self._closes[ticker] = series
+            self._dates[ticker] = sorted(series)
+
+    def prices_on(self, target: date) -> dict[str, Decimal]:
+        """As-of price per policy ticker, memoized per target date.
+
+        Omits tickers whose series has no close at or before `target` — the
+        same "skip unpriceable components" behavior `_last_known_price`
+        returning None produced.
+        """
+        cached = self._by_date.get(target)
+        if cached is not None:
+            return cached
+        prices: dict[str, Decimal] = {}
+        for ticker, ordered in self._dates.items():
+            idx = bisect_right(ordered, target)
+            if idx == 0:
+                continue
+            prices[ticker] = self._closes[ticker][ordered[idx - 1]]
+        self._by_date[target] = prices
+        return prices
+
+    def weights(self) -> dict[str, Decimal]:
+        return self._weights
 
 
 def _basket_value_at(
     capital: Decimal,
-    weights: dict[str, Decimal],
-    closes_per_ticker: dict[str, dict[date, Decimal]],
+    index: _BasketIndex,
     purchase_date: date,
     eval_date: date,
 ) -> Decimal:
@@ -515,20 +579,21 @@ def _basket_value_at(
     """
     if capital == 0:
         return Decimal(0)
-    priceable: list[tuple[str, Decimal, Decimal, Decimal]] = []  # ticker, weight, p_buy, p_eval
+    buy_prices = index.prices_on(purchase_date)
+    eval_prices = index.prices_on(eval_date)
+    priceable: list[tuple[Decimal, Decimal, Decimal]] = []  # weight, p_buy, p_eval
     total_w = Decimal(0)
-    for ticker, w in weights.items():
-        series = closes_per_ticker.get(ticker, {})
-        p_buy = _last_known_price(series, purchase_date)
-        p_eval = _last_known_price(series, eval_date)
+    for ticker, w in index.weights().items():
+        p_buy = buy_prices.get(ticker)
+        p_eval = eval_prices.get(ticker)
         if p_buy is None or p_buy == 0 or p_eval is None:
             continue
-        priceable.append((ticker, w, p_buy, p_eval))
+        priceable.append((w, p_buy, p_eval))
         total_w += w
     if not priceable or total_w == 0:
         return Decimal(0)
     value = Decimal(0)
-    for _ticker, w, p_buy, p_eval in priceable:
+    for w, p_buy, p_eval in priceable:
         renormed_w = w / total_w
         shares = (capital * renormed_w) / p_buy
         value += shares * p_eval
@@ -620,6 +685,13 @@ def _compute_alpha_series(
     # eval day we ask "what's $X invested in the policy basket on date d worth
     # today?" via _basket_value_at.
     policy_lots_per_ticker: dict[str, list[tuple[date, Decimal]]] = defaultdict(list)
+    # Built once for the whole daily walk: the loop below re-values every lot
+    # on every day, so a per-call linear price scan made this quadratic.
+    policy_basket_index = (
+        _BasketIndex(policy_weights, policy_closes_per_ticker)
+        if policy_weights and policy_closes_per_ticker
+        else None
+    )
     for t in tk_set:
         q = qty_at_start.get(t, Decimal(0))
         qty[t] = q
@@ -747,13 +819,12 @@ def _compute_alpha_series(
 
         # V_POLICY counterfactual — evaluate each $ lot at today's basket value
         v_policy = Decimal(0)
-        if policy_weights and policy_closes_per_ticker:
+        if policy_weights and policy_basket_index is not None:
             for ticker_lots in policy_lots_per_ticker.values():
                 for lot_date, lot_amt in ticker_lots:
                     v_policy += _basket_value_at(
                         lot_amt,
-                        policy_weights,
-                        policy_closes_per_ticker,
+                        policy_basket_index,
                         lot_date,
                         cur,
                     )

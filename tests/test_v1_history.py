@@ -231,6 +231,26 @@ def test_analytics_wrappers_enveloped(client, session):
     assert exits["meta"]["methodology"] == "exit_quality.repricing"
 
 
+def test_risk_split_resources_match_the_combined_read(client, session):
+    """`/analytics/beta` and `/analytics/drawdown` are the two halves of
+    `/analytics/risk` — split so a consumer needing only one doesn't pay for
+    the other. All three must agree over the same window."""
+    _seed(session)
+    combined = client.get("/api/v1/analytics/risk").json()
+    beta_only = client.get("/api/v1/analytics/beta").json()
+    drawdown_only = client.get("/api/v1/analytics/drawdown").json()
+
+    assert beta_only["beta"] == combined["beta"]
+    assert drawdown_only["drawdown"] == combined["drawdown"]
+    # The split resources carry the same envelope contract.
+    for payload in (beta_only, drawdown_only):
+        assert payload["meta"]["schema_version"] == "1.0.0"
+        assert payload["meta"]["methodology"] == "risk.beta_drawdown"
+    # Each half returns only its own half — that is the point of the split.
+    assert "drawdown" not in beta_only
+    assert "beta" not in drawdown_only
+
+
 def test_deprecation_headers_on_legacy_endpoints(client, session):
     _seed(session)
     resp = client.get("/api/portfolio/transactions")

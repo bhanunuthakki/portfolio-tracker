@@ -42,7 +42,9 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
 | `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals (`performance.modified_dietz` v1) |
 | `GET /api/v1/analytics/position-performance` | Per-ticker dollar alpha vs dollar-matched counterfactuals (`position_alpha.dollar_matched_counterfactual` v1) |
-| `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery (`risk.beta_drawdown` v1) |
+| `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v1) |
+| `GET /api/v1/analytics/beta` | The regression half of `risk` alone — for consumers that don't need drawdown |
+| `GET /api/v1/analytics/drawdown` | The loss-shaped half of `risk` alone — max drawdown, underwater curve, recovery, Calmar |
 | `GET /api/v1/analytics/exit-quality` | Sell-side quality: regret vs holding, exit alpha vs SPY (`exit_quality.repricing` v1) |
 
 Wealthplan normally needs exactly one `portfolio-snapshot` read per refresh.
@@ -51,6 +53,14 @@ Wealthplan normally needs exactly one `portfolio-snapshot` read per refresh.
 on the live database and ships with the Phase 3 migration batch (backup +
 preview + owner approval). Until then, sync recency comes from `health` and
 each account's `last_successful_sync_at`.
+
+### Choosing a risk resource
+
+`risk` returns beta and drawdown together in one call. The two halves have
+very different costs — the beta regression walks the whole position-alpha
+series, drawdown does not — so prefer `beta` or `drawdown` when you only
+need one. All three agree over the same window; picking the narrower
+resource is purely about not paying for work you discard.
 
 ### Analytics envelope semantics
 

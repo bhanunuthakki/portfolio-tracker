@@ -21,7 +21,9 @@ Scenarios:
   * ``data-quality.json``                — enveloped data-quality findings
   * ``performance.json``                 — Modified-Dietz TWR + benchmark counterfactuals
   * ``position-performance.json``        — per-ticker dollar alpha
-  * ``risk.json``                        — beta/volatility + drawdown
+  * ``risk.json``                        — beta/volatility + drawdown together
+  * ``beta.json``                        — the regression half alone
+  * ``drawdown.json``                    — the loss-shaped half alone
   * ``exit-quality.json``                — sell-side quality facts
 
 Regenerate after changing any v1 model:
@@ -233,6 +235,8 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
     from portfolio_tracker.services.positions_v1 import build_positions_result, tax_treatment
     from portfolio_tracker.services.v1_accounts import build_accounts_result
     from portfolio_tracker.services.v1_analytics import (
+        BetaV1Result,
+        DrawdownV1Result,
         ExitQualityV1Result,
         PerformanceV1Result,
         PositionPerformanceV1Result,
@@ -352,10 +356,22 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             ),
             result=compute_position_alpha(session, window_start, FIXTURE_TODAY),
         )
+        beta_result = compute_beta(
+            session, window_start, FIXTURE_TODAY, "SPY", None, False, Decimal(0)
+        )
+        drawdown_result = compute_drawdown(session, window_start, FIXTURE_TODAY, Decimal(0), False)
         risk = RiskV1Result(
             meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
-            beta=compute_beta(session, window_start, FIXTURE_TODAY, "SPY", None, False, Decimal(0)),
-            drawdown=compute_drawdown(session, window_start, FIXTURE_TODAY, Decimal(0), False),
+            beta=beta_result,
+            drawdown=drawdown_result,
+        )
+        beta_only = BetaV1Result(
+            meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
+            beta=beta_result,
+        )
+        drawdown_only = DrawdownV1Result(
+            meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
+            drawdown=drawdown_result,
         )
         exit_quality = ExitQualityV1Result(
             meta=exit_quality_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
@@ -376,6 +392,8 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             "performance.json": performance.model_dump(mode="json"),
             "position-performance.json": position_performance.model_dump(mode="json"),
             "risk.json": risk.model_dump(mode="json"),
+            "beta.json": beta_only.model_dump(mode="json"),
+            "drawdown.json": drawdown_only.model_dump(mode="json"),
             "exit-quality.json": exit_quality.model_dump(mode="json"),
         }
 

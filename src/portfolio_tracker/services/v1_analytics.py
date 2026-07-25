@@ -73,6 +73,22 @@ class RiskV1Result(BaseModel):
     drawdown: DrawdownResult
 
 
+class BetaV1Result(BaseModel):
+    """The regression half of `RiskV1Result`, for consumers that only need
+    volatility/beta and shouldn't pay for the drawdown walk."""
+
+    meta: V1Meta
+    beta: BetaResult
+
+
+class DrawdownV1Result(BaseModel):
+    """The loss-shaped half of `RiskV1Result`, for consumers that only need
+    drawdown/recovery and shouldn't pay for the beta regression."""
+
+    meta: V1Meta
+    drawdown: DrawdownResult
+
+
 class ExitQualityV1Result(BaseModel):
     """Sell-side quality facts: regret vs holding and exit alpha vs SPY."""
 
