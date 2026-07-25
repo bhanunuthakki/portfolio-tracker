@@ -1,0 +1,57 @@
+{
+  "beta": {
+    "alpha_annualized_pct": null,
+    "alpha_significant": null,
+    "alpha_std_error_annualized_pct": null,
+    "alpha_t_stat": null,
+    "benchmark": "SPY",
+    "benchmark_volatility_annualized": null,
+    "beta": null,
+    "correlation": null,
+    "end_date": "2026-07-23",
+    "information_ratio": null,
+    "notes": [
+      "Risk-free rate defaulted to 4.0%/yr \u2014 no 13-week T-bill (^IRX) data for the window; run jobs.benchmarks.",
+      "No overlapping return days. Need at least 2 paired (portfolio, benchmark) observations."
+    ],
+    "portfolio_volatility_annualized": null,
+    "r_squared": null,
+    "risk_free_annual": 0.04,
+    "sample_size": 0,
+    "sharpe": null,
+    "sortino": null,
+    "start_date": "2025-07-23",
+    "tracking_error_annualized": null
+  },
+  "meta": {
+    "account_coverage": {
+      "excluded_account_ids": [
+        4
+      ],
+      "included_account_ids": [
+        1,
+        2,
+        3
+      ],
+      "lagging_account_ids": []
+    },
+    "as_of": "2026-07-22",
+    "currency": "USD",
+    "generated_at": "2026-07-23T06:00:00Z",
+    "is_partial": false,
+    "is_stale": false,
+    "last_successful_sync_at": "2026-07-22T12:00:00",
+    "links": {
+      "performance": "/api/v1/analytics/performance",
+      "positioning": "/api/v1/analytics/positioning"
+    },
+    "methodology": "risk.beta_drawdown",
+    "methodology_version": "1",
+    "schema_version": "1.0.0",
+    "source_providers": [
+      "plaid",
+      "snaptrade"
+    ],
+    "warnings": []
+  }
+}

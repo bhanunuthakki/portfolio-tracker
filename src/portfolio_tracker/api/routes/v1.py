@@ -17,7 +17,9 @@ Resources:
   * ``GET /api/v1/analytics/positioning``— Positioning cuts + equity fraction
   * ``GET /api/v1/analytics/performance``— Modified-Dietz TWR vs benchmarks
   * ``GET /api/v1/analytics/position-performance`` — per-ticker dollar alpha
-  * ``GET /api/v1/analytics/risk``       — beta/volatility + drawdown
+  * ``GET /api/v1/analytics/risk``       — beta/volatility + drawdown together
+  * ``GET /api/v1/analytics/beta``       — the regression half alone
+  * ``GET /api/v1/analytics/drawdown``   — the loss-shaped half alone
   * ``GET /api/v1/analytics/exit-quality`` — sell-side quality facts
 
 (`GET /api/v1/portfolio/positions` predates this module and lives in
@@ -49,6 +51,8 @@ from portfolio_tracker.services.exit_quality import compute_exit_quality
 from portfolio_tracker.services.position_alpha import compute_position_alpha
 from portfolio_tracker.services.v1_accounts import AccountsV1Result, build_accounts_result
 from portfolio_tracker.services.v1_analytics import (
+    BetaV1Result,
+    DrawdownV1Result,
     ExitQualityV1Result,
     PerformanceV1Result,
     PositionPerformanceV1Result,
@@ -359,6 +363,63 @@ def analytics_risk(
         session, start_date, end_date, Decimal(str(reserve_amount)), exclude_index_etfs
     )
     return RiskV1Result(meta=risk_meta(session), beta=beta, drawdown=drawdown)
+
+
+@router.get("/analytics/beta", response_model=BetaV1Result)
+def analytics_beta(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    benchmark: str = Query(default="SPY"),
+    risk_free_annual: float | None = Query(default=None),
+    exclude_index_etfs: bool = Query(default=False),
+    reserve_amount: float = Query(default=0.0, ge=0),
+) -> BetaV1Result:
+    """Beta/alpha/R², Sharpe/Sortino, tracking error, volatility only.
+
+    The regression half of `/analytics/risk`, split out so a consumer that
+    only needs volatility does not also pay for the drawdown walk (and vice
+    versa — see `/analytics/drawdown`). `/analytics/risk` still returns both
+    together for consumers that want one call.
+    """
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    beta = compute_beta(
+        session,
+        start_date,
+        end_date,
+        benchmark,
+        risk_free_annual,
+        exclude_index_etfs,
+        Decimal(str(reserve_amount)),
+    )
+    return BetaV1Result(meta=risk_meta(session), beta=beta)
+
+
+@router.get("/analytics/drawdown", response_model=DrawdownV1Result)
+def analytics_drawdown(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    exclude_index_etfs: bool = Query(default=False),
+    reserve_amount: float = Query(default=0.0, ge=0),
+) -> DrawdownV1Result:
+    """Max drawdown, underwater curve, time-to-recovery, and Calmar only.
+
+    The cheap half of `/analytics/risk`: this walk does not run the beta
+    regression, so a consumer needing only loss-shaped risk gets it without
+    the regression's cost.
+    """
+    if end_date is None:
+        end_date = date.today()
+    if start_date is None:
+        start_date = end_date - timedelta(days=365)
+    drawdown = compute_drawdown(
+        session, start_date, end_date, Decimal(str(reserve_amount)), exclude_index_etfs
+    )
+    return DrawdownV1Result(meta=risk_meta(session), drawdown=drawdown)
 
 
 @router.get("/analytics/exit-quality", response_model=ExitQualityV1Result)

@@ -20,6 +20,8 @@ from portfolio_tracker.api.routes.v1 import DataQualityV1Result
 from portfolio_tracker.services.positions_v1 import PositionsV1Result
 from portfolio_tracker.services.v1_accounts import AccountsV1Result
 from portfolio_tracker.services.v1_analytics import (
+    BetaV1Result,
+    DrawdownV1Result,
     ExitQualityV1Result,
     PerformanceV1Result,
     PositionPerformanceV1Result,
@@ -98,6 +100,12 @@ def test_fixtures_parse_into_response_models():
     )
     RiskV1Result.model_validate(
         json.loads((FIXTURES_DIR / "risk.json").read_text(encoding="utf-8"))
+    )
+    BetaV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "beta.json").read_text(encoding="utf-8"))
+    )
+    DrawdownV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "drawdown.json").read_text(encoding="utf-8"))
     )
     ExitQualityV1Result.model_validate(
         json.loads((FIXTURES_DIR / "exit-quality.json").read_text(encoding="utf-8"))

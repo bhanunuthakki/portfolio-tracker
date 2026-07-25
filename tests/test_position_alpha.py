@@ -24,11 +24,71 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.position_alpha import (
+    _basket_value_at,
+    _BasketIndex,
     _counterfactual_pl,
+    _last_known_price,
     _price_per_ticker_at_date,
     _qty_walk_back,
     compute_position_alpha,
 )
+
+# ---------------------------------------------------------------------------
+# _BasketIndex / _basket_value_at — the policy-basket counterfactual
+#
+# This path had no coverage while it was the endpoint's hot loop (it drove
+# ~500k linear price scans per run). These tests pin both the as-of price
+# semantics and the weight renormalization the index has to preserve.
+# ---------------------------------------------------------------------------
+
+_W = {"AAA": Decimal("0.6"), "BBB": Decimal("0.4")}
+_CLOSES = {
+    "AAA": {date(2025, 1, 2): Decimal(100), date(2025, 1, 6): Decimal(110)},
+    "BBB": {date(2025, 1, 2): Decimal(50), date(2025, 1, 6): Decimal(45)},
+}
+
+
+def test_basket_index_uses_as_of_prices():
+    """A date between closes resolves to the last close at or before it —
+    identical to the `_last_known_price` scan it replaced."""
+    index = _BasketIndex(_W, _CLOSES)
+    prices = index.prices_on(date(2025, 1, 5))
+    assert prices == {"AAA": Decimal(100), "BBB": Decimal(50)}
+    # And it agrees with the original helper on every ticker.
+    for ticker, series in _CLOSES.items():
+        assert prices[ticker] == _last_known_price(series, date(2025, 1, 5))
+
+
+def test_basket_index_omits_ticker_before_its_first_close():
+    index = _BasketIndex(_W, _CLOSES)
+    assert index.prices_on(date(2024, 12, 31)) == {}
+
+
+def test_basket_value_at_grows_with_the_basket():
+    # $1000 on 1/2 split 60/40: 6 shares AAA @100, 8 shares BBB @50.
+    # On 1/6: 6*110 + 8*45 = 660 + 360 = 1020.
+    index = _BasketIndex(_W, _CLOSES)
+    value = _basket_value_at(Decimal(1000), index, date(2025, 1, 2), date(2025, 1, 6))
+    assert value == Decimal(1020)
+
+
+def test_basket_value_at_renormalizes_when_a_component_is_unpriceable():
+    """An unpriceable component drops out and the remaining weights absorb
+    the full capital — never silently under-invest."""
+    closes = {"AAA": _CLOSES["AAA"]}  # BBB has no series at all
+    index = _BasketIndex(_W, closes)
+    value = _basket_value_at(Decimal(1000), index, date(2025, 1, 2), date(2025, 1, 6))
+    # All $1000 into AAA: 10 shares @100 -> 10*110 = 1100.
+    assert value == Decimal(1100)
+
+
+def test_basket_value_at_zero_capital_and_repeat_dates():
+    index = _BasketIndex(_W, _CLOSES)
+    assert _basket_value_at(Decimal(0), index, date(2025, 1, 2), date(2025, 1, 6)) == Decimal(0)
+    # Repeated dates hit the memo; results must be identical, not merely close.
+    first = _basket_value_at(Decimal(500), index, date(2025, 1, 2), date(2025, 1, 6))
+    second = _basket_value_at(Decimal(500), index, date(2025, 1, 2), date(2025, 1, 6))
+    assert first == second
 
 
 def _active_account(session) -> Account:
