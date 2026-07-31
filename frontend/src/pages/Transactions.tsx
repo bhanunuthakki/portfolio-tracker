@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
 import { api } from "@/api/client";
+import { CashflowRuleAudit } from "@/components/CashflowRuleAudit";
 import {
   filterBySearch,
   useTableSort,
@@ -162,6 +163,7 @@ export function Transactions(): JSX.Element {
 
   return (
     <div className="space-y-3">
+      <CashflowRuleAudit />
       <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-lg font-semibold text-slate-900">Transactions</h1>
