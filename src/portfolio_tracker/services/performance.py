@@ -753,22 +753,34 @@ def _is_start_value_unreliable(
     Two independent conditions, either of which makes the return untrustworthy:
 
     1. **The start predates any real snapshot.** If `series_start` is earlier
-       than `earliest_observed`, V_start came from the transaction walk-back,
-       which anchors on TODAY's holdings and reverses only the transactions we
-       hold. Per-account transaction history begins whenever that account was
-       linked — years after the window start for a long lookback — so before
-       that date positions simply freeze at their reconstructed state and get
-       carried backward at historical prices. The result is today's winners
-       priced in the past: anything sold before the feed began never existed in
-       the model, and contributions made before it began are invisible and get
-       booked as gains. Both biases point the same way, up.
+       than `earliest_observed`, V_start came from the transaction walk-back.
 
-       This is the condition that matters in practice and the one the original
-       ratio-only heuristic missed. On the live book at 2026-07-30, a
-       2024-01-01 start reconstructed V_start = $315,781 against V_end =
-       $698,112 — a ratio of 0.45, comfortably "reliable" by rule 2 — while
-       reporting +85.5% against SPY's +57.5%. The entire outperformance was an
-       artifact, and the panel rendered it with no warning at all.
+       Be precise about what that does and doesn't get wrong, because it is
+       easy to overstate. The walk-back is a genuine reconstruction: it replays
+       transactions backward from the anchor snapshot, reversing every buy,
+       sell and transfer, so positions closed inside the covered span ARE
+       restored to the historical book. On the live database at 2024-01-01 it
+       rebuilt 33 positions against the 12 held today — XLV, CPNG, AMZN, SOFI,
+       FSLR and others long since exited. There is no survivorship bias here,
+       and only one negative-quantity artifact in the whole book.
+
+       The limit is COVERAGE, and it is per-account. A given account's
+       transaction history starts when that account was linked, which for a
+       long lookback is years after the window opens. Before its own feed
+       begins, that account's positions freeze at their earliest reconstructed
+       state — and, the part that actually moves the number, the contributions
+       that built it are missing entirely. A deposit we never saw is
+       arithmetically identical to a gain, so this bias is one-directional and
+       upward. Measured 2026-07-30: 100% of the book had no transaction
+       coverage at 2024-01-01, 67% at 2025-01-01, 37% at 2025-07-01, 0% from
+       2026-05-09. Recorded net flow was +$4,867 for all of 2024 and NEGATIVE
+       $8,326 for 2025 on a book that grew ~$150k that year — self-evidently
+       incomplete. A 365-day window reporting +21.6% falls to ~7% if true
+       contributions were $75k higher, and goes negative at $150k.
+
+       This is the condition that matters and the one the original ratio-only
+       heuristic missed: a 2024-01-01 start had V_start/V_end = 0.45,
+       comfortably "reliable" by rule 2, and rendered with no warning at all.
 
     2. **The reconstructed start collapsed.** The walk-back reconstructs
        positions but not cash, so positions bought during the window with
