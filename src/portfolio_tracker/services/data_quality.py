@@ -22,18 +22,22 @@ from portfolio_tracker.models import (
     Benchmark,
     CostBasisOverride,
     HoldingSnapshot,
+    InvestmentTransaction,
     Item,
     PolicyWeight,
     Price,
     Security,
+    StockSplit,
     TickerOverride,
 )
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
-from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
 from portfolio_tracker.services.performance import (
     _ABNORMAL_DAILY_RETURN,  # pyright: ignore[reportPrivateUsage]
     _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
     _daily_portfolio_value,  # pyright: ignore[reportPrivateUsage]
+    _reverse_transaction_quantity,  # pyright: ignore[reportPrivateUsage]
+    partial_snapshot_dates,
 )
 
 # --- severity values --------------------------------------------------------
@@ -53,6 +57,22 @@ SPARSE_FORWARD_SNAPSHOTS = "sparse_forward_snapshots"
 OVERLAPPING_BROKER_CONNECTIONS = "overlapping_broker_connections"
 MISSING_POLICY_BENCHMARK = "missing_policy_benchmark"
 OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
+UNEXPLAINED_HOLDINGS_CHANGE = "unexplained_holdings_change"
+CASHFLOW_WITHOUT_VALUE = "cashflow_without_value"
+PARTIAL_SNAPSHOT_DAY = "partial_snapshot_day"
+
+# Lookback for the "holdings moved with no trade behind them" check. Long
+# enough to catch a feed that quietly stopped weeks ago, short enough that a
+# single old gap doesn't shout forever after it's been backfilled.
+_UNEXPLAINED_CHANGE_LOOKBACK_DAYS = 60
+
+# A position's share count is "unexplained" when the observed change and the
+# change implied by its transactions differ by more than BOTH of these. The
+# fractional floor absorbs fractional-share dividend reinvestment and broker
+# rounding; the absolute floor stops sub-share noise on tiny positions from
+# generating findings.
+_UNEXPLAINED_QTY_TOLERANCE_FRACTION: Decimal = Decimal("0.01")
+_UNEXPLAINED_QTY_TOLERANCE_SHARES: Decimal = Decimal("0.5")
 
 # Tolerance for "broker disagrees with override" comparisons. Brokers
 # round and may differ by rounding noise from the user's stated total —
@@ -63,24 +83,37 @@ OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
 _OVERRIDE_DRIFT_TOLERANCE: Decimal = Decimal("0.02")
 
 
-def build_report(session: Session) -> DataQualityReportOut:
+def build_report(session: Session, now: datetime | None = None) -> DataQualityReportOut:
+    """Every finding, as of `now` (defaults to wall-clock).
+
+    `now` exists so the published v1 fixtures are reproducible. Staleness is
+    the one check measured against the clock rather than against the data, so
+    with a live `now()` the generated artifact drifted a little more each day
+    and `test_fixtures_have_no_drift` failed on an untouched checkout roughly a
+    week after any regeneration. Freezing the reference time makes the fixture
+    a function of the seeded rows alone.
+    """
+    reference = now or datetime.now(UTC)
     findings: list[DataQualityFindingOut] = []
     findings.extend(_find_missing_cost_basis(session))
     findings.extend(_find_untickered_securities(session))
     findings.extend(_find_securities_without_prices(session))
     findings.extend(_find_anomalous_backfill_days(session))
-    findings.extend(_find_stale_items(session))
+    findings.extend(_find_stale_items(session, reference))
     findings.extend(_find_sparse_forward_snapshots(session))
     findings.extend(_find_overlapping_broker_connections(session))
     findings.extend(_find_missing_policy_benchmarks(session))
     findings.extend(_find_overrides_disagreeing_with_broker(session))
+    findings.extend(_find_unexplained_holdings_changes(session))
+    findings.extend(_find_cashflow_without_value(session))
+    findings.extend(_find_partial_snapshot_days(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
         counts[f.severity] += 1
 
     return DataQualityReportOut(
-        generated_at=datetime.now(UTC),
+        generated_at=reference,
         findings=findings,
         summary_counts=dict(counts),
     )
@@ -349,14 +382,14 @@ def _find_anomalous_backfill_days(session: Session) -> list[DataQualityFindingOu
     return findings[:25]
 
 
-def _find_stale_items(session: Session) -> list[DataQualityFindingOut]:
-    """Items that haven't been refreshed in over a week.
+def _find_stale_items(session: Session, now: datetime) -> list[DataQualityFindingOut]:
+    """Items that haven't been refreshed in over a week, measured from `now`.
 
     Skips items the user has flagged as data-inactive — those are kept
     around for connection-slot reasons but explicitly aren't expected to
     influence the numbers, so a stale snapshot doesn't matter.
     """
-    threshold = datetime.now(UTC) - timedelta(days=7)
+    threshold = now - timedelta(days=7)
     rows = (
         session.execute(
             select(Item)
@@ -673,3 +706,342 @@ def _find_overrides_disagreeing_with_broker(
             )
         )
     return findings
+
+
+def _find_unexplained_holdings_changes(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Positions whose share count moved without transactions to explain it.
+
+    This is the check that catches a silently-dead transaction feed, and it is
+    the one the report was missing when that whole class of bug went unnoticed.
+
+    Holdings and transactions arrive through independent code paths. Holdings
+    come from a daily snapshot; transactions come from a separate pull that can
+    stop — a job with no transaction leg at all, an aggregator that quietly
+    drops investment activity, a connection needing re-auth for one scope but
+    not the other. Nothing about the resulting state LOOKS broken: holdings are
+    current, the value series is right, Modified Dietz keeps reporting sensible
+    numbers, and the last transaction just happens to be old. `stale_item`
+    doesn't fire, because the item IS refreshing.
+
+    What breaks is every position-level engine. `position_alpha`,
+    `exit_quality` and turnover all derive P&L from trades, so a position that
+    appears with no buy behind it has an implied cost of zero and its entire
+    market value is booked as profit. Observed on the live book at 2026-07-30:
+    the Plaid-sourced accounts had had no transaction pull in ~3 months, 216
+    shares of UBER and 38 of BKNG had materialised with no trade, and the
+    panel's "Actual P&L" card read $56,655 against a true value-based gain of
+    about $25k. The two headline numbers on the same panel disagreed by more
+    than the entire real gain, which is the only reason it got caught.
+
+    So: compare each position's observed share change against the change its
+    transactions imply, over the same interval. Divergence means the two feeds
+    have drifted apart. Direction matters for the diagnosis but not the
+    severity — shares appearing inflates P&L, shares vanishing invents losses.
+
+    Securities that split inside the window are skipped: a split moves share
+    counts with no transaction by design, so it makes the comparison
+    meaningless rather than merely noisy.
+    """
+    accts = valued_account_ids(session)
+    if not accts:
+        return []
+
+    latest = session.execute(
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
+    ).scalar_one_or_none()
+    if latest is None:
+        return []
+    window_start = latest - timedelta(days=_UNEXPLAINED_CHANGE_LOOKBACK_DAYS)
+
+    # Anchor on COMPLETE snapshots only. A partially-synced endpoint would show
+    # every account that didn't report as having gone from nothing to a full
+    # book, or vice versa.
+    candidates = set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date >= window_start)
+            .where(HoldingSnapshot.snapshot_date <= latest)
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    complete = sorted(candidates - set(partial_snapshot_dates(session, candidates)))
+    if len(complete) < 2:
+        return []
+    start_date, end_date = complete[0], complete[-1]
+
+    observed: dict[tuple[int, int], list[Decimal]] = defaultdict(lambda: [Decimal(0), Decimal(0)])
+    for idx, on_date in ((0, start_date), (1, end_date)):
+        for account_id, security_id, quantity in session.execute(
+            select(
+                HoldingSnapshot.account_id,
+                HoldingSnapshot.security_id,
+                HoldingSnapshot.quantity,
+            )
+            .where(HoldingSnapshot.snapshot_date == on_date)
+            .where(HoldingSnapshot.account_id.in_(accts))
+        ).all():
+            observed[(account_id, security_id)][idx] += Decimal(quantity)
+
+    implied: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    txs = (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.date > start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.security_id.is_not(None))
+        )
+        .scalars()
+        .all()
+    )
+    for tx in txs:
+        if tx.security_id is None:
+            continue
+        # `_reverse_transaction_quantity` returns the delta that UNDOES the
+        # transaction, so the forward effect is its negation. Reusing it binds
+        # this check to the same per-source sign conventions the walk-back
+        # uses — if those change, both move together.
+        reverse = _reverse_transaction_quantity(tx)
+        if reverse is not None:
+            implied[(tx.account_id, tx.security_id)] += -reverse
+
+    split_sids = set(
+        session.execute(
+            select(StockSplit.security_id)
+            .where(StockSplit.split_date > start_date)
+            .where(StockSplit.split_date <= end_date)
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+
+    # Cash equivalents are exempt. Their "quantity" is a dollar balance that
+    # every transaction moves — a buy debits it, a dividend credits it, a fee
+    # nibbles it — so it legitimately drifts against a share-delta comparison
+    # that only counts position-changing events. Including them produced one
+    # guaranteed false positive per cash-holding account and nothing else.
+    cash_sids = set(
+        session.execute(select(Security.security_id).where(Security.is_cash_equivalent.is_(True)))
+        .scalars()
+        .all()
+    )
+
+    account_names = _account_names(session, accts)
+    security_labels = {
+        security_id: ticker or name or f"security #{security_id}"
+        for security_id, ticker, name in session.execute(
+            select(Security.security_id, Security.ticker, Security.name)
+        ).all()
+    }
+
+    findings: list[DataQualityFindingOut] = []
+    for (account_id, security_id), (qty_start, qty_end) in sorted(observed.items()):
+        if security_id in split_sids or security_id in cash_sids:
+            continue
+        actual = qty_end - qty_start
+        expected = implied.get((account_id, security_id), Decimal(0))
+        gap = actual - expected
+        scale = max(abs(qty_end), abs(qty_start))
+        if abs(gap) <= _UNEXPLAINED_QTY_TOLERANCE_SHARES:
+            continue
+        if abs(gap) <= scale * _UNEXPLAINED_QTY_TOLERANCE_FRACTION:
+            continue
+
+        label = security_labels.get(security_id, f"security #{security_id}")
+        account = account_names.get(account_id, f"account #{account_id}")
+        direction = "appeared without a purchase" if gap > 0 else "left without a sale"
+        findings.append(
+            DataQualityFindingOut(
+                category=UNEXPLAINED_HOLDINGS_CHANGE,
+                severity=WARNING,
+                title=f"{label} in {account}: {abs(gap):,.4f} shares {direction}",
+                detail=(
+                    f"Between {start_date} and {end_date}, {label} in {account} went from "
+                    f"{qty_start:,.4f} to {qty_end:,.4f} shares (a change of {actual:+,.4f}), "
+                    f"but the recorded transactions only account for {expected:+,.4f}. "
+                    f"{abs(gap):,.4f} shares are unexplained. Position-level P&L — the "
+                    f"'Actual P&L' and 'Alpha vs SPY' cards, exit quality, turnover — "
+                    f"treats shares with no purchase behind them as pure profit and shares "
+                    f"that vanish as a loss, so those numbers are wrong for this holding. "
+                    f"Modified Dietz reads value rather than trades and is unaffected; a "
+                    f"large disagreement between the two is this bug."
+                ),
+                recommended_action=(
+                    "Run `python -m portfolio_tracker.jobs.backfill` to re-pull Plaid "
+                    "investment transactions, or `python -m portfolio_tracker.jobs."
+                    "daily_refresh` for every source. If the gap survives a backfill the "
+                    "broker isn't reporting those trades and they need a manual row."
+                ),
+                context={
+                    "account_id": str(account_id),
+                    "security_id": str(security_id),
+                    "ticker": label,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "observed_change": f"{actual:.4f}",
+                    "transaction_implied_change": f"{expected:.4f}",
+                    "unexplained_shares": f"{gap:.4f}",
+                },
+            )
+        )
+    return findings
+
+
+def _find_cashflow_without_value(session: Session) -> list[DataQualityFindingOut]:
+    """Active accounts that emit external cashflow but never report holdings.
+
+    Return math only holds when the value series and the cashflow series cover
+    the same accounts. Modified Dietz is
+    ``(V_end - V_start - sum(C)) / (V_start + sum(C_i * w_i))`` — an account
+    contributing to C but never to V has its deposits subtracted as
+    money-you-put-in while the assets they bought never appear as
+    money-you-have, so every dollar saved there reads as a dollar lost.
+
+    `valued_account_ids` already excludes these accounts from the performance
+    series. This finding is what keeps that exclusion from being silent: the
+    user should know their 401(k) sits outside the reported return rather than
+    discovering it by reconciling by hand. The live case was the Fidelity-held
+    META 401(k), which syncs payroll deferrals through SnapTrade but exposes no
+    positions — $76,823 of contributions against zero snapshots, $11,651 of it
+    inside the default window, dragging the reported return down ~1.8pp.
+    """
+    orphans = sorted(active_account_ids(session) - valued_account_ids(session))
+    if not orphans:
+        return []
+
+    rows = session.execute(
+        select(
+            InvestmentTransaction.account_id,
+            func.count(),
+            func.min(InvestmentTransaction.date),
+            func.max(InvestmentTransaction.date),
+        )
+        .where(InvestmentTransaction.account_id.in_(orphans))
+        .group_by(InvestmentTransaction.account_id)
+    ).all()
+    activity = {account_id: (n, first, last) for account_id, n, first, last in rows}
+    account_names = _account_names(session, frozenset(orphans))
+
+    findings: list[DataQualityFindingOut] = []
+    for account_id in orphans:
+        if account_id not in activity:
+            # Linked but entirely inert — no holdings AND no transactions. It
+            # can't distort anything, so it isn't worth the user's attention.
+            continue
+        count, first, last = activity[account_id]
+        name = account_names.get(account_id, f"account #{account_id}")
+        findings.append(
+            DataQualityFindingOut(
+                category=CASHFLOW_WITHOUT_VALUE,
+                severity=WARNING,
+                title=f"{name}: transactions but no holdings — excluded from return math",
+                detail=(
+                    f"{name} has {count} transactions ({first} to {last}) but has never "
+                    f"reported a holdings snapshot, so its assets are absent from the "
+                    f"portfolio value series. Its contributions are therefore EXCLUDED "
+                    f"from the performance calculation — counting them while their assets "
+                    f"stay invisible would book real savings as investment loss. The "
+                    f"consequence is that this account's balance and its returns are "
+                    f"missing from every number on the Performance panel."
+                ),
+                recommended_action=(
+                    "If the provider can expose positions for this account, re-link it so "
+                    "holdings sync and it rejoins the return math. If it can't — many "
+                    "employer plans only expose contributions — this is working as "
+                    "intended; read the reported return as covering brokerage assets only."
+                ),
+                context={
+                    "account_id": str(account_id),
+                    "transaction_count": str(count),
+                    "first_transaction": first.isoformat(),
+                    "last_transaction": last.isoformat(),
+                },
+            )
+        )
+    return findings
+
+
+def _find_partial_snapshot_days(session: Session) -> list[DataQualityFindingOut]:
+    """Days where only some accounts reported, so V covered part of the book.
+
+    A snapshot run can fail per-item and still write rows for the items that
+    succeeded. The day's total is then the sum of an arbitrary slice of the
+    portfolio — not a portfolio value. The performance series now drops these
+    days (see `_forward_values_from_snapshots`); this finding is what makes the
+    drop visible and names the sync that failed.
+
+    Four such days existed on the live book, the worst reading $158,124 against
+    $649,124 two sessions later — a fabricated 76% single-day drawdown that
+    poisoned every volatility and drawdown statistic taken off the series.
+    """
+    accts = valued_account_ids(session)
+    if not accts:
+        return []
+    latest = session.execute(
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
+    ).scalar_one_or_none()
+    if latest is None:
+        return []
+
+    candidates = set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date >= latest - timedelta(days=365))
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    partial = partial_snapshot_dates(session, candidates)
+    if not partial:
+        return []
+    account_names = _account_names(session, accts)
+
+    findings: list[DataQualityFindingOut] = []
+    for on_date, missing in sorted(partial.items()):
+        names = ", ".join(
+            sorted(account_names.get(account_id, f"#{account_id}") for account_id in missing)
+        )
+        findings.append(
+            DataQualityFindingOut(
+                category=PARTIAL_SNAPSHOT_DAY,
+                severity=WARNING,
+                title=f"{on_date}: {len(missing)} account(s) missing from the snapshot",
+                detail=(
+                    f"On {on_date} these accounts did not report holdings: {names}. The "
+                    f"day's total would have been the sum of only part of the portfolio, "
+                    f"so it is EXCLUDED from the value series rather than plotted as a "
+                    f"crash and a recovery. Drawdown and volatility over any window "
+                    f"containing this date skip the day entirely."
+                ),
+                recommended_action=(
+                    "One aggregator leg of that day's refresh failed. If it keeps "
+                    "happening for the same institution, check that connection's auth on "
+                    "the Accounts page; a one-off is usually a provider timeout and needs "
+                    "no action."
+                ),
+                context={
+                    "date": on_date.isoformat(),
+                    "missing_account_ids": ",".join(str(a) for a in sorted(missing)),
+                    "missing_accounts": names,
+                },
+            )
+        )
+    return findings
+
+
+def _account_names(session: Session, account_ids: frozenset[int]) -> dict[int, str]:
+    """`account_id -> display name` for the given accounts."""
+    return {
+        account_id: name
+        for account_id, name in session.execute(
+            select(Account.account_id, Account.name).where(Account.account_id.in_(account_ids))
+        ).all()
+    }

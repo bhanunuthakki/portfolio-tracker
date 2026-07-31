@@ -55,7 +55,7 @@ from portfolio_tracker.models import (
     Security,
 )
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
-from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.active_items import valued_account_ids
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -64,6 +64,13 @@ from portfolio_tracker.services.splits import load_split_factors
 # stock, etc.) rather than real market moves. Surfaced via the data-quality
 # report so the user can investigate the underlying transactions.
 _ABNORMAL_DAILY_RETURN: Decimal = Decimal("0.30")
+
+# How recently an account must have reported for its continued silence to read
+# as a FAILED sync rather than a closed connection. Inside this window the
+# account is still expected daily, so a partial sync today is caught today;
+# beyond it the account is treated as stopped and `stale_item` owns the
+# problem. See `account_spans`.
+_SNAPSHOT_GRACE_DAYS = 7
 
 # `transfer` is Plaid's catch-all for asset movements. EXTERNAL transfers
 # (ACATS in/out, ACH deposits, wires) are TWR cashflow. INTERNAL transfers
@@ -284,14 +291,17 @@ def compute_performance_series(
             )
         )
 
+    earliest_observed = _earliest_observed_date(session, start_date, end_date)
     return PerformanceSeries(
         start_date=start_date,
         end_date=end_date,
         base_value=base_value_adj,
         points=points,
-        earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
+        earliest_observed_date=earliest_observed,
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
-        backfill_start_unreliable=_is_start_value_unreliable(base_value, end_value),
+        backfill_start_unreliable=_is_start_value_unreliable(
+            base_value, end_value, sorted_dates[0], earliest_observed
+        ),
     )
 
 
@@ -347,7 +357,7 @@ def _forward_subset_values(
     end_date: date,
     security_ids: frozenset[int],
 ) -> dict[date, Decimal]:
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -383,7 +393,7 @@ def _backfill_subset_values(
     price` summed across the listed securities, which is what we want for
     "value of the index-ETF portion."
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     anchor_date = session.execute(
@@ -507,7 +517,7 @@ def _daily_internal_index_cashflows(
     """
     if not security_ids:
         return {}
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = (
@@ -732,14 +742,44 @@ def _earliest_observed_date(session: Session, start_date: date, end_date: date) 
     ).scalar_one_or_none()
 
 
-def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
-    """Heuristic: backfilled start is suspect when far below the end value.
+def _is_start_value_unreliable(
+    base_value: Decimal,
+    end_value: Decimal,
+    series_start: date | None = None,
+    earliest_observed: date | None = None,
+) -> bool:
+    """Whether the window's starting value is modeled rather than observed.
 
-    The backfill reconstructs positions but not cash, so positions bought
-    during the window with pre-existing cash get netted out — collapsing
-    the reconstructed start. When the start is < 25% of end, the resulting
-    TWR is dominated by reconstruction noise.
+    Two independent conditions, either of which makes the return untrustworthy:
+
+    1. **The start predates any real snapshot.** If `series_start` is earlier
+       than `earliest_observed`, V_start came from the transaction walk-back,
+       which anchors on TODAY's holdings and reverses only the transactions we
+       hold. Per-account transaction history begins whenever that account was
+       linked — years after the window start for a long lookback — so before
+       that date positions simply freeze at their reconstructed state and get
+       carried backward at historical prices. The result is today's winners
+       priced in the past: anything sold before the feed began never existed in
+       the model, and contributions made before it began are invisible and get
+       booked as gains. Both biases point the same way, up.
+
+       This is the condition that matters in practice and the one the original
+       ratio-only heuristic missed. On the live book at 2026-07-30, a
+       2024-01-01 start reconstructed V_start = $315,781 against V_end =
+       $698,112 — a ratio of 0.45, comfortably "reliable" by rule 2 — while
+       reporting +85.5% against SPY's +57.5%. The entire outperformance was an
+       artifact, and the panel rendered it with no warning at all.
+
+    2. **The reconstructed start collapsed.** The walk-back reconstructs
+       positions but not cash, so positions bought during the window with
+       pre-existing cash net out. When the start is < 25% of the end, the
+       return is dominated by that noise.
+
+    The date arguments are optional so existing callers that only have the two
+    values keep working; without them this degrades to rule 2 alone.
     """
+    if series_start is not None and (earliest_observed is None or earliest_observed > series_start):
+        return True
     if base_value <= 0 or end_value <= 0:
         return True
     return (base_value / end_value) < Decimal("0.25")
@@ -758,8 +798,15 @@ def _daily_external_cashflows(
       * For ambiguous subtypes (`cash/transfer` and the bare `transfer`
         type), we trust Plaid's standard sign convention: negative amount
         = cash going INTO the account = inflow, so cashflow_in = -amount.
+
+    Scoped to `valued_account_ids` — accounts that actually contribute to V.
+    An account that emits contributions but never a holdings snapshot (the
+    Fidelity-held 401(k)) would otherwise have its deposits subtracted in the
+    numerator while the assets they bought never appear, booking real savings
+    as investment loss. See `valued_account_ids` for the full rationale; the
+    exclusion is reported by the `cashflow_without_value` data-quality check.
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -1155,7 +1202,31 @@ def _cached_daily_values(session: Session, start_date: date, end_date: date) -> 
 def _forward_values_from_snapshots(
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    accts = active_account_ids(session)
+    """Observed daily V, with partially-synced days dropped.
+
+    A snapshot run can fail per-item — one aggregator times out, one broker
+    connection needs re-auth — and the surviving items still write rows. The
+    result is a date whose "total" is the sum of an arbitrary SUBSET of the
+    book, which is not a portfolio value at all. Summing it anyway produced
+    craters like 2026-05-22, where 6 of 11 accounts reported and V read
+    $158,124 against $649,124 two sessions later. The endpoint return survives
+    (it only reads the ends) but max-drawdown, volatility and the chart are all
+    wrecked by a 76% single-day hole that never happened.
+
+    A day is complete when every account whose OBSERVED SPAN covers that day
+    reported. Span-based rather than "all active accounts" so onboarding and
+    closure don't false-positive: an account linked mid-window is simply not
+    expected before its first snapshot, and one that stops reporting for good
+    isn't expected after its last.
+
+    Known limitation: an account that legitimately holds nothing on a date —
+    every position sold and no residual cash row — reads as missing and costs
+    that day. That's rare (brokers keep a USD row), and erring toward dropping
+    a real day is much cheaper than admitting a fake 76% drawdown. Dropped days
+    are reported by the `partial_snapshot_day` data-quality finding rather than
+    disappearing silently.
+    """
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -1164,19 +1235,100 @@ def _forward_values_from_snapshots(
             HoldingSnapshot.institution_value,
             HoldingSnapshot.quantity,
             HoldingSnapshot.institution_price,
+            HoldingSnapshot.account_id,
         )
         .where(HoldingSnapshot.snapshot_date >= start_date)
         .where(HoldingSnapshot.snapshot_date <= end_date)
         .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
 
+    complete = _complete_snapshot_dates(session, {d for d, _v, _q, _p, _a in rows})
+
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for snap_date, value, quantity, price in rows:
+    for snap_date, value, quantity, price, _account_id in rows:
+        if snap_date not in complete:
+            continue
         if value is not None:
             totals[snap_date] += Decimal(value)
         elif price is not None:
             totals[snap_date] += Decimal(quantity) * Decimal(price)
     return dict(totals)
+
+
+def account_spans(session: Session) -> dict[int, tuple[date, date]]:
+    """Per valued account, the date range over which it's expected to report.
+
+    Starts at the account's first snapshot — before that it simply wasn't
+    linked, so its absence says nothing.
+
+    The end is the subtle one. Using the account's OWN last snapshot excuses
+    the trailing edge: if today's sync drops an account, that account's span
+    also ends yesterday, so today looks complete and the one day the user is
+    actually reading goes unchecked. So the span extends to the book's latest
+    snapshot whenever the account reported within `_SNAPSHOT_GRACE_DAYS` of it
+    — recent enough that silence means a failed sync rather than a closed
+    connection. An account quiet for longer than that has stopped, not
+    stumbled; `stale_item` is the finding for that, and extending its span
+    would mark every subsequent day partial for as long as it stays linked.
+    """
+    accts = valued_account_ids(session)
+    rows = session.execute(
+        select(
+            HoldingSnapshot.account_id,
+            func.min(HoldingSnapshot.snapshot_date),
+            func.max(HoldingSnapshot.snapshot_date),
+        )
+        .where(HoldingSnapshot.account_id.in_(accts))
+        .group_by(HoldingSnapshot.account_id)
+    ).all()
+    if not rows:
+        return {}
+    book_latest = max(last for _account_id, _first, last in rows)
+    return {
+        account_id: (
+            first,
+            book_latest if (book_latest - last).days <= _SNAPSHOT_GRACE_DAYS else last,
+        )
+        for account_id, first, last in rows
+    }
+
+
+def partial_snapshot_dates(session: Session, candidates: set[date]) -> dict[date, frozenset[int]]:
+    """Of `candidates`, the dates missing an account that should have reported.
+
+    Returns `{date: missing_account_ids}` for the incomplete ones only. Shared
+    by the V series (which drops them) and the data-quality report (which
+    explains them), so the two can never disagree about which days are bad.
+    """
+    if not candidates:
+        return {}
+    spans = account_spans(session)
+    reported: dict[date, set[int]] = defaultdict(set)
+    rows = session.execute(
+        select(HoldingSnapshot.snapshot_date, HoldingSnapshot.account_id)
+        .where(HoldingSnapshot.snapshot_date.in_(candidates))
+        .distinct()
+    ).all()
+    for snap_date, account_id in rows:
+        if account_id in spans:
+            reported[snap_date].add(account_id)
+
+    out: dict[date, frozenset[int]] = {}
+    for current_date in candidates:
+        expected = {
+            account_id
+            for account_id, (first, last) in spans.items()
+            if first <= current_date <= last
+        }
+        missing = expected - reported.get(current_date, set())
+        if missing:
+            out[current_date] = frozenset(missing)
+    return out
+
+
+def _complete_snapshot_dates(session: Session, candidates: set[date]) -> frozenset[date]:
+    """`candidates` minus the partially-synced ones."""
+    return frozenset(candidates - set(partial_snapshot_dates(session, candidates)))
 
 
 def _backfill_values_from_transactions(
@@ -1199,7 +1351,7 @@ def _backfill_values_from_transactions(
 
     Daily total = positions × historical_prices  +  cash_adjustment[d].
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     anchor_row = session.execute(
@@ -1292,7 +1444,7 @@ def _backfill_values_from_transactions(
 
 
 def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]:
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
