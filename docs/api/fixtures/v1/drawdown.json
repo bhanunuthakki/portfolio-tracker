@@ -1,15 +1,15 @@
 {
   "drawdown": {
-    "annualized_return_pct": "968.57",
-    "calmar": "30.3597",
+    "annualized_return_pct": "1848.47",
+    "calmar": null,
     "current_drawdown_pct": "0.00",
-    "days_to_recovery": 7,
+    "days_to_recovery": 1,
     "end_date": "2026-07-23",
-    "max_drawdown_pct": "-31.90",
+    "max_drawdown_pct": "0.00",
     "peak_date": "2025-07-23",
-    "recovery_date": "2026-07-22",
+    "recovery_date": "2025-07-24",
     "start_date": "2025-07-23",
-    "trough_date": "2026-07-15",
+    "trough_date": "2025-07-23",
     "underwater": [
       {
         "date": "2025-07-23",
@@ -1441,31 +1441,31 @@
       },
       {
         "date": "2026-07-15",
-        "drawdown_pct": "-31.90"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-16",
-        "drawdown_pct": "-31.90"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-17",
-        "drawdown_pct": "-31.24"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-18",
-        "drawdown_pct": "-31.24"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-19",
-        "drawdown_pct": "-31.24"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-20",
-        "drawdown_pct": "-31.25"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-21",
-        "drawdown_pct": "-31.27"
+        "drawdown_pct": "0.00"
       },
       {
         "date": "2026-07-22",

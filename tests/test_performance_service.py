@@ -197,6 +197,23 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
             quantity=Decimal(10),
         )
     )
+    # The account demonstrably exists from Jan 1 (a zero-dollar marker row —
+    # the clamp keys on FIRST RECORDED TRANSACTION, and cash reconstructed for
+    # dates before an account's first evidence of existing is definitionally
+    # phantom: on the live book the two SoFi accounts "held" $29,856 in
+    # September 2024, eight months before they were opened).
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-marker",
+            account_id=account.account_id,
+            security_id=None,
+            date=date(2025, 1, 1),
+            type="cash",
+            subtype="dividend",
+            quantity=Decimal(0),
+            amount=Decimal(0),
+        )
+    )
     # Bought 4 shares for $400 on Jan 5. Walking back, positions drop to 6 but
     # the +$400 cash adjustment compensates: at a flat $100 price, V stays
     # $1000 every day (no fake ramp from the deployment).
@@ -225,4 +242,59 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
     # Pre-deployment day still values at 1000 (positions 6 × 100 + 400 cash).
     assert result[date(2025, 1, 4)] == Decimal(1000)
     # Post-deployment day: positions 10 × 100, cash adj 0.
+    assert result[date(2025, 1, 9)] == Decimal(1000)
+
+
+def test_backfill_no_phantom_cash_before_account_first_transaction(session):
+    """An account contributes NO reconstructed cash before its first recorded
+    transaction. Without the clamp, an account whose recorded lifetime flows
+    don't balance projects the residue backward past its own opening as a
+    standing idle balance — on the live book, $29,856 "held" by SoFi accounts
+    that did not yet exist, which the broker's own all-time export refuted."""
+    item = Item(source="plaid", plaid_item_id="itm-2", institution_name="RH", is_data_active=True)
+    session.add(item)
+    session.flush()
+    account = Account(
+        item_id=item.item_id, plaid_account_id="a-2", name="Opened Jan 5", type="investment"
+    )
+    session.add(account)
+    session.flush()
+    aapl = Security(plaid_security_id="s-aapl2", ticker="AAPL", type="cs", is_cash_equivalent=False)
+    session.add(aapl)
+    session.flush()
+
+    anchor = date(2025, 1, 10)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            quantity=Decimal(10),
+        )
+    )
+    # First-ever transaction is the Jan 5 buy: before that date the account
+    # has no evidence of existing, so its $400 "prior cash" must NOT appear.
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-buy2",
+            account_id=account.account_id,
+            security_id=aapl.security_id,
+            date=date(2025, 1, 5),
+            type="buy",
+            quantity=Decimal(4),
+            amount=Decimal(400),
+        )
+    )
+    for day in range(1, 11):
+        session.add(
+            Price(security_id=aapl.security_id, date=date(2025, 1, day), close=Decimal(100))
+        )
+    session.commit()
+
+    result = _backfill_values_from_transactions(session, date(2025, 1, 1), date(2025, 1, 9))
+
+    # Before the account's first transaction: positions only (6 × $100),
+    # no phantom $400 of pre-existence cash.
+    assert result[date(2025, 1, 4)] == Decimal(600)
+    # From the first transaction onward the cash adjustment applies normally.
     assert result[date(2025, 1, 9)] == Decimal(1000)

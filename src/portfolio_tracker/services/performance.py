@@ -1409,20 +1409,49 @@ def _backfill_values_from_transactions(
         sid: q * split_factors.factor_after(sid, anchor_date) for sid, q in positions.items()
     }
 
+    # First recorded transaction per account, over its ENTIRE history (not the
+    # window). An account contributes NOTHING to reconstructed cash before its
+    # first evidence of existing. Without this clamp, an account whose recorded
+    # lifetime flows don't balance (missing funding rows, provider gaps)
+    # projects that residue backward past its own opening as a standing idle
+    # balance. Live case, decomposed 2026-07-31: the pooled reconstruction
+    # showed $72k idle cash at 2024-09-30, of which $29,856 sat in the two SoFi
+    # accounts — which the owner confirmed did not exist until mid-2025. The
+    # broker's own all-time export for the largest real account showed <$10k
+    # actual cash through 2024, vindicating the owner's "I deploy quickly."
+    first_tx_by_account: dict[int, date] = {
+        account_id: first
+        for account_id, first in session.execute(
+            select(InvestmentTransaction.account_id, func.min(InvestmentTransaction.date))
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .group_by(InvestmentTransaction.account_id)
+        ).all()
+    }
+
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     daily_cash_adj: dict[date, Decimal] = {}
     rolling_positions = dict(positions)
-    rolling_cash_adj = Decimal(0)
+    rolling_cash_by_account: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
+
+    def _clamped_cash_adj(on_date: date) -> Decimal:
+        return sum(
+            (
+                adj
+                for account_id, adj in rolling_cash_by_account.items()
+                if first_tx_by_account.get(account_id, date.min) <= on_date
+            ),
+            Decimal(0),
+        )
 
     cursor_date = anchor_date - timedelta(days=1)
     daily_quantities[cursor_date] = dict(rolling_positions)
-    daily_cash_adj[cursor_date] = rolling_cash_adj
+    daily_cash_adj[cursor_date] = _clamped_cash_adj(cursor_date)
 
     for tx in backward_tx:
         while cursor_date > tx.date:
             cursor_date -= timedelta(days=1)
             daily_quantities[cursor_date] = dict(rolling_positions)
-            daily_cash_adj[cursor_date] = rolling_cash_adj
+            daily_cash_adj[cursor_date] = _clamped_cash_adj(cursor_date)
 
         # Cash-equivalent quantities are NEVER reversed. The design (see
         # `_backfill_values_from_transactions` docstring) is that cash-equiv
@@ -1445,7 +1474,7 @@ def _backfill_values_from_transactions(
                     rolling_positions.get(tx.security_id, Decimal(0)) + delta
                 )
 
-        rolling_cash_adj += _reverse_transaction_cash_delta(
+        rolling_cash_by_account[tx.account_id] += _reverse_transaction_cash_delta(
             tx,
             cash_equivalent_security_ids,
             override=tx_overrides.get(tx.plaid_investment_transaction_id),
@@ -1461,7 +1490,7 @@ def _backfill_values_from_transactions(
     while cursor_date > start_date:
         cursor_date -= timedelta(days=1)
         daily_quantities[cursor_date] = dict(rolling_positions)
-        daily_cash_adj[cursor_date] = rolling_cash_adj
+        daily_cash_adj[cursor_date] = _clamped_cash_adj(cursor_date)
 
     return _value_quantities_with_prices(
         session, daily_quantities, daily_cash_adj, start_date, end_date
