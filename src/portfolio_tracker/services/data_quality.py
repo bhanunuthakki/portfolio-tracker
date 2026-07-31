@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import combinations
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -36,7 +37,9 @@ from portfolio_tracker.services.performance import (
     _ABNORMAL_DAILY_RETURN,  # pyright: ignore[reportPrivateUsage]
     _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
     _daily_portfolio_value,  # pyright: ignore[reportPrivateUsage]
+    _load_transaction_overrides,  # pyright: ignore[reportPrivateUsage]
     _reverse_transaction_quantity,  # pyright: ignore[reportPrivateUsage]
+    effective_classification,
     partial_snapshot_dates,
 )
 
@@ -60,6 +63,23 @@ OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
 UNEXPLAINED_HOLDINGS_CHANGE = "unexplained_holdings_change"
 CASHFLOW_WITHOUT_VALUE = "cashflow_without_value"
 PARTIAL_SNAPSHOT_DAY = "partial_snapshot_day"
+DUPLICATE_CONTRIBUTION_CHAIN = "duplicate_contribution_chain"
+
+# How long a sweep from a plan's core account into its brokerage window may
+# take. Fidelity BrokerageLink lands 3-4 days after the payroll contribution;
+# a week absorbs a holiday without reaching far enough to pair genuinely
+# unrelated deposits.
+_CHAIN_WINDOW_DAYS = 7
+
+# One cent-exact coincidence is a coincidence. A recurring sweep is a pipeline,
+# and only a pipeline is worth a finding.
+_CHAIN_MIN_MATCHES = 3
+
+# Bounds on the subset search. A payroll sweep splits into pre-tax and
+# after-tax legs, occasionally a catch-up — never a dozen. Capping both keeps
+# the search trivial while covering every real sweep shape.
+_CHAIN_MAX_LEGS = 4
+_CHAIN_MAX_WINDOW = 12
 
 # Lookback for the "holdings moved with no trade behind them" check. Long
 # enough to catch a feed that quietly stopped weeks ago, short enough that a
@@ -107,6 +127,7 @@ def build_report(session: Session, now: datetime | None = None) -> DataQualityRe
     findings.extend(_find_unexplained_holdings_changes(session))
     findings.extend(_find_cashflow_without_value(session))
     findings.extend(_find_partial_snapshot_days(session))
+    findings.extend(_find_duplicate_contribution_chains(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -1045,3 +1066,187 @@ def _account_names(session: Session, account_ids: frozenset[int]) -> dict[int, s
             select(Account.account_id, Account.name).where(Account.account_id.in_(account_ids))
         ).all()
     }
+
+
+def _exact_subset(
+    candidates: list[tuple[int, date]],
+    amounts: dict[tuple[int, date], Decimal],
+    target: Decimal,
+) -> list[tuple[int, date]] | None:
+    """Smallest subset of `candidates` whose amounts sum exactly to `target`.
+
+    Exact equality, never a tolerance. A cent-exact sum across a multi-account
+    split is not a coincidence; a fuzzy one pairs unrelated deposits that happen
+    to land the same week, which is worse than missing the chain.
+
+    Bounded rather than a general subset-sum: at most `_CHAIN_MAX_LEGS` legs
+    over a window that only ever holds a handful of entries. A payroll sweep
+    splits into pre-tax and after-tax, sometimes a catch-up — not a dozen ways.
+    """
+    if len(candidates) > _CHAIN_MAX_WINDOW:
+        return None
+    for size in range(1, min(_CHAIN_MAX_LEGS, len(candidates)) + 1):
+        for combo in combinations(candidates, size):
+            if sum((amounts[k] for k in combo), Decimal(0)) == target:
+                return list(combo)
+    return None
+
+
+def _find_duplicate_contribution_chains(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Contributions that reappear as an inflow into another linked account.
+
+    A payroll deferral into an employer plan is often swept straight into a
+    self-directed brokerage window — Fidelity BrokerageLink, Schwab PCRA. Both
+    legs arrive as `cash/contribution`, so the same dollars are classified as
+    external money entering the portfolio TWICE, days apart. Counting both
+    inflates contributions, and since Modified Dietz subtracts contributions
+    from the numerator, it understates the return by the full duplicated amount.
+
+    On the live book the sweep is exact: every 401(k) contribution reappears as
+    a matching BrokerageLink inflow 3-4 days later, to the cent, split across
+    the pre-tax and after-tax windows — 16 of 16 same-week pairs, $49,177.75.
+
+    That case is currently harmless, and for a reason worth stating precisely:
+    the plan's core account reports no holdings, so `valued_account_ids` drops
+    it from the cashflow series and only the BrokerageLink leg survives. Which
+    is the correct leg — the money becomes visible in V when it lands there.
+    But nothing *enforces* that. If the provider ever exposed a core-account
+    balance, the core would rejoin the valued set and both legs would count,
+    silently, with no symptom except a return that drifts too low. This check is
+    what turns the accident into an invariant.
+
+    Matching is exact-to-the-cent over a short window, deliberately. Loose
+    tolerances would pair unrelated deposits that happen to land the same week;
+    a cent-exact sum across a multi-account split is not a coincidence.
+    """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
+    valued = valued_account_ids(session)
+    overrides = _load_transaction_overrides(session)
+    account_names = _account_names(session, accts)
+
+    # Per (account, date) totals of rows classified as money entering.
+    inflows: dict[tuple[int, date], Decimal] = defaultdict(Decimal)
+    for tx in (
+        session.execute(
+            select(InvestmentTransaction).where(InvestmentTransaction.account_id.in_(accts))
+        )
+        .scalars()
+        .all()
+    ):
+        classification = effective_classification(
+            tx.type,
+            tx.subtype,
+            overrides.get(tx.plaid_investment_transaction_id),
+            amount=Decimal(tx.amount),
+            name=tx.name,
+        )
+        if classification == "external_in":
+            inflows[(tx.account_id, tx.date)] += abs(Decimal(tx.amount))
+
+    # Greedy, earliest-first. A destination day is consumed by at most one
+    # source so a repeating biweekly sweep can't match the same landing twice.
+    consumed: set[tuple[int, date]] = set()
+    chains: dict[tuple[int, frozenset[int]], list[tuple[date, Decimal]]] = defaultdict(list)
+    for (src_account, src_date), amount in sorted(inflows.items(), key=lambda kv: kv[0][1]):
+        if (src_account, src_date) in consumed or amount <= 0:
+            continue
+        window = sorted(
+            (
+                (acct, day)
+                for (acct, day) in inflows
+                if acct != src_account
+                and (acct, day) not in consumed
+                and 0 <= (day - src_date).days <= _CHAIN_WINDOW_DAYS
+            ),
+            key=lambda k: k[1],
+        )
+        # A SUBSET must match, not the window total. Unrelated deposits land in
+        # the same week — on the live book a $50 SoFi transfer sits beside the
+        # BrokerageLink pair and overshoots the sweep by exactly that $50, which
+        # made a sum-everything test silently find nothing at all. Search
+        # smallest-first so the match is the tightest explanation available.
+        match = _exact_subset(window, inflows, amount)
+        if match is None:
+            continue
+        consumed.update(match)
+        consumed.add((src_account, src_date))
+        chains[(src_account, frozenset(acct for acct, _ in match))].append((src_date, amount))
+
+    findings: list[DataQualityFindingOut] = []
+    for (src_account, destinations), matches in sorted(
+        chains.items(), key=lambda kv: -sum(m[1] for m in kv[1])
+    ):
+        if len(matches) < _CHAIN_MIN_MATCHES:
+            # One coincidence is a coincidence. A recurring sweep is a pipeline.
+            continue
+        total = sum((m[1] for m in matches), Decimal(0))
+        src_name = account_names.get(src_account, f"account #{src_account}")
+        dest_names = ", ".join(sorted(account_names.get(a, f"#{a}") for a in destinations))
+        double_counted = src_account in valued and any(a in valued for a in destinations)
+        if double_counted:
+            findings.append(
+                DataQualityFindingOut(
+                    category=DUPLICATE_CONTRIBUTION_CHAIN,
+                    severity=ERROR,
+                    title=(
+                        f"{src_name} → {dest_names}: ${total:,.0f} of contributions counted twice"
+                    ),
+                    detail=(
+                        f"{len(matches)} contributions into {src_name} reappear as "
+                        f"matching inflows into {dest_names} within "
+                        f"{_CHAIN_WINDOW_DAYS} days, exact to the cent — the same money "
+                        f"swept from the plan's core account into its brokerage window. "
+                        f"Both legs are currently counted as external contributions, so "
+                        f"${total:,.0f} is being treated as money you added twice. "
+                        f"Because contributions are subtracted from investment gain, your "
+                        f"reported return is UNDERSTATED by roughly that amount."
+                    ),
+                    recommended_action=(
+                        f"Re-tag the {src_name} leg as Internal on the Transactions page "
+                        f"— it's a transfer between two accounts you already track, not "
+                        f"new money. Keep the {dest_names} leg as a Contribution: that is "
+                        f"where the money first appears in your holdings."
+                    ),
+                    context={
+                        "source_account_id": str(src_account),
+                        "destination_account_ids": ",".join(str(a) for a in sorted(destinations)),
+                        "matched_contributions": str(len(matches)),
+                        "duplicated_amount": f"{total:.2f}",
+                        "status": "double_counted",
+                    },
+                )
+            )
+            continue
+        findings.append(
+            DataQualityFindingOut(
+                category=DUPLICATE_CONTRIBUTION_CHAIN,
+                severity=INFO,
+                title=f"{src_name} → {dest_names}: pass-through, counted once",
+                detail=(
+                    f"{len(matches)} contributions into {src_name} (${total:,.0f}) reappear "
+                    f"as matching inflows into {dest_names} within {_CHAIN_WINDOW_DAYS} "
+                    f"days, exact to the cent — the same money, swept onward. Only the "
+                    f"{dest_names} leg is counted, because {src_name} reports no holdings "
+                    f"and is outside the return calculation. That is the correct leg: it's "
+                    f"where the money first appears in your portfolio value. No double "
+                    f"count."
+                ),
+                recommended_action=(
+                    f"Nothing to do. Note that this stays correct only while {src_name} "
+                    f"reports no holdings — if it ever starts to, both legs would count "
+                    f"and this finding turns into an error."
+                ),
+                context={
+                    "source_account_id": str(src_account),
+                    "destination_account_ids": ",".join(str(a) for a in sorted(destinations)),
+                    "matched_contributions": str(len(matches)),
+                    "pass_through_amount": f"{total:.2f}",
+                    "status": "neutralised",
+                },
+            )
+        )
+    return findings

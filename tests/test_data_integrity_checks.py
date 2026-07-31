@@ -324,3 +324,127 @@ class TestStartValueUnreliable:
         # Legacy two-argument callers keep the original ratio behaviour.
         assert _is_start_value_unreliable(Decimal(10), Decimal(100))
         assert not _is_start_value_unreliable(Decimal(90), Decimal(100))
+
+
+class TestDuplicateContributionChain:
+    """A payroll sweep records the same dollars twice: once into the plan's core
+    account, again days later into its brokerage window. Counting both inflates
+    contributions, and because Modified Dietz subtracts contributions from gain,
+    it understates the return by the full duplicated amount."""
+
+    def _chain(self, session: Session) -> list[object]:
+        return [
+            f
+            for f in build_report(session).findings
+            if f.category == "duplicate_contribution_chain"
+        ]
+
+    def _sweep(self, session: Session, core: int, legs: list[tuple[int, str]]) -> None:
+        """Three biweekly contributions into `core`, each swept to `legs` 3 days later."""
+        for week in range(3):
+            day = D0 + timedelta(days=week * 14)
+            total = sum(Decimal(share) for _acct, share in legs)
+            _tx(
+                session,
+                f"core{week}",
+                core,
+                day,
+                "cash",
+                amount=float(total),
+                subtype="contribution",
+                name="contribution",
+            )
+            for idx, (acct, share) in enumerate(legs):
+                _tx(
+                    session,
+                    f"leg{acct}-{idx}-{week}",
+                    acct,
+                    day + timedelta(days=3),
+                    "cash",
+                    amount=float(Decimal(share)),
+                    subtype="contribution",
+                    name="TRANSFERRED FROM TO BROKERAGE OPTION (Cash)",
+                )
+
+    def test_pass_through_with_unvalued_core_is_reported_as_safe(self, book: Session):
+        # The live shape: the core account reports no holdings, so only the
+        # brokerage leg reaches the return. Correct — but only by accident, so
+        # the finding says so rather than staying silent.
+        _account(book, 20, 1, "401(k) core")  # no snapshots -> not valued
+        _account(book, 21, 1, "BrokerageLink")
+        _security(book, 104, "FXAIX")
+        for offset in range(7):
+            _snap(book, D0 + timedelta(days=offset), 21, 104, 10)
+        self._sweep(book, 20, [(21, "2812.02")])
+        book.flush()
+
+        (finding,) = self._chain(book)
+        assert finding.severity == "info"
+        assert finding.context["status"] == "neutralised"
+        assert "No double count" in finding.detail
+
+    def test_double_count_is_an_error_when_both_legs_are_valued(self, book: Session):
+        # The latent failure this check exists for: if the core account ever
+        # reports holdings it rejoins the cashflow series, both legs count, and
+        # the only symptom is a return that quietly drifts low.
+        _account(book, 20, 1, "401(k) core")
+        _account(book, 21, 1, "BrokerageLink")
+        _security(book, 104, "FXAIX")
+        for offset in range(7):
+            _snap(book, D0 + timedelta(days=offset), 20, 104, 5)  # core now valued
+            _snap(book, D0 + timedelta(days=offset), 21, 104, 10)
+        self._sweep(book, 20, [(21, "2812.02")])
+        book.flush()
+
+        (finding,) = self._chain(book)
+        assert finding.severity == "error"
+        assert finding.context["status"] == "double_counted"
+        assert finding.context["duplicated_amount"] == "8436.06"
+
+    def test_unrelated_deposit_in_the_same_week_does_not_break_matching(self, book: Session):
+        # Live regression: a $50 SoFi transfer landed inside the sweep window
+        # and overshot the window total, so a sum-everything test silently
+        # found nothing at all. The match has to be a SUBSET.
+        _account(book, 20, 1, "401(k) core")
+        _account(book, 21, 1, "BrokerageLink")
+        _security(book, 104, "FXAIX")
+        for offset in range(7):
+            _snap(book, D0 + timedelta(days=offset), 21, 104, 10)
+        self._sweep(book, 20, [(21, "1831.08"), (21, "980.94")])
+        for week in range(3):
+            _tx(
+                book,
+                f"noise{week}",
+                10,
+                D0 + timedelta(days=week * 14 + 3),
+                "cash",
+                amount=50.0,
+                subtype="deposit",
+                name="unrelated deposit",
+            )
+        book.flush()
+
+        (finding,) = self._chain(book)
+        assert finding.context["matched_contributions"] == "3"
+
+    def test_a_single_coincidence_is_not_reported(self, book: Session):
+        # One cent-exact pair happens by chance. Only a recurring sweep is a
+        # pipeline, and only a pipeline is worth the user's attention.
+        _account(book, 20, 1, "401(k) core")
+        _account(book, 21, 1, "BrokerageLink")
+        _security(book, 104, "FXAIX")
+        for offset in range(7):
+            _snap(book, D0 + timedelta(days=offset), 21, 104, 10)
+        _tx(book, "c1", 20, D0, "cash", amount=1000.0, subtype="contribution")
+        _tx(
+            book,
+            "l1",
+            21,
+            D0 + timedelta(days=3),
+            "cash",
+            amount=1000.0,
+            subtype="contribution",
+        )
+        book.flush()
+
+        assert self._chain(book) == []

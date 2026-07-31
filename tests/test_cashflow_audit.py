@@ -47,9 +47,7 @@ def _seed(session: Session) -> None:
             type="investment",
         )
     )
-    session.add(
-        Security(security_id=100, plaid_security_id="s100", ticker="AAA", name="AAA")
-    )
+    session.add(Security(security_id=100, plaid_security_id="s100", ticker="AAA", name="AAA"))
     # One holdings row so the account counts as "valued" and its flows reach
     # the return — otherwise every group would be marked out of scope.
     session.add(
@@ -153,9 +151,7 @@ class TestDecisionSource:
     def test_override_is_attributed_to_the_user(self, book: Session):
         _tx(book, "t1", "cash", "dividend", "-100", "Cash dividend of $100 from AAA")
         book.add(
-            TransactionOverride(
-                plaid_investment_transaction_id="t1", classification="external_in"
-            )
+            TransactionOverride(plaid_investment_transaction_id="t1", classification="external_in")
         )
         book.flush()
 
@@ -190,9 +186,7 @@ class TestDecisionSource:
 
 
 class TestReturnScope:
-    def test_account_without_holdings_is_marked_and_excluded_from_the_total(
-        self, book: Session
-    ):
+    def test_account_without_holdings_is_marked_and_excluded_from_the_total(self, book: Session):
         # A 401(k) that reports contributions but no positions is excluded from
         # the return math. Its rows still appear — hiding them would make this
         # view silently disagree with the transactions table — but they must
