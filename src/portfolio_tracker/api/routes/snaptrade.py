@@ -25,7 +25,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker import snaptrade_client
@@ -44,6 +44,13 @@ from portfolio_tracker.snaptrade_client import (
     SnapTradeNotConfiguredError,
     SnapTradeUserCredentials,
 )
+
+# How far back to reach the FIRST time we pull an account's transactions.
+# 10 years is SnapTrade's documented ceiling; brokers return whatever subset
+# they hold (observed: Robinhood back to 2021, Fidelity BrokerageLink only to
+# account opening). Used once per account — see the call site for why the
+# steady-state 730-day window is the wrong default for a first pull.
+_FIRST_PULL_LOOKBACK_DAYS = 3650
 
 router = APIRouter(prefix="/api/snaptrade", tags=["snaptrade"])
 
@@ -177,8 +184,43 @@ def sync(
                 session.merge(snap)
                 holdings_written += 1
 
+            # An account we've never pulled transactions for gets the DEEP
+            # window, not the steady-state one.
+            #
+            # `lookback_days` defaults to 730 to match Plaid's retention so a
+            # daily sync doesn't redo work. That's right for an account whose
+            # history is already loaded, and wrong for one that just appeared:
+            # the deep pull existed only inside the one-shot migration script,
+            # so every account linked after that migration silently kept
+            # whatever the last 730 days happened to contain, forever. Nothing
+            # ever went back for the rest, because each subsequent sync asked
+            # for the same 730 days and found it already stored.
+            #
+            # The cost of getting this wrong is invisible and permanent: the
+            # walk-back can only reconstruct history as far as the transactions
+            # reach, and contributions before that point are absent from the
+            # cashflow series — where an unrecorded deposit is arithmetically
+            # indistinguishable from an investment gain. Running the deep pull
+            # on 2026-07-30 recovered 525 transactions across the SnapTrade
+            # accounts, taking Robinhood Individual from 8 rows to 451 (back to
+            # 2021-06-24) and raising 2024's recorded net contributions from
+            # $4,867 to $27,117.
+            #
+            # Idempotent ingest makes this self-limiting: the deep window is
+            # used once per account, on the sync that first sees it.
+            first_pull = (
+                session.execute(
+                    select(func.count())
+                    .select_from(InvestmentTransaction)
+                    .where(InvestmentTransaction.account_id == account.account_id)
+                ).scalar_one()
+                == 0
+            )
+            account_start = (
+                today - timedelta(days=_FIRST_PULL_LOOKBACK_DAYS) if first_pull else backfill_start
+            )
             activities = snaptrade_client.get_account_activities(
-                creds, snaptrade_account_id, backfill_start, today
+                creds, snaptrade_account_id, account_start, today
             )
             for sec in activities.securities:
                 upsert_security(session, sec)
