@@ -1424,7 +1424,20 @@ def _backfill_values_from_transactions(
             daily_quantities[cursor_date] = dict(rolling_positions)
             daily_cash_adj[cursor_date] = rolling_cash_adj
 
-        if tx.security_id is not None:
+        # Cash-equivalent quantities are NEVER reversed. The design (see
+        # `_backfill_values_from_transactions` docstring) is that cash-equiv
+        # positions hold the ANCHOR-DATE cash while `rolling_cash_adj` owns the
+        # historical cash trajectory. Some brokers (SoFi via Plaid) emit
+        # deposit/withdrawal rows carrying BOTH an amount and a signed quantity
+        # on the USD pseudo-security — reversing that quantity re-handles the
+        # same dollars the cash-adjustment leg already handles, and with
+        # Plaid's inverted sign (deposit qty is negative) the two legs CANCEL:
+        # historical V never stepped down across a deposit, inflating V_start
+        # by every such flow since the window start. Measured on the live book
+        # 2026-07-31: 63 rows, $37,474 net — the 2-year gain was understated by
+        # almost exactly the engines' unexplained residual, and the top-down /
+        # position-alpha gap collapsed once this guard landed.
+        if tx.security_id is not None and tx.security_id not in cash_equivalent_security_ids:
             delta = _reverse_transaction_quantity(tx)
             if delta is not None:
                 delta *= split_factors.factor_after(tx.security_id, tx.date)
