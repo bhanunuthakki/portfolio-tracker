@@ -981,30 +981,28 @@ def _classify_by_name(name: str | None) -> str | None:
     # the subtype mis-tags them as withdrawal.
     if "reinvestment" in n or "drip" in n:
         return "internal"
-    if "dividend" in n or "interest payment" in n or "credit interest" in n:
-        return "internal"
     # Broker promotional credits — transfer bonuses, rollover bonuses, deposit
-    # boosts, fee reimbursements. The broker gives the account money; the OWNER
-    # did not contribute it. Tagged `internal` so it lands in investment gain
-    # (like interest), never `external_in`.
+    # boosts, fee reimbursements. Money that arrived from OUTSIDE and is not
+    # investment performance, so `external_in`: Modified Dietz subtracts it
+    # from the numerator (no skill credit) while the synthetic benchmark books
+    # receive the identical cashflow, keeping both on the same capital base.
+    # That is what "measure my stock-picking, not my promotions" requires.
     #
-    # The direction of the error matters: a 2% ACATS bonus on a ~$150k transfer
-    # is ~$3,000, and counting it as a contribution SUBTRACTS it from measured
-    # gain — the account is credited with money while its performance is
-    # penalised for receiving it. This rule is deliberately written before the
-    # "deposit"/"incoming" direction markers below, because a bonus row often
-    # reads "Deposit Boost Payment" or "Incoming ACAT Fee Reimbursement" and
-    # would otherwise be caught by them.
+    # `internal` was tried first and is wrong for this purpose — it books the
+    # promotion as investment gain and flattered the owner's 2-year return
+    # against SPY by 1.5pp on $5,778.98 of SoFi transfer bonuses. Owner ruled
+    # 2026-07-31: bonuses are contributions.
     #
-    # None had landed on this book as of 2026-07-31 (only a $312 "ACAT In Bonus
-    # Interest Payment" and a $50 fee reimbursement in Nov-2023, both outside
-    # the measured window) — SoFi/Robinhood pay transfer bonuses after a
-    # holding period, so the 2026-05 ACATS and IRA-rollover bonuses are still
-    # in flight. The rule exists so they are classified correctly on arrival
-    # rather than discovered afterwards.
+    # Ordered BEFORE the dividend/interest rule deliberately: brokers compute
+    # these as interest and name them accordingly ("ACAT In Bonus Interest
+    # Payment"), which would otherwise be caught as portfolio income. Ordered
+    # before the deposit/incoming markers too, so the classification is
+    # attributed to the bonus rule rather than arrived at by accident.
     if "bonus" in n or "boost payment" in n or "reimbursement" in n:
-        return "internal"
+        return "external_in"
     if "promo" in n or "reward" in n or "incentive" in n:
+        return "external_in"
+    if "dividend" in n or "interest payment" in n or "credit interest" in n:
         return "internal"
     # Direction markers — used when type/subtype is ambiguous
     # (typically `transfer/transfer`). "deposit" and "withdrawal" are

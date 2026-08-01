@@ -528,8 +528,9 @@ class TestUnlabelledTransferBonus:
 
         assert self._findings(book) == []
 
-    def test_an_already_corrected_bonus_is_silent(self, book: Session):
-        # Once re-tagged Internal it is no longer external_in, so it drops out.
+    def test_a_bonus_with_an_explicit_ruling_is_silent(self, book: Session):
+        # Once the owner records a decision either way, the informational
+        # finding has served its purpose and goes quiet.
         self._seed_transfer_in(book, value_per_share=100.0, shares=100.0)
         _tx(
             book,

@@ -66,25 +66,26 @@ class TestEffectiveClassification:
 
 
 class TestBrokerBonuses:
-    """A promotional credit is money the BROKER gave the account, not money the
-    owner contributed. Tagging it `external_in` subtracts it from measured gain
-    — the account is credited with cash while its performance is penalised for
-    receiving it. A 2% bonus on a ~$150k ACATS is ~$3,000 of error, in the
-    direction that understates returns."""
+    """A promotional credit arrived from OUTSIDE and is not investment
+    performance. `external_in` subtracts it from the numerator while the
+    synthetic benchmark receives the same cashflow — both books on the same
+    capital base, so the comparison measures stock-picking rather than
+    promotions. Owner ruling 2026-07-31; `internal` was tried first and
+    flattered the 2-year return against SPY by 1.5pp."""
 
-    def test_acats_transfer_bonus_is_internal(self):
-        assert _classify_by_name("ACAT In Bonus Interest Payment") == "internal"
+    def test_acats_transfer_bonus_is_a_contribution_not_interest(self):
+        # Brokers compute these as interest and name them so; the bonus rule is
+        # ordered ahead of the interest rule for exactly this row.
+        assert _classify_by_name("ACAT In Bonus Interest Payment") == "external_in"
 
-    def test_rollover_bonus_is_internal(self):
-        assert _classify_by_name("IRA Rollover Bonus 1%") == "internal"
+    def test_rollover_bonus_is_a_contribution(self):
+        assert _classify_by_name("IRA Rollover Bonus 1%") == "external_in"
 
-    def test_deposit_boost_is_internal_despite_the_word_deposit(self):
-        # Would otherwise hit the "deposit" direction marker and be booked as
-        # a contribution — the bonus rules run first for exactly this reason.
-        assert _classify_by_name("Gold Deposit Boost Payment") == "internal"
+    def test_deposit_boost_is_attributed_to_the_bonus_rule(self):
+        assert _classify_by_name("Gold Deposit Boost Payment") == "external_in"
 
-    def test_fee_reimbursement_is_internal_despite_the_word_incoming(self):
-        assert _classify_by_name("Incoming Acat Fee Reimbursement") == "internal"
+    def test_fee_reimbursement_is_a_contribution(self):
+        assert _classify_by_name("Incoming Acat Fee Reimbursement") == "external_in"
 
     def test_a_real_deposit_is_still_external(self):
         # The bonus rules must not swallow genuine contributions.

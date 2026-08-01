@@ -1345,7 +1345,14 @@ def _find_unlabelled_transfer_bonuses(session: Session) -> list[DataQualityFindi
             amount=Decimal(tx.amount),
             name=tx.name,
         )
+        # Fires only while the row is a contribution AND has no explicit ruling.
+        # Under the owner's policy a bonus SHOULD be external_in, so the point
+        # is no longer "this is misclassified" but "you should know this line
+        # is a promotion, not your own deposit" — informational, and silent
+        # once an override records the decision either way.
         if classification != "external_in":
+            continue
+        if overrides.get(tx.plaid_investment_transaction_id) is not None:
             continue
         amount = abs(Decimal(tx.amount))
         if amount <= 0:
@@ -1358,25 +1365,29 @@ def _find_unlabelled_transfer_bonuses(session: Session) -> list[DataQualityFindi
                     findings.append(
                         DataQualityFindingOut(
                             category=UNLABELLED_TRANSFER_BONUS,
-                            severity=WARNING,
+                            severity=INFO,
                             title=(
                                 f"{account_names.get(tx.account_id, tx.account_id)}: "
-                                f"${amount:,.2f} looks like a {rate * 100:.0f}% transfer bonus, "
-                                f"counted as a contribution"
+                                f"${amount:,.2f} is a {rate * 100:.0f}% transfer bonus, not your "
+                                f"own deposit"
                             ),
                             detail=(
-                                f"On {tx.date} this account received ${amount:,.2f}, which is "
-                                f"exactly {rate * 100:.2f}% of the {ticker} transfer that arrived "
+                                f"On {tx.date} this account received ${amount:,.2f} — exactly "
+                                f"{rate * 100:.2f}% of the {ticker} transfer that arrived "
                                 f"{arr_date} (${value:,.2f}). The description is "
-                                f'"{tx.name}" — no "bonus" text — so it is currently classified '
-                                f"as money YOU contributed. If it is a broker promotion it is the "
-                                f"BROKER's money, and counting it as a contribution subtracts it "
-                                f"from your investment gain."
+                                f'"{tx.name}", with no "bonus" text, so nothing else distinguishes '
+                                f"it from money you deposited. Counted as a Contribution, which is "
+                                f"the right treatment for measuring stock-picking skill: it is "
+                                f"subtracted from investment gain and the benchmark receives the "
+                                f"same cashflow, so a promotion cannot flatter your return against "
+                                f"SPY. The trade-off is that total-wealth growth understates by "
+                                f"this amount — it is real money you now hold."
                             ),
                             recommended_action=(
-                                "If this is a promotional credit, re-tag it Internal on the "
-                                "Transactions page so it lands in investment income. If you really "
-                                "did deposit this amount, leave it as a Contribution."
+                                "No action needed if you measure performance as skill vs the "
+                                "index. Re-tag Internal only if you want promotions counted as "
+                                "investment income. Either choice recorded as an override "
+                                "silences this finding."
                             ),
                             context={
                                 "transaction_id": tx.plaid_investment_transaction_id,
