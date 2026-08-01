@@ -28,7 +28,12 @@ from portfolio_tracker.jobs._helpers import (
     upsert_account,
     upsert_security,
 )
-from portfolio_tracker.models import InvestmentTransaction, Item, ItemSource
+from portfolio_tracker.models import (
+    InvestmentTransaction,
+    Item,
+    ItemSource,
+    TransactionExclusion,
+)
 
 PLAID_INVESTMENT_TX_RETENTION_DAYS = 730  # 24 months
 
@@ -82,6 +87,11 @@ def _backfill_item(session: Session, item: Item, start_date: date, end_date: dat
         )
         existing = session.get(InvestmentTransaction, tx.plaid_investment_transaction_id)
         if existing is not None:
+            continue
+        # A row the user deliberately removed stays removed. Without this,
+        # deleting a bad transaction is undone by the next backfill: ingest is
+        # insert-if-absent on the provider id, so absence reads as "new".
+        if session.get(TransactionExclusion, tx.plaid_investment_transaction_id) is not None:
             continue
         session.add(
             InvestmentTransaction(

@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import combinations
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -22,18 +23,25 @@ from portfolio_tracker.models import (
     Benchmark,
     CostBasisOverride,
     HoldingSnapshot,
+    InvestmentTransaction,
     Item,
     PolicyWeight,
     Price,
     Security,
+    StockSplit,
     TickerOverride,
+    TransactionOverride,
 )
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
-from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
 from portfolio_tracker.services.performance import (
     _ABNORMAL_DAILY_RETURN,  # pyright: ignore[reportPrivateUsage]
     _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
     _daily_portfolio_value,  # pyright: ignore[reportPrivateUsage]
+    _load_transaction_overrides,  # pyright: ignore[reportPrivateUsage]
+    _reverse_transaction_quantity,  # pyright: ignore[reportPrivateUsage]
+    effective_classification,
+    partial_snapshot_dates,
 )
 
 # --- severity values --------------------------------------------------------
@@ -53,6 +61,49 @@ SPARSE_FORWARD_SNAPSHOTS = "sparse_forward_snapshots"
 OVERLAPPING_BROKER_CONNECTIONS = "overlapping_broker_connections"
 MISSING_POLICY_BENCHMARK = "missing_policy_benchmark"
 OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
+UNEXPLAINED_HOLDINGS_CHANGE = "unexplained_holdings_change"
+CASHFLOW_WITHOUT_VALUE = "cashflow_without_value"
+PARTIAL_SNAPSHOT_DAY = "partial_snapshot_day"
+DUPLICATE_CONTRIBUTION_CHAIN = "duplicate_contribution_chain"
+UNLABELLED_TRANSFER_BONUS = "unlabelled_transfer_bonus"
+ORPHANED_CORRECTION = "orphaned_correction"
+
+# Promotional transfer bonuses a broker pays as a clean percentage of an
+# incoming ACATS. SoFi labels them "transfer - DEPOSIT USD" with no "bonus"
+# text anywhere, so neither the subtype heuristic nor the name-based bonus rule
+# catches them — the ratio is the only signal. Rates seen in market: 1%, 2%, 3%.
+_BONUS_RATES: tuple[Decimal, ...] = (Decimal("0.01"), Decimal("0.02"), Decimal("0.03"))
+_BONUS_RATE_TOLERANCE: Decimal = Decimal("0.02")  # dollars
+_BONUS_WINDOW_DAYS = 21
+
+# How long a sweep from a plan's core account into its brokerage window may
+# take. Fidelity BrokerageLink lands 3-4 days after the payroll contribution;
+# a week absorbs a holiday without reaching far enough to pair genuinely
+# unrelated deposits.
+_CHAIN_WINDOW_DAYS = 7
+
+# One cent-exact coincidence is a coincidence. A recurring sweep is a pipeline,
+# and only a pipeline is worth a finding.
+_CHAIN_MIN_MATCHES = 3
+
+# Bounds on the subset search. A payroll sweep splits into pre-tax and
+# after-tax legs, occasionally a catch-up — never a dozen. Capping both keeps
+# the search trivial while covering every real sweep shape.
+_CHAIN_MAX_LEGS = 4
+_CHAIN_MAX_WINDOW = 12
+
+# Lookback for the "holdings moved with no trade behind them" check. Long
+# enough to catch a feed that quietly stopped weeks ago, short enough that a
+# single old gap doesn't shout forever after it's been backfilled.
+_UNEXPLAINED_CHANGE_LOOKBACK_DAYS = 60
+
+# A position's share count is "unexplained" when the observed change and the
+# change implied by its transactions differ by more than BOTH of these. The
+# fractional floor absorbs fractional-share dividend reinvestment and broker
+# rounding; the absolute floor stops sub-share noise on tiny positions from
+# generating findings.
+_UNEXPLAINED_QTY_TOLERANCE_FRACTION: Decimal = Decimal("0.01")
+_UNEXPLAINED_QTY_TOLERANCE_SHARES: Decimal = Decimal("0.5")
 
 # Tolerance for "broker disagrees with override" comparisons. Brokers
 # round and may differ by rounding noise from the user's stated total —
@@ -63,24 +114,40 @@ OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
 _OVERRIDE_DRIFT_TOLERANCE: Decimal = Decimal("0.02")
 
 
-def build_report(session: Session) -> DataQualityReportOut:
+def build_report(session: Session, now: datetime | None = None) -> DataQualityReportOut:
+    """Every finding, as of `now` (defaults to wall-clock).
+
+    `now` exists so the published v1 fixtures are reproducible. Staleness is
+    the one check measured against the clock rather than against the data, so
+    with a live `now()` the generated artifact drifted a little more each day
+    and `test_fixtures_have_no_drift` failed on an untouched checkout roughly a
+    week after any regeneration. Freezing the reference time makes the fixture
+    a function of the seeded rows alone.
+    """
+    reference = now or datetime.now(UTC)
     findings: list[DataQualityFindingOut] = []
     findings.extend(_find_missing_cost_basis(session))
     findings.extend(_find_untickered_securities(session))
     findings.extend(_find_securities_without_prices(session))
     findings.extend(_find_anomalous_backfill_days(session))
-    findings.extend(_find_stale_items(session))
+    findings.extend(_find_stale_items(session, reference))
     findings.extend(_find_sparse_forward_snapshots(session))
     findings.extend(_find_overlapping_broker_connections(session))
     findings.extend(_find_missing_policy_benchmarks(session))
     findings.extend(_find_overrides_disagreeing_with_broker(session))
+    findings.extend(_find_unexplained_holdings_changes(session))
+    findings.extend(_find_cashflow_without_value(session))
+    findings.extend(_find_partial_snapshot_days(session))
+    findings.extend(_find_duplicate_contribution_chains(session))
+    findings.extend(_find_unlabelled_transfer_bonuses(session))
+    findings.extend(_find_orphaned_corrections(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
         counts[f.severity] += 1
 
     return DataQualityReportOut(
-        generated_at=datetime.now(UTC),
+        generated_at=reference,
         findings=findings,
         summary_counts=dict(counts),
     )
@@ -349,14 +416,14 @@ def _find_anomalous_backfill_days(session: Session) -> list[DataQualityFindingOu
     return findings[:25]
 
 
-def _find_stale_items(session: Session) -> list[DataQualityFindingOut]:
-    """Items that haven't been refreshed in over a week.
+def _find_stale_items(session: Session, now: datetime) -> list[DataQualityFindingOut]:
+    """Items that haven't been refreshed in over a week, measured from `now`.
 
     Skips items the user has flagged as data-inactive — those are kept
     around for connection-slot reasons but explicitly aren't expected to
     influence the numbers, so a stale snapshot doesn't matter.
     """
-    threshold = datetime.now(UTC) - timedelta(days=7)
+    threshold = now - timedelta(days=7)
     rows = (
         session.execute(
             select(Item)
@@ -673,3 +740,726 @@ def _find_overrides_disagreeing_with_broker(
             )
         )
     return findings
+
+
+def _find_unexplained_holdings_changes(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Positions whose share count moved without transactions to explain it.
+
+    This is the check that catches a silently-dead transaction feed, and it is
+    the one the report was missing when that whole class of bug went unnoticed.
+
+    Holdings and transactions arrive through independent code paths. Holdings
+    come from a daily snapshot; transactions come from a separate pull that can
+    stop — a job with no transaction leg at all, an aggregator that quietly
+    drops investment activity, a connection needing re-auth for one scope but
+    not the other. Nothing about the resulting state LOOKS broken: holdings are
+    current, the value series is right, Modified Dietz keeps reporting sensible
+    numbers, and the last transaction just happens to be old. `stale_item`
+    doesn't fire, because the item IS refreshing.
+
+    What breaks is every position-level engine. `position_alpha`,
+    `exit_quality` and turnover all derive P&L from trades, so a position that
+    appears with no buy behind it has an implied cost of zero and its entire
+    market value is booked as profit. Observed on the live book at 2026-07-30:
+    the Plaid-sourced accounts had had no transaction pull in ~3 months, 216
+    shares of UBER and 38 of BKNG had materialised with no trade, and the
+    panel's "Actual P&L" card read $56,655 against a true value-based gain of
+    about $25k. The two headline numbers on the same panel disagreed by more
+    than the entire real gain, which is the only reason it got caught.
+
+    So: compare each position's observed share change against the change its
+    transactions imply, over the same interval. Divergence means the two feeds
+    have drifted apart. Direction matters for the diagnosis but not the
+    severity — shares appearing inflates P&L, shares vanishing invents losses.
+
+    Securities that split inside the window are skipped: a split moves share
+    counts with no transaction by design, so it makes the comparison
+    meaningless rather than merely noisy.
+    """
+    accts = valued_account_ids(session)
+    if not accts:
+        return []
+
+    latest = session.execute(
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
+    ).scalar_one_or_none()
+    if latest is None:
+        return []
+    window_start = latest - timedelta(days=_UNEXPLAINED_CHANGE_LOOKBACK_DAYS)
+
+    # Anchor on COMPLETE snapshots only. A partially-synced endpoint would show
+    # every account that didn't report as having gone from nothing to a full
+    # book, or vice versa.
+    candidates = set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date >= window_start)
+            .where(HoldingSnapshot.snapshot_date <= latest)
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    complete = sorted(candidates - set(partial_snapshot_dates(session, candidates)))
+    if len(complete) < 2:
+        return []
+    start_date, end_date = complete[0], complete[-1]
+
+    observed: dict[tuple[int, int], list[Decimal]] = defaultdict(lambda: [Decimal(0), Decimal(0)])
+    for idx, on_date in ((0, start_date), (1, end_date)):
+        for account_id, security_id, quantity in session.execute(
+            select(
+                HoldingSnapshot.account_id,
+                HoldingSnapshot.security_id,
+                HoldingSnapshot.quantity,
+            )
+            .where(HoldingSnapshot.snapshot_date == on_date)
+            .where(HoldingSnapshot.account_id.in_(accts))
+        ).all():
+            observed[(account_id, security_id)][idx] += Decimal(quantity)
+
+    implied: dict[tuple[int, int], Decimal] = defaultdict(Decimal)
+    txs = (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.date > start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.security_id.is_not(None))
+        )
+        .scalars()
+        .all()
+    )
+    for tx in txs:
+        if tx.security_id is None:
+            continue
+        # `_reverse_transaction_quantity` returns the delta that UNDOES the
+        # transaction, so the forward effect is its negation. Reusing it binds
+        # this check to the same per-source sign conventions the walk-back
+        # uses — if those change, both move together.
+        reverse = _reverse_transaction_quantity(tx)
+        if reverse is not None:
+            implied[(tx.account_id, tx.security_id)] += -reverse
+
+    split_sids = set(
+        session.execute(
+            select(StockSplit.security_id)
+            .where(StockSplit.split_date > start_date)
+            .where(StockSplit.split_date <= end_date)
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+
+    # Cash equivalents are exempt. Their "quantity" is a dollar balance that
+    # every transaction moves — a buy debits it, a dividend credits it, a fee
+    # nibbles it — so it legitimately drifts against a share-delta comparison
+    # that only counts position-changing events. Including them produced one
+    # guaranteed false positive per cash-holding account and nothing else.
+    cash_sids = set(
+        session.execute(select(Security.security_id).where(Security.is_cash_equivalent.is_(True)))
+        .scalars()
+        .all()
+    )
+
+    account_names = _account_names(session, accts)
+    security_labels = {
+        security_id: ticker or name or f"security #{security_id}"
+        for security_id, ticker, name in session.execute(
+            select(Security.security_id, Security.ticker, Security.name)
+        ).all()
+    }
+
+    findings: list[DataQualityFindingOut] = []
+    for (account_id, security_id), (qty_start, qty_end) in sorted(observed.items()):
+        if security_id in split_sids or security_id in cash_sids:
+            continue
+        actual = qty_end - qty_start
+        expected = implied.get((account_id, security_id), Decimal(0))
+        gap = actual - expected
+        scale = max(abs(qty_end), abs(qty_start))
+        if abs(gap) <= _UNEXPLAINED_QTY_TOLERANCE_SHARES:
+            continue
+        if abs(gap) <= scale * _UNEXPLAINED_QTY_TOLERANCE_FRACTION:
+            continue
+
+        label = security_labels.get(security_id, f"security #{security_id}")
+        account = account_names.get(account_id, f"account #{account_id}")
+        direction = "appeared without a purchase" if gap > 0 else "left without a sale"
+        findings.append(
+            DataQualityFindingOut(
+                category=UNEXPLAINED_HOLDINGS_CHANGE,
+                severity=WARNING,
+                title=f"{label} in {account}: {abs(gap):,.4f} shares {direction}",
+                detail=(
+                    f"Between {start_date} and {end_date}, {label} in {account} went from "
+                    f"{qty_start:,.4f} to {qty_end:,.4f} shares (a change of {actual:+,.4f}), "
+                    f"but the recorded transactions only account for {expected:+,.4f}. "
+                    f"{abs(gap):,.4f} shares are unexplained. Position-level P&L — the "
+                    f"'Actual P&L' and 'Alpha vs SPY' cards, exit quality, turnover — "
+                    f"treats shares with no purchase behind them as pure profit and shares "
+                    f"that vanish as a loss, so those numbers are wrong for this holding. "
+                    f"Modified Dietz reads value rather than trades and is unaffected; a "
+                    f"large disagreement between the two is this bug."
+                ),
+                recommended_action=(
+                    "Run `python -m portfolio_tracker.jobs.backfill` to re-pull Plaid "
+                    "investment transactions, or `python -m portfolio_tracker.jobs."
+                    "daily_refresh` for every source. If the gap survives a backfill the "
+                    "broker isn't reporting those trades and they need a manual row."
+                ),
+                context={
+                    "account_id": str(account_id),
+                    "security_id": str(security_id),
+                    "ticker": label,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "observed_change": f"{actual:.4f}",
+                    "transaction_implied_change": f"{expected:.4f}",
+                    "unexplained_shares": f"{gap:.4f}",
+                },
+            )
+        )
+    return findings
+
+
+def _find_cashflow_without_value(session: Session) -> list[DataQualityFindingOut]:
+    """Active accounts that emit external cashflow but never report holdings.
+
+    Return math only holds when the value series and the cashflow series cover
+    the same accounts. Modified Dietz is
+    ``(V_end - V_start - sum(C)) / (V_start + sum(C_i * w_i))`` — an account
+    contributing to C but never to V has its deposits subtracted as
+    money-you-put-in while the assets they bought never appear as
+    money-you-have, so every dollar saved there reads as a dollar lost.
+
+    `valued_account_ids` already excludes these accounts from the performance
+    series. This finding is what keeps that exclusion from being silent: the
+    user should know their 401(k) sits outside the reported return rather than
+    discovering it by reconciling by hand. The live case was the Fidelity-held
+    META 401(k), which syncs payroll deferrals through SnapTrade but exposes no
+    positions — $76,823 of contributions against zero snapshots, $11,651 of it
+    inside the default window, dragging the reported return down ~1.8pp.
+    """
+    orphans = sorted(active_account_ids(session) - valued_account_ids(session))
+    if not orphans:
+        return []
+
+    rows = session.execute(
+        select(
+            InvestmentTransaction.account_id,
+            func.count(),
+            func.min(InvestmentTransaction.date),
+            func.max(InvestmentTransaction.date),
+        )
+        .where(InvestmentTransaction.account_id.in_(orphans))
+        .group_by(InvestmentTransaction.account_id)
+    ).all()
+    activity = {account_id: (n, first, last) for account_id, n, first, last in rows}
+    account_names = _account_names(session, frozenset(orphans))
+
+    findings: list[DataQualityFindingOut] = []
+    for account_id in orphans:
+        if account_id not in activity:
+            # Linked but entirely inert — no holdings AND no transactions. It
+            # can't distort anything, so it isn't worth the user's attention.
+            continue
+        count, first, last = activity[account_id]
+        name = account_names.get(account_id, f"account #{account_id}")
+        findings.append(
+            DataQualityFindingOut(
+                category=CASHFLOW_WITHOUT_VALUE,
+                severity=WARNING,
+                title=f"{name}: transactions but no holdings — excluded from return math",
+                detail=(
+                    f"{name} has {count} transactions ({first} to {last}) but has never "
+                    f"reported a holdings snapshot, so its assets are absent from the "
+                    f"portfolio value series. Its contributions are therefore EXCLUDED "
+                    f"from the performance calculation — counting them while their assets "
+                    f"stay invisible would book real savings as investment loss. The "
+                    f"consequence is that this account's balance and its returns are "
+                    f"missing from every number on the Performance panel."
+                ),
+                recommended_action=(
+                    "If the provider can expose positions for this account, re-link it so "
+                    "holdings sync and it rejoins the return math. If it can't — many "
+                    "employer plans only expose contributions — this is working as "
+                    "intended; read the reported return as covering brokerage assets only."
+                ),
+                context={
+                    "account_id": str(account_id),
+                    "transaction_count": str(count),
+                    "first_transaction": first.isoformat(),
+                    "last_transaction": last.isoformat(),
+                },
+            )
+        )
+    return findings
+
+
+def _find_partial_snapshot_days(session: Session) -> list[DataQualityFindingOut]:
+    """Days where only some accounts reported, so V covered part of the book.
+
+    A snapshot run can fail per-item and still write rows for the items that
+    succeeded. The day's total is then the sum of an arbitrary slice of the
+    portfolio — not a portfolio value. The performance series now drops these
+    days (see `_forward_values_from_snapshots`); this finding is what makes the
+    drop visible and names the sync that failed.
+
+    Four such days existed on the live book, the worst reading $158,124 against
+    $649,124 two sessions later — a fabricated 76% single-day drawdown that
+    poisoned every volatility and drawdown statistic taken off the series.
+    """
+    accts = valued_account_ids(session)
+    if not accts:
+        return []
+    latest = session.execute(
+        select(func.max(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
+    ).scalar_one_or_none()
+    if latest is None:
+        return []
+
+    candidates = set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date >= latest - timedelta(days=365))
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    partial = partial_snapshot_dates(session, candidates)
+    if not partial:
+        return []
+    account_names = _account_names(session, accts)
+
+    findings: list[DataQualityFindingOut] = []
+    for on_date, missing in sorted(partial.items()):
+        names = ", ".join(
+            sorted(account_names.get(account_id, f"#{account_id}") for account_id in missing)
+        )
+        findings.append(
+            DataQualityFindingOut(
+                category=PARTIAL_SNAPSHOT_DAY,
+                severity=WARNING,
+                title=f"{on_date}: {len(missing)} account(s) missing from the snapshot",
+                detail=(
+                    f"On {on_date} these accounts did not report holdings: {names}. The "
+                    f"day's total would have been the sum of only part of the portfolio, "
+                    f"so it is EXCLUDED from the value series rather than plotted as a "
+                    f"crash and a recovery. Drawdown and volatility over any window "
+                    f"containing this date skip the day entirely."
+                ),
+                recommended_action=(
+                    "One aggregator leg of that day's refresh failed. If it keeps "
+                    "happening for the same institution, check that connection's auth on "
+                    "the Accounts page; a one-off is usually a provider timeout and needs "
+                    "no action."
+                ),
+                context={
+                    "date": on_date.isoformat(),
+                    "missing_account_ids": ",".join(str(a) for a in sorted(missing)),
+                    "missing_accounts": names,
+                },
+            )
+        )
+    return findings
+
+
+def _account_names(session: Session, account_ids: frozenset[int]) -> dict[int, str]:
+    """`account_id -> display name` for the given accounts."""
+    return {
+        account_id: name
+        for account_id, name in session.execute(
+            select(Account.account_id, Account.name).where(Account.account_id.in_(account_ids))
+        ).all()
+    }
+
+
+def _exact_subset(
+    candidates: list[tuple[int, date]],
+    amounts: dict[tuple[int, date], Decimal],
+    target: Decimal,
+) -> list[tuple[int, date]] | None:
+    """Smallest subset of `candidates` whose amounts sum exactly to `target`.
+
+    Exact equality, never a tolerance. A cent-exact sum across a multi-account
+    split is not a coincidence; a fuzzy one pairs unrelated deposits that happen
+    to land the same week, which is worse than missing the chain.
+
+    Bounded rather than a general subset-sum: at most `_CHAIN_MAX_LEGS` legs
+    over a window that only ever holds a handful of entries. A payroll sweep
+    splits into pre-tax and after-tax, sometimes a catch-up — not a dozen ways.
+    """
+    if len(candidates) > _CHAIN_MAX_WINDOW:
+        return None
+    for size in range(1, min(_CHAIN_MAX_LEGS, len(candidates)) + 1):
+        for combo in combinations(candidates, size):
+            if sum((amounts[k] for k in combo), Decimal(0)) == target:
+                return list(combo)
+    return None
+
+
+def _find_duplicate_contribution_chains(
+    session: Session,
+) -> list[DataQualityFindingOut]:
+    """Contributions that reappear as an inflow into another linked account.
+
+    A payroll deferral into an employer plan is often swept straight into a
+    self-directed brokerage window — Fidelity BrokerageLink, Schwab PCRA. Both
+    legs arrive as `cash/contribution`, so the same dollars are classified as
+    external money entering the portfolio TWICE, days apart. Counting both
+    inflates contributions, and since Modified Dietz subtracts contributions
+    from the numerator, it understates the return by the full duplicated amount.
+
+    On the live book the sweep is exact: every 401(k) contribution reappears as
+    a matching BrokerageLink inflow 3-4 days later, to the cent, split across
+    the pre-tax and after-tax windows — 16 of 16 same-week pairs, $49,177.75.
+
+    That case is currently harmless, and for a reason worth stating precisely:
+    the plan's core account reports no holdings, so `valued_account_ids` drops
+    it from the cashflow series and only the BrokerageLink leg survives. Which
+    is the correct leg — the money becomes visible in V when it lands there.
+    But nothing *enforces* that. If the provider ever exposed a core-account
+    balance, the core would rejoin the valued set and both legs would count,
+    silently, with no symptom except a return that drifts too low. This check is
+    what turns the accident into an invariant.
+
+    Matching is exact-to-the-cent over a short window, deliberately. Loose
+    tolerances would pair unrelated deposits that happen to land the same week;
+    a cent-exact sum across a multi-account split is not a coincidence.
+    """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
+    valued = valued_account_ids(session)
+    overrides = _load_transaction_overrides(session)
+    account_names = _account_names(session, accts)
+
+    # Per (account, date) totals of rows classified as money entering.
+    inflows: dict[tuple[int, date], Decimal] = defaultdict(Decimal)
+    for tx in (
+        session.execute(
+            select(InvestmentTransaction).where(InvestmentTransaction.account_id.in_(accts))
+        )
+        .scalars()
+        .all()
+    ):
+        classification = effective_classification(
+            tx.type,
+            tx.subtype,
+            overrides.get(tx.plaid_investment_transaction_id),
+            amount=Decimal(tx.amount),
+            name=tx.name,
+        )
+        if classification == "external_in":
+            inflows[(tx.account_id, tx.date)] += abs(Decimal(tx.amount))
+
+    # Greedy, earliest-first. A destination day is consumed by at most one
+    # source so a repeating biweekly sweep can't match the same landing twice.
+    consumed: set[tuple[int, date]] = set()
+    chains: dict[tuple[int, frozenset[int]], list[tuple[date, Decimal]]] = defaultdict(list)
+    for (src_account, src_date), amount in sorted(inflows.items(), key=lambda kv: kv[0][1]):
+        if (src_account, src_date) in consumed or amount <= 0:
+            continue
+        window = sorted(
+            (
+                (acct, day)
+                for (acct, day) in inflows
+                if acct != src_account
+                and (acct, day) not in consumed
+                and 0 <= (day - src_date).days <= _CHAIN_WINDOW_DAYS
+            ),
+            key=lambda k: k[1],
+        )
+        # A SUBSET must match, not the window total. Unrelated deposits land in
+        # the same week — on the live book a $50 SoFi transfer sits beside the
+        # BrokerageLink pair and overshoots the sweep by exactly that $50, which
+        # made a sum-everything test silently find nothing at all. Search
+        # smallest-first so the match is the tightest explanation available.
+        match = _exact_subset(window, inflows, amount)
+        if match is None:
+            continue
+        consumed.update(match)
+        consumed.add((src_account, src_date))
+        chains[(src_account, frozenset(acct for acct, _ in match))].append((src_date, amount))
+
+    findings: list[DataQualityFindingOut] = []
+    for (src_account, destinations), matches in sorted(
+        chains.items(), key=lambda kv: -sum(m[1] for m in kv[1])
+    ):
+        if len(matches) < _CHAIN_MIN_MATCHES:
+            # One coincidence is a coincidence. A recurring sweep is a pipeline.
+            continue
+        total = sum((m[1] for m in matches), Decimal(0))
+        src_name = account_names.get(src_account, f"account #{src_account}")
+        dest_names = ", ".join(sorted(account_names.get(a, f"#{a}") for a in destinations))
+        double_counted = src_account in valued and any(a in valued for a in destinations)
+        if double_counted:
+            findings.append(
+                DataQualityFindingOut(
+                    category=DUPLICATE_CONTRIBUTION_CHAIN,
+                    severity=ERROR,
+                    title=(
+                        f"{src_name} → {dest_names}: ${total:,.0f} of contributions counted twice"
+                    ),
+                    detail=(
+                        f"{len(matches)} contributions into {src_name} reappear as "
+                        f"matching inflows into {dest_names} within "
+                        f"{_CHAIN_WINDOW_DAYS} days, exact to the cent — the same money "
+                        f"swept from the plan's core account into its brokerage window. "
+                        f"Both legs are currently counted as external contributions, so "
+                        f"${total:,.0f} is being treated as money you added twice. "
+                        f"Because contributions are subtracted from investment gain, your "
+                        f"reported return is UNDERSTATED by roughly that amount."
+                    ),
+                    recommended_action=(
+                        f"Re-tag the {src_name} leg as Internal on the Transactions page "
+                        f"— it's a transfer between two accounts you already track, not "
+                        f"new money. Keep the {dest_names} leg as a Contribution: that is "
+                        f"where the money first appears in your holdings."
+                    ),
+                    context={
+                        "source_account_id": str(src_account),
+                        "destination_account_ids": ",".join(str(a) for a in sorted(destinations)),
+                        "matched_contributions": str(len(matches)),
+                        "duplicated_amount": f"{total:.2f}",
+                        "status": "double_counted",
+                    },
+                )
+            )
+            continue
+        findings.append(
+            DataQualityFindingOut(
+                category=DUPLICATE_CONTRIBUTION_CHAIN,
+                severity=INFO,
+                title=f"{src_name} → {dest_names}: pass-through, counted once",
+                detail=(
+                    f"{len(matches)} contributions into {src_name} (${total:,.0f}) reappear "
+                    f"as matching inflows into {dest_names} within {_CHAIN_WINDOW_DAYS} "
+                    f"days, exact to the cent — the same money, swept onward. Only the "
+                    f"{dest_names} leg is counted, because {src_name} reports no holdings "
+                    f"and is outside the return calculation. That is the correct leg: it's "
+                    f"where the money first appears in your portfolio value. No double "
+                    f"count."
+                ),
+                recommended_action=(
+                    f"Nothing to do. Note that this stays correct only while {src_name} "
+                    f"reports no holdings — if it ever starts to, both legs would count "
+                    f"and this finding turns into an error."
+                ),
+                context={
+                    "source_account_id": str(src_account),
+                    "destination_account_ids": ",".join(str(a) for a in sorted(destinations)),
+                    "matched_contributions": str(len(matches)),
+                    "pass_through_amount": f"{total:.2f}",
+                    "status": "neutralised",
+                },
+            )
+        )
+    return findings
+
+
+def _find_unlabelled_transfer_bonuses(session: Session) -> list[DataQualityFindingOut]:
+    """Inflows that are a clean percentage of a recent incoming share transfer.
+
+    A broker promotion is the BROKER's money. Booked as a contribution it is
+    SUBTRACTED from investment gain, so the portfolio is penalised for
+    receiving it — a one-directional error, always understating performance.
+
+    `_classify_by_name` already catches anything that says "bonus", "boost" or
+    "reimbursement". This check exists because the ones that matter say no such
+    thing: SoFi paid eight of them on 2026-05-12/14 labelled only
+    "transfer - DEPOSIT USD", totalling $5,778.98 across the owner's and his
+    wife's accounts. Every one was EXACTLY 2.00% of a position ACATS-ed in days
+    earlier — MELI $37,547.96 -> $750.96, VTI $134,957.88 -> $2,699.16. Eight
+    exact hits is not coincidence, and the ratio was the only available signal.
+
+    Matched against share-transfer arrivals rather than any inflow, because
+    that is what transfer promotions are priced off. A recurring $50 deposit
+    landing the same week is not a clean percentage of anything and is left
+    alone.
+    """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
+    overrides = _load_transaction_overrides(session)
+    account_names = _account_names(session, accts)
+    securities = {
+        security_id: ticker or name or f"#{security_id}"
+        for security_id, ticker, name in session.execute(
+            select(Security.security_id, Security.ticker, Security.name)
+        ).all()
+    }
+
+    # Dollar value of each incoming share transfer, valued at the transfer date.
+    arrivals: list[tuple[date, int, str, Decimal]] = []
+    for tx in (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.subtype == "external_asset_transfer_in")
+        )
+        .scalars()
+        .all()
+    ):
+        if tx.security_id is None or Decimal(tx.quantity or 0) <= 0:
+            continue
+        close = session.execute(
+            select(Price.close)
+            .where(Price.security_id == tx.security_id)
+            .where(Price.date <= tx.date)
+            .order_by(Price.date.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if close is None:
+            continue
+        arrivals.append(
+            (
+                tx.date,
+                tx.account_id,
+                securities.get(tx.security_id, "?"),
+                Decimal(tx.quantity) * Decimal(close),
+            )
+        )
+    if not arrivals:
+        return []
+
+    findings: list[DataQualityFindingOut] = []
+    for tx in (
+        session.execute(
+            select(InvestmentTransaction).where(InvestmentTransaction.account_id.in_(accts))
+        )
+        .scalars()
+        .all()
+    ):
+        classification = effective_classification(
+            tx.type,
+            tx.subtype,
+            overrides.get(tx.plaid_investment_transaction_id),
+            amount=Decimal(tx.amount),
+            name=tx.name,
+        )
+        # Fires only while the row is a contribution AND has no explicit ruling.
+        # Under the owner's policy a bonus SHOULD be external_in, so the point
+        # is no longer "this is misclassified" but "you should know this line
+        # is a promotion, not your own deposit" — informational, and silent
+        # once an override records the decision either way.
+        if classification != "external_in":
+            continue
+        if overrides.get(tx.plaid_investment_transaction_id) is not None:
+            continue
+        amount = abs(Decimal(tx.amount))
+        if amount <= 0:
+            continue
+        for arr_date, _arr_account, ticker, value in arrivals:
+            if not 0 <= (tx.date - arr_date).days <= _BONUS_WINDOW_DAYS:
+                continue
+            for rate in _BONUS_RATES:
+                if abs(amount - value * rate) <= _BONUS_RATE_TOLERANCE:
+                    findings.append(
+                        DataQualityFindingOut(
+                            category=UNLABELLED_TRANSFER_BONUS,
+                            severity=INFO,
+                            title=(
+                                f"{account_names.get(tx.account_id, tx.account_id)}: "
+                                f"${amount:,.2f} is a {rate * 100:.0f}% transfer bonus, not your "
+                                f"own deposit"
+                            ),
+                            detail=(
+                                f"On {tx.date} this account received ${amount:,.2f} — exactly "
+                                f"{rate * 100:.2f}% of the {ticker} transfer that arrived "
+                                f"{arr_date} (${value:,.2f}). The description is "
+                                f'"{tx.name}", with no "bonus" text, so nothing else distinguishes '
+                                f"it from money you deposited. Counted as a Contribution, which is "
+                                f"the right treatment for measuring stock-picking skill: it is "
+                                f"subtracted from investment gain and the benchmark receives the "
+                                f"same cashflow, so a promotion cannot flatter your return against "
+                                f"SPY. The trade-off is that total-wealth growth understates by "
+                                f"this amount — it is real money you now hold."
+                            ),
+                            recommended_action=(
+                                "No action needed if you measure performance as skill vs the "
+                                "index. Re-tag Internal only if you want promotions counted as "
+                                "investment income. Either choice recorded as an override "
+                                "silences this finding."
+                            ),
+                            context={
+                                "transaction_id": tx.plaid_investment_transaction_id,
+                                "amount": f"{amount:.2f}",
+                                "implied_rate": f"{rate:.4f}",
+                                "matched_transfer_ticker": ticker,
+                                "matched_transfer_value": f"{value:.2f}",
+                                "matched_transfer_date": arr_date.isoformat(),
+                            },
+                        )
+                    )
+                    break
+            else:
+                continue
+            break
+    return findings
+
+
+def _find_orphaned_corrections(session: Session) -> list[DataQualityFindingOut]:
+    """Manual corrections whose underlying transaction no longer exists.
+
+    Every ruling the user makes — a reclassified bonus, a 401(k) leg marked
+    internal — is stored against a provider transaction id. That id is not
+    stable across a re-link: reconnect an institution through a different
+    aggregator and the same real-world trade arrives with a new id, silently
+    orphaning the correction while an unclassified duplicate takes its place.
+    The numbers move and nothing announces it.
+
+    So the invariant is: a correction must point at a live row. When one
+    doesn't, either the transaction was legitimately removed (and the ruling
+    should be retired) or it was re-ingested under a new id (and the ruling
+    needs re-applying). Both need a human; both are invisible otherwise.
+
+    `transaction_overrides` cascades on delete, so an orphan here means the row
+    vanished WITHOUT a delete — the re-link case, which is the dangerous one.
+    """
+    override_ids = set(
+        session.execute(select(TransactionOverride.plaid_investment_transaction_id)).scalars().all()
+    )
+    if not override_ids:
+        return []
+    live = set(
+        session.execute(
+            select(InvestmentTransaction.plaid_investment_transaction_id).where(
+                InvestmentTransaction.plaid_investment_transaction_id.in_(override_ids)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    orphans = sorted(override_ids - live)
+    if not orphans:
+        return []
+    return [
+        DataQualityFindingOut(
+            category=ORPHANED_CORRECTION,
+            severity=ERROR,
+            title=f"{len(orphans)} manual correction(s) point at transactions that no longer exist",
+            detail=(
+                f"{len(orphans)} rows in `transaction_overrides` reference transaction ids "
+                f"that are not in the ledger. A correction only applies while its row is "
+                f"live, so these rulings are currently doing nothing. The usual cause is a "
+                f"re-linked institution: the same real trade returns under a new provider "
+                f"id, orphaning the ruling while an unclassified duplicate takes its place — "
+                f"which moves the reported numbers with no other symptom."
+            ),
+            recommended_action=(
+                "Read each override's `notes` (they carry the original reasoning), find the "
+                "replacement transaction on the Transactions page, and re-apply the ruling to "
+                "it. If the transaction was deliberately deleted, record it in "
+                "`transaction_exclusions` and remove the override."
+            ),
+            context={"orphaned_ids": ",".join(orphans[:20]), "orphan_count": str(len(orphans))},
+        )
+    ]

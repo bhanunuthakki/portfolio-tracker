@@ -50,6 +50,38 @@ def run() -> int:
         print("[daily_refresh]   plaid snapshot: FAILED")
         traceback.print_exc()
 
+    # 1b. Plaid investment transactions. `snapshot.run()` above pulls only
+    #     /investments/holdings/get — it has NO transaction leg. Until this
+    #     step existed, the ONLY thing that ever wrote Plaid investment
+    #     transactions was the manual `jobs.backfill` one-shot, so every
+    #     Plaid-sourced account's transaction feed silently froze at whatever
+    #     date backfill was last run by hand while its holdings kept updating
+    #     daily. That combination is the worst case for the analytics: the
+    #     position-level engines (position_alpha, exit_quality, turnover) see
+    #     shares appear and vanish with no trade behind them and book the
+    #     whole market value as P&L, while Modified Dietz — which reads value,
+    #     not trades — stays right. The two headline numbers on the same panel
+    #     then disagree by more than the real gain. Observed 2026-07-30: the
+    #     SoFi + Robinhood Plaid items were 3 months stale, inflating "Actual
+    #     P&L" by ~$20k on an ~$25k real gain.
+    #
+    #     A 45-day rolling window (vs. backfill's 730) is enough to catch
+    #     anything a daily run could have missed — including a week of failed
+    #     runs or a broker posting trades late — without re-pulling two years
+    #     of static history every morning. Ingest is idempotent on
+    #     `plaid_investment_transaction_id`, so overlap is free.
+    try:
+        from datetime import timedelta as _td
+
+        from portfolio_tracker.jobs import backfill
+
+        written = backfill.run(start_date=today - _td(days=45), end_date=today)
+        print(f"[daily_refresh]   plaid transactions: {written} new transactions stored")
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   plaid transactions: FAILED")
+        traceback.print_exc()
+
     # 2. SnapTrade sync — once per configured profile. Imported lazily so
     #    a missing snaptrade SDK doesn't take down the Plaid leg.
     try:

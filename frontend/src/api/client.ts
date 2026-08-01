@@ -11,6 +11,7 @@ import type {
   SecurityClassificationOut,
   TransactionOverrideIn,
   TransactionOverrideOut,
+  CashflowRuleAuditOut,
 } from "@/types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -139,6 +140,9 @@ export const api = {
       `/api/overrides/transactions/${encodeURIComponent(plaidInvestmentTransactionId)}`,
       { method: "DELETE" },
     ),
+
+  cashflowRuleAudit: (): Promise<CashflowRuleAuditOut> =>
+    request("/api/portfolio/cashflow-audit-rules"),
 
   transactions: (params?: {
     startDate?: string;

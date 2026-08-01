@@ -32,7 +32,7 @@ import argparse
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -51,8 +51,24 @@ def run(
     start_date: date | None = None,
     end_date: date | None = None,
     bootstrap: bool = False,
+    rebuild: bool = False,
 ) -> int:
     """Compute and upsert daily portfolio values for the given window.
+
+    `rebuild=True` DELETES cached rows in the window that no snapshot backs,
+    then recomputes them. Required after correcting historical transactions,
+    because this cache cannot otherwise self-heal: `_daily_portfolio_value`
+    reads `portfolio_values_daily` in preference to re-walking transactions, so
+    a rerun re-reads the stale value and writes it straight back. The cached
+    number outlives the data it was derived from, indefinitely and invisibly.
+
+    Found the hard way on 2026-07-31: deleting $288,949 of phantom
+    ACATS-recorded-as-fee rows moved the 2-year return not at all, because
+    every pre-snapshot date was served from cache. After a rebuild the same
+    window went from +26.08% to +39.55%.
+
+    Snapshot-backed dates are never cleared — those are observed broker values,
+    not derived, and nothing about a transaction correction changes them.
 
     Returns the number of rows written.
 
@@ -71,11 +87,22 @@ def run(
         if start_date > end_date:
             return 0
 
+        snapshot_dates = _dates_with_snapshots(session, start_date, end_date)
+        if rebuild:
+            # Clear before reading, or `_daily_portfolio_value` hands back the
+            # very rows we're trying to replace.
+            session.execute(
+                delete(PortfolioValueDaily)
+                .where(PortfolioValueDaily.date >= start_date)
+                .where(PortfolioValueDaily.date <= end_date)
+                .where(PortfolioValueDaily.date.not_in(snapshot_dates or [date.min]))
+            )
+            session.flush()
+
         # `_daily_portfolio_value` already prefers snapshots and falls back
         # to the (now cash-adjusted) transaction walk-back. Tag each row's
         # `source` based on whether a snapshot exists for that date.
         values = _daily_portfolio_value(session, start_date, end_date)
-        snapshot_dates = _dates_with_snapshots(session, start_date, end_date)
 
         rows_written = _upsert(session, values, snapshot_dates)
         session.commit()
@@ -157,6 +184,15 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Crystallize the full reconstructable history (~24 months).",
     )
     parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help=(
+            "Discard cached values in the window that no snapshot backs, then "
+            "recompute. Required after correcting historical transactions — the "
+            "cache is read in preference to the walk-back, so it cannot self-heal."
+        ),
+    )
+    parser.add_argument(
         "--start",
         type=_parse_date,
         help="ISO date for the start of the window (overrides --bootstrap).",
@@ -175,6 +211,7 @@ if __name__ == "__main__":
         start_date=args.start,
         end_date=args.end,
         bootstrap=args.bootstrap,
+        rebuild=args.rebuild,
     )
     span = (args.start, args.end or date.today())
     # Plain ASCII so the message survives the Windows cp1252 console.

@@ -438,6 +438,37 @@ class TransactionOverride(Base):
     )
 
 
+class TransactionExclusion(Base):
+    """A transaction the user deliberately removed, recorded so it STAYS removed.
+
+    Deleting a row from `investment_transactions` is not durable on its own.
+    Ingest is insert-if-absent keyed on the provider's transaction id, so the
+    very next backfill sees the id missing and re-inserts it — a correction
+    silently undone by routine maintenance. This table is the memory of that
+    decision: ingest consults it and skips.
+
+    Deliberately NOT a foreign key to `investment_transactions`. The whole
+    point is to survive the row's absence, and to be consultable before the row
+    would be created. (`transaction_overrides` takes the opposite approach — it
+    cascades on delete — which is right for a reclassification of a row that
+    exists, and wrong for a record of one that shouldn't.)
+
+    Prefer a RULE in the classification layer where the defect is a recurring
+    class rather than a one-off: a rule survives re-ingest, re-linking, and
+    provider id changes, none of which an id-keyed exclusion does. Use this for
+    genuine one-offs, and always with a `reason` — an unexplained exclusion is
+    indistinguishable from data loss during a later audit.
+    """
+
+    __tablename__ = "transaction_exclusions"
+
+    plaid_investment_transaction_id: Mapped[str] = mapped_column(String, primary_key=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    excluded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class TickerOverride(Base):
     """User-supplied ticker symbol for a security Plaid returned without one.
 

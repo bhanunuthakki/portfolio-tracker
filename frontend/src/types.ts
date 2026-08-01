@@ -188,3 +188,28 @@ export interface SecurityClassificationOut {
   notes: string | null;
   updated_at: string;
 }
+
+export interface CashflowRuleGroupOut {
+  decision_source: "override" | "name" | "sign" | "subtype";
+  classification: TxClassification;
+  reason: string;
+  type: string;
+  subtype: string | null;
+  distinct_patterns: number;
+  count: number;
+  net_cashflow: string;
+  gross_amount: string;
+  first_date: string | null;
+  last_date: string | null;
+  accounts: string[];
+  sample_names: string[];
+  transaction_ids: string[];
+  counts_toward_return: boolean;
+}
+
+export interface CashflowRuleAuditOut {
+  start_date: string | null;
+  end_date: string | null;
+  groups: CashflowRuleGroupOut[];
+  net_external_cashflow_in: string;
+}

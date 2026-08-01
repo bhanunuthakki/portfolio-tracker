@@ -208,6 +208,41 @@ class CashflowAuditOut(BaseModel):
     notes: list[str]
 
 
+class CashflowRuleGroupOut(BaseModel):
+    """One classification rule and every transaction it produced.
+
+    `net_cashflow` is the group's signed effect on the return — the number to
+    rank by. `count` is not: a rule can fire twenty times for pocket change
+    while a single mis-tagged transfer moves the reported return by points.
+
+    `transaction_ids` carries the whole group so the UI can hand it straight to
+    the existing bulk-override endpoint; fixing a rule is one action, not N.
+    """
+
+    decision_source: str  # override | name | sign | subtype
+    classification: str  # external_in | external_out | internal
+    reason: str
+    type: str
+    subtype: str | None
+    distinct_patterns: int
+    count: int
+    net_cashflow: Decimal
+    gross_amount: Decimal
+    first_date: date | None
+    last_date: date | None
+    accounts: list[str]
+    sample_names: list[str]  # digit-masked description patterns
+    transaction_ids: list[str]
+    counts_toward_return: bool
+
+
+class CashflowRuleAuditOut(BaseModel):
+    start_date: date | None
+    end_date: date | None
+    groups: list[CashflowRuleGroupOut]
+    net_external_cashflow_in: Decimal
+
+
 class DataQualityFindingOut(BaseModel):
     """A single data-quality issue surfaced for the user.
 

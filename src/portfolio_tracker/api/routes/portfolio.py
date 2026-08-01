@@ -22,6 +22,7 @@ from portfolio_tracker.models import (
 from portfolio_tracker.schemas import (
     CashflowAuditOut,
     CashflowGroupOut,
+    CashflowRuleAuditOut,
     ConsolidatedHoldingOut,
     DataQualityReportOut,
     HoldingByAccountOut,
@@ -33,6 +34,7 @@ from portfolio_tracker.schemas import (
 from portfolio_tracker.services import after_tax as after_tax_service
 from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services import brinson as brinson_service
+from portfolio_tracker.services import cashflow_audit as cashflow_audit_service
 from portfolio_tracker.services import data_quality, performance
 from portfolio_tracker.services import drawdown as drawdown_service
 from portfolio_tracker.services import exit_quality as exit_quality_service
@@ -592,6 +594,25 @@ def cashflow_audit(
         net_external_cashflow_in=net_in,
         notes=notes,
     )
+
+
+@router.get("/cashflow-audit-rules", response_model=CashflowRuleAuditOut)
+def cashflow_audit_rules(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> CashflowRuleAuditOut:
+    """Cashflow classifications collapsed to the rules that produced them.
+
+    The reviewable form of `/transactions`. That endpoint answers "how was this
+    row tagged"; this one answers "which rules am I trusting, what did each one
+    decide, and how much is it worth" — turning a few hundred row-by-row
+    judgements into roughly a dozen, ranked by dollar effect on the return.
+
+    Defaults to the full history: a window would silently drop older rules from
+    an audit whose purpose is completeness.
+    """
+    return cashflow_audit_service.build_rule_audit(session, start_date, end_date)
 
 
 @router.get("/beta", response_model=BetaResult)

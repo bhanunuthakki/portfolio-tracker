@@ -325,9 +325,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         dq_meta_src = build_accounts_result(
             session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
         ).meta
-        report = data_quality_service.build_report(session).model_copy(
-            update={"generated_at": FIXTURE_GENERATED_AT}
-        )
+        report = data_quality_service.build_report(session, now=FIXTURE_GENERATED_AT)
         data_quality = DataQualityV1Result(
             meta=build_meta(
                 as_of=dq_meta_src.as_of,
