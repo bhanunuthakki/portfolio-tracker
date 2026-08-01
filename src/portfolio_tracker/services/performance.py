@@ -1579,6 +1579,20 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
     return None
 
 
+def _is_transfer_shaped_fee(name: str | None) -> bool:
+    """Whether a `fee`-typed row is actually a share transfer in disguise.
+
+    SoFi emits an incoming ACATS as `fee/miscellaneous fee` named
+    "fee - TRANSFER IN <TICKER>", with the position's market value in `amount`.
+    Nothing about the type or subtype distinguishes it from a real fee; only
+    the description does.
+    """
+    if not name:
+        return False
+    n = name.lower()
+    return "transfer in" in n or "transfer out" in n
+
+
 def _reverse_transaction_cash_delta(
     tx: InvestmentTransaction,
     cash_equivalent_security_ids: frozenset[int],
@@ -1626,6 +1640,22 @@ def _reverse_transaction_cash_delta(
         tx.type == InvestmentTransactionType.FEE.value
         and tx.security_id in cash_equivalent_security_ids
     ):
+        return Decimal(0)
+
+    # A FEE row that is really a share transfer. SoFi maps an incoming ACATS to
+    # `fee/miscellaneous fee` carrying the position's FULL MARKET VALUE and the
+    # share count — "fee - TRANSFER IN VTI", $134,957.88. Treated as a fee it
+    # reads as cash spent, so reversing it injects that amount into historical
+    # cash: $288,949 of phantom cash across eight rows on the live book, which
+    # is why the 2-year return read 12 points too low.
+    #
+    # A rule, not a deletion. Those rows were removed by hand on 2026-07-31 and
+    # the removal was NOT durable — ingest is insert-if-absent on the provider
+    # id, so the next 730-day backfill would have re-created every one. Encoded
+    # here it survives re-ingest, re-linking, and provider id changes, and it
+    # covers the next ACATS as well as the last. The share movement itself is
+    # already carried by the paired `external_asset_transfer_in/out` rows.
+    if tx.type == InvestmentTransactionType.FEE.value and _is_transfer_shaped_fee(tx.name):
         return Decimal(0)
 
     if _is_external_cashflow(tx.type, tx.subtype, override=override, name=tx.name):

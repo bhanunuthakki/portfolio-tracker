@@ -30,6 +30,7 @@ from portfolio_tracker.models import (
     Security,
     StockSplit,
     TickerOverride,
+    TransactionOverride,
 )
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
 from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
@@ -65,6 +66,7 @@ CASHFLOW_WITHOUT_VALUE = "cashflow_without_value"
 PARTIAL_SNAPSHOT_DAY = "partial_snapshot_day"
 DUPLICATE_CONTRIBUTION_CHAIN = "duplicate_contribution_chain"
 UNLABELLED_TRANSFER_BONUS = "unlabelled_transfer_bonus"
+ORPHANED_CORRECTION = "orphaned_correction"
 
 # Promotional transfer bonuses a broker pays as a clean percentage of an
 # incoming ACATS. SoFi labels them "transfer - DEPOSIT USD" with no "bonus"
@@ -138,6 +140,7 @@ def build_report(session: Session, now: datetime | None = None) -> DataQualityRe
     findings.extend(_find_partial_snapshot_days(session))
     findings.extend(_find_duplicate_contribution_chains(session))
     findings.extend(_find_unlabelled_transfer_bonuses(session))
+    findings.extend(_find_orphaned_corrections(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -1390,3 +1393,62 @@ def _find_unlabelled_transfer_bonuses(session: Session) -> list[DataQualityFindi
                 continue
             break
     return findings
+
+
+def _find_orphaned_corrections(session: Session) -> list[DataQualityFindingOut]:
+    """Manual corrections whose underlying transaction no longer exists.
+
+    Every ruling the user makes — a reclassified bonus, a 401(k) leg marked
+    internal — is stored against a provider transaction id. That id is not
+    stable across a re-link: reconnect an institution through a different
+    aggregator and the same real-world trade arrives with a new id, silently
+    orphaning the correction while an unclassified duplicate takes its place.
+    The numbers move and nothing announces it.
+
+    So the invariant is: a correction must point at a live row. When one
+    doesn't, either the transaction was legitimately removed (and the ruling
+    should be retired) or it was re-ingested under a new id (and the ruling
+    needs re-applying). Both need a human; both are invisible otherwise.
+
+    `transaction_overrides` cascades on delete, so an orphan here means the row
+    vanished WITHOUT a delete — the re-link case, which is the dangerous one.
+    """
+    override_ids = set(
+        session.execute(select(TransactionOverride.plaid_investment_transaction_id)).scalars().all()
+    )
+    if not override_ids:
+        return []
+    live = set(
+        session.execute(
+            select(InvestmentTransaction.plaid_investment_transaction_id).where(
+                InvestmentTransaction.plaid_investment_transaction_id.in_(override_ids)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    orphans = sorted(override_ids - live)
+    if not orphans:
+        return []
+    return [
+        DataQualityFindingOut(
+            category=ORPHANED_CORRECTION,
+            severity=ERROR,
+            title=f"{len(orphans)} manual correction(s) point at transactions that no longer exist",
+            detail=(
+                f"{len(orphans)} rows in `transaction_overrides` reference transaction ids "
+                f"that are not in the ledger. A correction only applies while its row is "
+                f"live, so these rulings are currently doing nothing. The usual cause is a "
+                f"re-linked institution: the same real trade returns under a new provider "
+                f"id, orphaning the ruling while an unclassified duplicate takes its place — "
+                f"which moves the reported numbers with no other symptom."
+            ),
+            recommended_action=(
+                "Read each override's `notes` (they carry the original reasoning), find the "
+                "replacement transaction on the Transactions page, and re-apply the ruling to "
+                "it. If the transaction was deliberately deleted, record it in "
+                "`transaction_exclusions` and remove the override."
+            ),
+            context={"orphaned_ids": ",".join(orphans[:20]), "orphan_count": str(len(orphans))},
+        )
+    ]

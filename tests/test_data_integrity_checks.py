@@ -27,6 +27,7 @@ from portfolio_tracker.models import (
     Item,
     Price,
     Security,
+    TransactionExclusion,
     TransactionOverride,
 )
 from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
@@ -35,6 +36,7 @@ from portfolio_tracker.services.performance import (
     _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
     _forward_values_from_snapshots,  # pyright: ignore[reportPrivateUsage]
     _is_start_value_unreliable,  # pyright: ignore[reportPrivateUsage]
+    _is_transfer_shaped_fee,  # pyright: ignore[reportPrivateUsage]
     partial_snapshot_dates,
 )
 
@@ -545,3 +547,60 @@ class TestUnlabelledTransferBonus:
         book.flush()
 
         assert self._findings(book) == []
+
+
+class TestExceptionDurability:
+    """Corrections have to survive the things that routinely happen to this
+    data: a re-ingest, a re-link, a provider changing its ids. A correction
+    that quietly stops applying is worse than none — the numbers move and
+    nothing says so."""
+
+    def test_transfer_shaped_fee_is_cash_neutral_by_rule(self, book: Session):
+        # SoFi maps an incoming ACATS to `fee/miscellaneous fee` carrying the
+        # position's full market value. Treated as a fee, reversing it injects
+        # that value into historical cash ($288,949 on the live book). The rule
+        # covers it whether or not anyone remembered to delete the row — and it
+        # covers the NEXT ACATS too.
+        assert _is_transfer_shaped_fee("fee - TRANSFER IN VTI") is True
+        assert _is_transfer_shaped_fee("fee - TRANSFER OUT BN") is True
+        assert _is_transfer_shaped_fee("fee - MARGIN INTEREST USD") is False
+        assert _is_transfer_shaped_fee(None) is False
+
+    def test_excluded_transaction_is_not_re_ingested(self, book: Session):
+        # The failure this prevents: deleting a bad row is undone by the next
+        # backfill, because ingest is insert-if-absent on the provider id and
+        # absence reads as "new".
+        book.add(
+            TransactionExclusion(
+                plaid_investment_transaction_id="bad-row",
+                reason="duplicate of the authoritative synthetic ACATS pair",
+            )
+        )
+        book.flush()
+        assert book.get(TransactionExclusion, "bad-row") is not None
+        assert book.get(TransactionExclusion, "some-other-row") is None
+
+    def test_orphaned_override_is_reported_as_an_error(self, book: Session):
+        # An override pointing at a transaction that no longer exists is doing
+        # nothing. The dangerous cause is a re-link: same trade, new id, ruling
+        # orphaned, unclassified duplicate in its place.
+        book.add(
+            TransactionOverride(
+                plaid_investment_transaction_id="vanished", classification="internal"
+            )
+        )
+        book.flush()
+
+        findings = [f for f in build_report(book).findings if f.category == "orphaned_correction"]
+        assert len(findings) == 1
+        assert findings[0].severity == "error"
+        assert findings[0].context["orphan_count"] == "1"
+
+    def test_a_live_override_is_not_reported(self, book: Session):
+        _tx(book, "live", 10, D0, "cash", amount=100.0, subtype="contribution")
+        book.add(
+            TransactionOverride(plaid_investment_transaction_id="live", classification="internal")
+        )
+        book.flush()
+
+        assert [f for f in build_report(book).findings if f.category == "orphaned_correction"] == []

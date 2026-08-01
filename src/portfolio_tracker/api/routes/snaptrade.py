@@ -39,6 +39,7 @@ from portfolio_tracker.models import (
     Item,
     ItemSource,
     SnapTradeUser,
+    TransactionExclusion,
 )
 from portfolio_tracker.snaptrade_client import (
     SnapTradeNotConfiguredError,
@@ -237,6 +238,12 @@ def sync(
                         security_id = stored.security_id
                 existing = session.get(InvestmentTransaction, tx.plaid_investment_transaction_id)
                 if existing is not None:
+                    continue
+                # Deliberately-removed rows stay removed across re-syncs.
+                if (
+                    session.get(TransactionExclusion, tx.plaid_investment_transaction_id)
+                    is not None
+                ):
                     continue
                 session.add(
                     InvestmentTransaction(
