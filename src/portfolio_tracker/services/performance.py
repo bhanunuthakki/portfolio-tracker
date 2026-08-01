@@ -983,6 +983,29 @@ def _classify_by_name(name: str | None) -> str | None:
         return "internal"
     if "dividend" in n or "interest payment" in n or "credit interest" in n:
         return "internal"
+    # Broker promotional credits — transfer bonuses, rollover bonuses, deposit
+    # boosts, fee reimbursements. The broker gives the account money; the OWNER
+    # did not contribute it. Tagged `internal` so it lands in investment gain
+    # (like interest), never `external_in`.
+    #
+    # The direction of the error matters: a 2% ACATS bonus on a ~$150k transfer
+    # is ~$3,000, and counting it as a contribution SUBTRACTS it from measured
+    # gain — the account is credited with money while its performance is
+    # penalised for receiving it. This rule is deliberately written before the
+    # "deposit"/"incoming" direction markers below, because a bonus row often
+    # reads "Deposit Boost Payment" or "Incoming ACAT Fee Reimbursement" and
+    # would otherwise be caught by them.
+    #
+    # None had landed on this book as of 2026-07-31 (only a $312 "ACAT In Bonus
+    # Interest Payment" and a $50 fee reimbursement in Nov-2023, both outside
+    # the measured window) — SoFi/Robinhood pay transfer bonuses after a
+    # holding period, so the 2026-05 ACATS and IRA-rollover bonuses are still
+    # in flight. The rule exists so they are classified correctly on arrival
+    # rather than discovered afterwards.
+    if "bonus" in n or "boost payment" in n or "reimbursement" in n:
+        return "internal"
+    if "promo" in n or "reward" in n or "incentive" in n:
+        return "internal"
     # Direction markers — used when type/subtype is ambiguous
     # (typically `transfer/transfer`). "deposit" and "withdrawal" are
     # cross-aggregator-safe because they make the direction explicit
