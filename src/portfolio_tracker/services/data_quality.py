@@ -64,6 +64,15 @@ UNEXPLAINED_HOLDINGS_CHANGE = "unexplained_holdings_change"
 CASHFLOW_WITHOUT_VALUE = "cashflow_without_value"
 PARTIAL_SNAPSHOT_DAY = "partial_snapshot_day"
 DUPLICATE_CONTRIBUTION_CHAIN = "duplicate_contribution_chain"
+UNLABELLED_TRANSFER_BONUS = "unlabelled_transfer_bonus"
+
+# Promotional transfer bonuses a broker pays as a clean percentage of an
+# incoming ACATS. SoFi labels them "transfer - DEPOSIT USD" with no "bonus"
+# text anywhere, so neither the subtype heuristic nor the name-based bonus rule
+# catches them — the ratio is the only signal. Rates seen in market: 1%, 2%, 3%.
+_BONUS_RATES: tuple[Decimal, ...] = (Decimal("0.01"), Decimal("0.02"), Decimal("0.03"))
+_BONUS_RATE_TOLERANCE: Decimal = Decimal("0.02")  # dollars
+_BONUS_WINDOW_DAYS = 21
 
 # How long a sweep from a plan's core account into its brokerage window may
 # take. Fidelity BrokerageLink lands 3-4 days after the payroll contribution;
@@ -128,6 +137,7 @@ def build_report(session: Session, now: datetime | None = None) -> DataQualityRe
     findings.extend(_find_cashflow_without_value(session))
     findings.extend(_find_partial_snapshot_days(session))
     findings.extend(_find_duplicate_contribution_chains(session))
+    findings.extend(_find_unlabelled_transfer_bonuses(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -1249,4 +1259,134 @@ def _find_duplicate_contribution_chains(
                 },
             )
         )
+    return findings
+
+
+def _find_unlabelled_transfer_bonuses(session: Session) -> list[DataQualityFindingOut]:
+    """Inflows that are a clean percentage of a recent incoming share transfer.
+
+    A broker promotion is the BROKER's money. Booked as a contribution it is
+    SUBTRACTED from investment gain, so the portfolio is penalised for
+    receiving it — a one-directional error, always understating performance.
+
+    `_classify_by_name` already catches anything that says "bonus", "boost" or
+    "reimbursement". This check exists because the ones that matter say no such
+    thing: SoFi paid eight of them on 2026-05-12/14 labelled only
+    "transfer - DEPOSIT USD", totalling $5,778.98 across the owner's and his
+    wife's accounts. Every one was EXACTLY 2.00% of a position ACATS-ed in days
+    earlier — MELI $37,547.96 -> $750.96, VTI $134,957.88 -> $2,699.16. Eight
+    exact hits is not coincidence, and the ratio was the only available signal.
+
+    Matched against share-transfer arrivals rather than any inflow, because
+    that is what transfer promotions are priced off. A recurring $50 deposit
+    landing the same week is not a clean percentage of anything and is left
+    alone.
+    """
+    accts = active_account_ids(session)
+    if not accts:
+        return []
+    overrides = _load_transaction_overrides(session)
+    account_names = _account_names(session, accts)
+    securities = {
+        security_id: ticker or name or f"#{security_id}"
+        for security_id, ticker, name in session.execute(
+            select(Security.security_id, Security.ticker, Security.name)
+        ).all()
+    }
+
+    # Dollar value of each incoming share transfer, valued at the transfer date.
+    arrivals: list[tuple[date, int, str, Decimal]] = []
+    for tx in (
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.subtype == "external_asset_transfer_in")
+        )
+        .scalars()
+        .all()
+    ):
+        if tx.security_id is None or Decimal(tx.quantity or 0) <= 0:
+            continue
+        close = session.execute(
+            select(Price.close)
+            .where(Price.security_id == tx.security_id)
+            .where(Price.date <= tx.date)
+            .order_by(Price.date.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if close is None:
+            continue
+        arrivals.append(
+            (
+                tx.date,
+                tx.account_id,
+                securities.get(tx.security_id, "?"),
+                Decimal(tx.quantity) * Decimal(close),
+            )
+        )
+    if not arrivals:
+        return []
+
+    findings: list[DataQualityFindingOut] = []
+    for tx in (
+        session.execute(
+            select(InvestmentTransaction).where(InvestmentTransaction.account_id.in_(accts))
+        )
+        .scalars()
+        .all()
+    ):
+        classification = effective_classification(
+            tx.type,
+            tx.subtype,
+            overrides.get(tx.plaid_investment_transaction_id),
+            amount=Decimal(tx.amount),
+            name=tx.name,
+        )
+        if classification != "external_in":
+            continue
+        amount = abs(Decimal(tx.amount))
+        if amount <= 0:
+            continue
+        for arr_date, _arr_account, ticker, value in arrivals:
+            if not 0 <= (tx.date - arr_date).days <= _BONUS_WINDOW_DAYS:
+                continue
+            for rate in _BONUS_RATES:
+                if abs(amount - value * rate) <= _BONUS_RATE_TOLERANCE:
+                    findings.append(
+                        DataQualityFindingOut(
+                            category=UNLABELLED_TRANSFER_BONUS,
+                            severity=WARNING,
+                            title=(
+                                f"{account_names.get(tx.account_id, tx.account_id)}: "
+                                f"${amount:,.2f} looks like a {rate * 100:.0f}% transfer bonus, "
+                                f"counted as a contribution"
+                            ),
+                            detail=(
+                                f"On {tx.date} this account received ${amount:,.2f}, which is "
+                                f"exactly {rate * 100:.2f}% of the {ticker} transfer that arrived "
+                                f"{arr_date} (${value:,.2f}). The description is "
+                                f'"{tx.name}" — no "bonus" text — so it is currently classified '
+                                f"as money YOU contributed. If it is a broker promotion it is the "
+                                f"BROKER's money, and counting it as a contribution subtracts it "
+                                f"from your investment gain."
+                            ),
+                            recommended_action=(
+                                "If this is a promotional credit, re-tag it Internal on the "
+                                "Transactions page so it lands in investment income. If you really "
+                                "did deposit this amount, leave it as a Contribution."
+                            ),
+                            context={
+                                "transaction_id": tx.plaid_investment_transaction_id,
+                                "amount": f"{amount:.2f}",
+                                "implied_rate": f"{rate:.4f}",
+                                "matched_transfer_ticker": ticker,
+                                "matched_transfer_value": f"{value:.2f}",
+                                "matched_transfer_date": arr_date.isoformat(),
+                            },
+                        )
+                    )
+                    break
+            else:
+                continue
+            break
     return findings

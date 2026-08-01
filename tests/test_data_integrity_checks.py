@@ -25,7 +25,9 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
+    Price,
     Security,
+    TransactionOverride,
 )
 from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
 from portfolio_tracker.services.data_quality import build_report
@@ -448,3 +450,98 @@ class TestDuplicateContributionChain:
         book.flush()
 
         assert self._chain(book) == []
+
+
+class TestUnlabelledTransferBonus:
+    """SoFi paid eight transfer bonuses labelled only 'transfer - DEPOSIT USD'
+    — no 'bonus' text anywhere — so both the subtype heuristic and the
+    name-based bonus rule read them as owner contributions. $5,778.98 was being
+    SUBTRACTED from investment gain. The exact percentage ratio to a recent
+    ACATS arrival is the only available signal."""
+
+    def _seed_transfer_in(self, session: Session, *, value_per_share: float, shares: float):
+        _security(session, 110, "MELI")
+        for offset in range(9):
+            session.add(
+                Price(
+                    security_id=110,
+                    date=D0 + timedelta(days=offset),
+                    close=Decimal(str(value_per_share)),
+                )
+            )
+        session.add(
+            InvestmentTransaction(
+                plaid_investment_transaction_id="acats-in",
+                account_id=10,
+                security_id=110,
+                date=D0,
+                name="ACATS in from Robinhood (MELI)",
+                quantity=Decimal(str(shares)),
+                amount=Decimal(0),
+                type="cash",
+                subtype="external_asset_transfer_in",
+            )
+        )
+
+    def _findings(self, session: Session) -> list[object]:
+        return [
+            f for f in build_report(session).findings if f.category == "unlabelled_transfer_bonus"
+        ]
+
+    def test_two_percent_of_a_transfer_is_flagged(self, book: Session):
+        # $10,000 transferred in; $200.00 lands 4 days later described only as
+        # a deposit. Exactly 2.00% is not a coincidence.
+        self._seed_transfer_in(book, value_per_share=100.0, shares=100.0)
+        _tx(
+            book,
+            "bonus",
+            10,
+            D0 + timedelta(days=4),
+            "transfer",
+            amount=200.0,
+            subtype="transfer",
+            name="transfer - DEPOSIT USD",
+        )
+        book.flush()
+
+        (finding,) = self._findings(book)
+        assert finding.context["implied_rate"] == "0.0200"
+        assert finding.context["matched_transfer_ticker"] == "MELI"
+
+    def test_a_recurring_deposit_is_not_flagged(self, book: Session):
+        # $50 biweekly alongside the same transfer — not a clean percentage of
+        # anything, so it must be left alone.
+        self._seed_transfer_in(book, value_per_share=100.0, shares=100.0)
+        _tx(
+            book,
+            "recurring",
+            10,
+            D0 + timedelta(days=4),
+            "transfer",
+            amount=50.0,
+            subtype="transfer",
+            name="transfer - DEPOSIT USD",
+        )
+        book.flush()
+
+        assert self._findings(book) == []
+
+    def test_an_already_corrected_bonus_is_silent(self, book: Session):
+        # Once re-tagged Internal it is no longer external_in, so it drops out.
+        self._seed_transfer_in(book, value_per_share=100.0, shares=100.0)
+        _tx(
+            book,
+            "bonus",
+            10,
+            D0 + timedelta(days=4),
+            "transfer",
+            amount=200.0,
+            subtype="transfer",
+            name="transfer - DEPOSIT USD",
+        )
+        book.add(
+            TransactionOverride(plaid_investment_transaction_id="bonus", classification="internal")
+        )
+        book.flush()
+
+        assert self._findings(book) == []
