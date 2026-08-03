@@ -325,7 +325,11 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         dq_meta_src = build_accounts_result(
             session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
         ).meta
-        report = data_quality_service.build_report(session).model_copy(
+        # `today=` pins the staleness threshold and the backfill-anomaly window.
+        # Without it the finders read the real clock while everything else here
+        # is seeded from fixed dates, so the committed fixture drifted on its
+        # own once the calendar crossed a threshold.
+        report = data_quality_service.build_report(session, today=FIXTURE_TODAY).model_copy(
             update={"generated_at": FIXTURE_GENERATED_AT}
         )
         data_quality = DataQualityV1Result(
