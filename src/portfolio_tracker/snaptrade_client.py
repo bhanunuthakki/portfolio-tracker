@@ -15,6 +15,10 @@ SnapTrade's auth model differs from Plaid:
 We map this onto our schema as: one Item per brokerage connection (keyed by
 `snaptrade_authorization_id`), with `snaptrade_user_id` / `_user_secret`
 copied per Item for simplicity.
+
+The vendor SDK is imported LAZILY (see `_ensure_snaptrade`) — everything above
+this line is Pydantic models and pure normalization that must stay cheap to
+import.
 """
 
 from __future__ import annotations
@@ -22,10 +26,9 @@ from __future__ import annotations
 import time
 from datetime import date
 from decimal import Decimal
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel
-from snaptrade_client import SnapTrade
 
 from portfolio_tracker.config import get_settings
 from portfolio_tracker.plaid_client import (
@@ -34,6 +37,11 @@ from portfolio_tracker.plaid_client import (
     PlaidInvestmentTransaction,
     PlaidSecurity,
 )
+
+if TYPE_CHECKING:
+    # Type-only: `from __future__ import annotations` keeps every annotation
+    # below a string at runtime, so naming `SnapTrade` costs nothing at import.
+    from snaptrade_client import SnapTrade
 
 
 class SnapTradeNotConfiguredError(RuntimeError):
@@ -65,16 +73,40 @@ class SnapTradeTransactionsResponse(BaseModel):
 _client: SnapTrade | None = None
 
 
+def _ensure_snaptrade() -> type[SnapTrade]:
+    """Import the vendor SDK on first SnapTrade use and return its client class.
+
+    `snaptrade_client` is by far the most expensive import in the tree (~5s
+    warm, ~30s cold) and it used to be paid on every `uvicorn` boot, delaying
+    the port bind past the point where a dev-server / preview launcher gives up
+    probing. SnapTrade is optional (see `config.Settings.snaptrade_client_id`),
+    so the cost belongs on the first SnapTrade call, not on import.
+
+    A missing SDK is reported as `SnapTradeNotConfiguredError` so an install
+    without the optional dependency still 503s through the routes rather than
+    surfacing an ImportError as a 500.
+    """
+    try:
+        from snaptrade_client import SnapTrade
+    except ImportError as exc:  # pragma: no cover - SDK is a declared dependency
+        raise SnapTradeNotConfiguredError(
+            "The `snaptrade-python-sdk` package is not installed; SnapTrade is unavailable."
+        ) from exc
+    return SnapTrade
+
+
 def get_client() -> SnapTrade:
     global _client
     if _client is not None:
         return _client
     settings = get_settings()
+    # Check credentials BEFORE importing: an unconfigured install must reach the
+    # 503 path without ever paying the SDK import.
     if settings.snaptrade_client_id is None or settings.snaptrade_consumer_key is None:
         raise SnapTradeNotConfiguredError(
             "Set SNAPTRADE_CLIENT_ID and SNAPTRADE_CONSUMER_KEY in .env to enable SnapTrade."
         )
-    _client = SnapTrade(
+    _client = _ensure_snaptrade()(
         client_id=settings.snaptrade_client_id,
         consumer_key=settings.snaptrade_consumer_key,
     )
