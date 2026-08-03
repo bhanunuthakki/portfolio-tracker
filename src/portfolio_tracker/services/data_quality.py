@@ -11,7 +11,7 @@ The report is read-only. Findings are computed on demand — no caching.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -63,13 +63,32 @@ OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
 _OVERRIDE_DRIFT_TOLERANCE: Decimal = Decimal("0.02")
 
 
-def build_report(session: Session) -> DataQualityReportOut:
+def build_report(session: Session, today: date | None = None) -> DataQualityReportOut:
+    """Compute every data-quality finding for the active book.
+
+    `today` pins the two wall-clock-dependent finders — the staleness threshold
+    and the backfill-anomaly window — so callers that need a REPRODUCIBLE report
+    can get one. The v1 fixture generator is the reason this exists: it seeds
+    fixed dates and stamps a fixed `generated_at`, but the finders were still
+    reading the real clock, so the committed fixtures drifted on their own as
+    the calendar advanced past a threshold.
+
+    Defaults to the real clock, and deliberately derives each default the way
+    the corresponding finder used to derive it (local `date.today()` for the
+    backfill window, aware `datetime.now(UTC)` for staleness), so live API
+    behavior is byte-for-byte unchanged.
+    """
+    backfill_end = date.today() if today is None else today
+    stale_before = (
+        datetime.now(UTC) if today is None else datetime.combine(today, time.min, tzinfo=UTC)
+    ) - timedelta(days=7)
+
     findings: list[DataQualityFindingOut] = []
     findings.extend(_find_missing_cost_basis(session))
     findings.extend(_find_untickered_securities(session))
     findings.extend(_find_securities_without_prices(session))
-    findings.extend(_find_anomalous_backfill_days(session))
-    findings.extend(_find_stale_items(session))
+    findings.extend(_find_anomalous_backfill_days(session, backfill_end))
+    findings.extend(_find_stale_items(session, stale_before))
     findings.extend(_find_sparse_forward_snapshots(session))
     findings.extend(_find_overlapping_broker_connections(session))
     findings.extend(_find_missing_policy_benchmarks(session))
@@ -286,14 +305,16 @@ def _find_securities_without_prices(session: Session) -> list[DataQualityFinding
     return findings
 
 
-def _find_anomalous_backfill_days(session: Session) -> list[DataQualityFindingOut]:
+def _find_anomalous_backfill_days(session: Session, end_date: date) -> list[DataQualityFindingOut]:
     """Days in the reconstructed series with implausibly large daily returns.
 
     These are flagged inside `_chain_twr` already (TWR is held flat for
     them) but we still want the user to see the dates and the size of the
     discontinuity so they can investigate the underlying transactions.
+
+    `end_date` closes the 730-day lookback; `build_report` supplies it so the
+    window can be pinned for reproducible reports.
     """
-    end_date = date.today()
     start_date = end_date - timedelta(days=730)
     daily_value = _daily_portfolio_value(session, start_date, end_date)
     if len(daily_value) < 2:
@@ -349,14 +370,13 @@ def _find_anomalous_backfill_days(session: Session) -> list[DataQualityFindingOu
     return findings[:25]
 
 
-def _find_stale_items(session: Session) -> list[DataQualityFindingOut]:
-    """Items that haven't been refreshed in over a week.
+def _find_stale_items(session: Session, threshold: datetime) -> list[DataQualityFindingOut]:
+    """Items not refreshed since `threshold` (a week ago, per `build_report`).
 
     Skips items the user has flagged as data-inactive — those are kept
     around for connection-slot reasons but explicitly aren't expected to
     influence the numbers, so a stale snapshot doesn't matter.
     """
-    threshold = datetime.now(UTC) - timedelta(days=7)
     rows = (
         session.execute(
             select(Item)

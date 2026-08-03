@@ -7,33 +7,31 @@ Centralizes:
 
 Every Plaid response is converted to a Pydantic model before leaving this
 module — nothing else in the app touches `plaid.*` types.
+
+The generated `plaid-python` SDK is imported LAZILY, inside the five functions
+that actually construct SDK objects. It is ~2.9s of import time — the bulk of
+it hundreds of `plaid.model.*` modules at ~90ms each — and none of it is needed
+to serve a request that doesn't call Plaid, which is nearly all of them. The
+models and normalization helpers below are deliberately free of `plaid.*` at
+runtime (the `_*_from_plaid` helpers duck-type through `.to_dict()`), so this
+module stays cheap to import. Same rationale as `_ensure_snaptrade` in
+`snaptrade_client.py`; see that module's docstring for the boot-time story.
 """
 
 from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-import plaid
-from plaid.api import plaid_api
-from plaid.api_client import ApiClient
-from plaid.configuration import Configuration
-from plaid.model.country_code import CountryCode
-from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
-from plaid.model.investments_transactions_get_request import (
-    InvestmentsTransactionsGetRequest,
-)
-from plaid.model.investments_transactions_get_request_options import (
-    InvestmentsTransactionsGetRequestOptions,
-)
-from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
-from plaid.model.link_token_create_request import LinkTokenCreateRequest
-from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
-from plaid.model.products import Products
 from pydantic import BaseModel, ConfigDict
 
 from portfolio_tracker.config import PlaidEnvironment, get_settings
+
+if TYPE_CHECKING:
+    # Type-only: `from __future__ import annotations` keeps every annotation
+    # below a string at runtime, so naming `plaid_api` costs nothing at import.
+    from plaid.api import plaid_api
 
 
 class PlaidAccount(BaseModel):
@@ -102,6 +100,11 @@ class InvestmentsTransactionsResponse(BaseModel):
 
 
 def _build_client() -> plaid_api.PlaidApi:
+    import plaid
+    from plaid.api import plaid_api
+    from plaid.api_client import ApiClient
+    from plaid.configuration import Configuration
+
     settings = get_settings()
     host = (
         plaid.Environment.Sandbox
@@ -129,6 +132,11 @@ def get_client() -> plaid_api.PlaidApi:
 
 
 def create_link_token(client_user_id: str) -> str:
+    from plaid.model.country_code import CountryCode
+    from plaid.model.link_token_create_request import LinkTokenCreateRequest
+    from plaid.model.link_token_create_request_user import LinkTokenCreateRequestUser
+    from plaid.model.products import Products
+
     settings = get_settings()
     products: list[Any] = [Products(p) for p in settings.plaid_products_list]
     countries: list[Any] = [CountryCode(c) for c in settings.plaid_country_codes_list]
@@ -148,6 +156,8 @@ def create_link_token(client_user_id: str) -> str:
 
 def exchange_public_token(public_token: str) -> tuple[str, str]:
     """Exchange a Link `public_token` for `(access_token, item_id)`."""
+    from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
+
     request = cast(Any, ItemPublicTokenExchangeRequest(public_token=public_token))
     response = cast(Any, get_client().item_public_token_exchange(request))
     return str(response.access_token), str(response.item_id)
@@ -263,6 +273,8 @@ def _opt_date(value: object) -> date | None:
 
 
 def get_holdings(access_token: str) -> HoldingsResponse:
+    from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
+
     request = cast(Any, InvestmentsHoldingsGetRequest(access_token=access_token))
     response = cast(Any, get_client().investments_holdings_get(request))
     item_dict = _to_plaid_dict(response.item)
@@ -281,6 +293,13 @@ def get_investment_transactions(
     end_date: date,
 ) -> InvestmentsTransactionsResponse:
     """Pull every investment transaction in [start_date, end_date], paginating internally."""
+    from plaid.model.investments_transactions_get_request import (
+        InvestmentsTransactionsGetRequest,
+    )
+    from plaid.model.investments_transactions_get_request_options import (
+        InvestmentsTransactionsGetRequestOptions,
+    )
+
     page_size = 500
     all_tx: list[PlaidInvestmentTransaction] = []
     accounts: list[PlaidAccount] = []

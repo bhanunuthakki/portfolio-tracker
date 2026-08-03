@@ -1,19 +1,20 @@
-"""Guard: the optional SnapTrade SDK must not load at app import.
+"""Guard: neither aggregator SDK may load at app import.
 
-The vendor `snaptrade_client` package is the single most expensive import in
-the tree — ~5s warm, ~30s on a cold/Drive-synced cache — and it dominated
-FastAPI boot, long enough that a dev-server or preview launcher probing :8000
-gave up before uvicorn ever bound the port.
+The two vendor SDKs were the most expensive imports in the tree and both were
+paid on every uvicorn boot, delaying the port bind long enough that a
+dev-server or preview launcher probing :8000 gave up before the app ever bound.
 
-SnapTrade is an OPTIONAL integration (`config.py`: with SNAPTRADE_CLIENT_ID /
-SNAPTRADE_CONSUMER_KEY unset the routes 503 cleanly and the rest of the app
-keeps working with Plaid only), so paying that cost on every boot is pure
-waste. `portfolio_tracker.snaptrade_client` now imports the SDK inside
-`_ensure_snaptrade()`, on first SnapTrade use.
+  * `snaptrade_client` — ~5s warm, ~30s on a cold/Drive-synced cache. An
+    OPTIONAL integration (`config.py`: with SNAPTRADE_CLIENT_ID /
+    SNAPTRADE_CONSUMER_KEY unset the routes 503 cleanly and the rest of the app
+    keeps working with Plaid only), so the eager cost was pure waste.
+  * `plaid` — ~2.9s, most of it hundreds of generated `plaid.model.*` modules.
+    Required at runtime, but not at import: only the five SDK-calling functions
+    in `plaid_client` need it.
 
-These tests pin both halves of the deal: the SDK stays out of the import graph
-at boot, and the SnapTrade surface still behaves — a real client when
-credentials are configured, a clean 503 when they aren't.
+Both now import on first use. These tests pin both halves of the deal: the SDKs
+stay out of the boot import graph, and the surfaces still behave — real clients
+when credentials are configured, a clean 503 for SnapTrade when they aren't.
 """
 
 from __future__ import annotations
@@ -30,18 +31,31 @@ import portfolio_tracker
 
 _SRC = str(Path(portfolio_tracker.__file__).resolve().parents[1])
 
+
 # Mirrors the earnings-summary guard
 # (`python -c "import llm.cli, sys; assert 'google.generativeai' not in sys.modules"`).
-# Runs in a clean interpreter because this suite's own modules import
-# `portfolio_tracker.snaptrade_client` directly, which would otherwise make the
+# `sdk` must be absent from the boot graph; `wrapper` is our thin module around
+# it, which must still import. The check runs in a clean interpreter because
+# this suite imports both wrappers directly, which would otherwise make the
 # in-process assertion depend on test ordering.
-_GUARD = (
-    "import sys;"
-    "from portfolio_tracker.api.main import app;"
-    "assert 'snaptrade_client' not in sys.modules, "
-    "'SnapTrade SDK was imported eagerly at app import';"
-    "assert 'portfolio_tracker.snaptrade_client' in sys.modules"
-)
+def _guard(sdk: str, wrapper: str) -> str:
+    return (
+        "import sys;"
+        "from portfolio_tracker.api.main import app;"
+        f"assert {sdk!r} not in sys.modules, "
+        f"'{sdk} was imported eagerly at app import';"
+        f"assert {wrapper!r} in sys.modules"
+    )
+
+
+def _run_guard(source: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", source],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": _SRC},
+    )
 
 
 def test_app_import_does_not_load_snaptrade_sdk() -> None:
@@ -52,14 +66,19 @@ def test_app_import_does_not_load_snaptrade_sdk() -> None:
     thin wrapper, which must still import — the routes and this suite depend on
     its Pydantic models.
     """
-    env = {**os.environ, "PYTHONPATH": _SRC}
-    result = subprocess.run(
-        [sys.executable, "-c", _GUARD],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env=env,
-    )
+    result = _run_guard(_guard("snaptrade_client", "portfolio_tracker.snaptrade_client"))
+    assert result.returncode == 0, result.stderr
+
+
+def test_app_import_does_not_load_plaid_sdk() -> None:
+    """Same deal for `plaid-python`: ~2.9s of generated `plaid.model.*` modules
+    that only the five SDK-calling functions in `plaid_client` need.
+
+    Plaid is a REQUIRED integration, unlike SnapTrade — but "required at
+    runtime" is not "required at import". A request that never calls Plaid
+    should never pay for the SDK.
+    """
+    result = _run_guard(_guard("plaid", "portfolio_tracker.plaid_client"))
     assert result.returncode == 0, result.stderr
 
 
@@ -132,3 +151,24 @@ def test_status_endpoint_reports_unconfigured(client, monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"configured": False}
+
+
+def test_plaid_client_still_builds_from_the_deferred_import(monkeypatch) -> None:
+    """The Plaid deferred imports still resolve — building a client is local
+    (no network), so this exercises the real SDK path end to end.
+
+    conftest injects throwaway Plaid credentials, so `get_settings()` is
+    satisfied without touching a real account.
+    """
+    from portfolio_tracker import plaid_client
+
+    monkeypatch.setattr(plaid_client, "_client", None)
+
+    built = plaid_client._build_client()
+
+    from plaid.api import plaid_api
+
+    assert isinstance(built, plaid_api.PlaidApi)
+    # And the cache still short-circuits.
+    monkeypatch.setattr(plaid_client, "_client", built)
+    assert plaid_client.get_client() is built
