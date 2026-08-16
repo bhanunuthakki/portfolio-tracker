@@ -15,7 +15,9 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.5",
     "plaid-python>=25",
-    "snaptrade-python-sdk>=11",
+    # v12+ changed the client authentication constructor. Keep the verified
+    # commercial-user contract until that migration is designed and tested.
+    "snaptrade-python-sdk==11.0.196",
     # snaptrade-python-sdk pins typing_extensions==4.13.2; Pydantic 2.10+
     # imports `Sentinel` which only exists in 4.14+. Force the newer one.
     "typing-extensions>=4.14.1",
