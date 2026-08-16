@@ -25,6 +25,22 @@ attempts every step — a Plaid 500 doesn't block SnapTrade).
 
 A 14-day-old log lives under `scripts/logs/`.
 
+## Always-on Portfolio Tracker API (required by Earnings Summary)
+
+The API binds only to `127.0.0.1:8000`. Double-click
+`scripts\install-api-server-task.cmd`; it deliberately keeps the window open so
+you can enter the Windows password and read any error. Alternatively, run this
+from an interactive PowerShell session:
+
+```powershell
+.\scripts\install-api-server-task.ps1
+```
+
+The default task starts at system startup and restores the API after a Windows
+reboot without an interactive sign-in. Use `-StartNow` to register without
+interrupting an already-running API. `-AtLogOn` is a troubleshooting fallback
+only; it is not suitable for an unattended machine.
+
 ## Option 1 — Windows Task Scheduler (your machine must be on)
 
 This is the simplest path. Caveat: the job only runs when your computer

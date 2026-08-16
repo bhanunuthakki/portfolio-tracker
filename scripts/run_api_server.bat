@@ -1,5 +1,5 @@
 @echo off
-REM API-server launcher for Windows Task Scheduler (at-logon trigger).
+REM API-server launcher for Windows Task Scheduler (at-startup trigger).
 REM Serves the FastAPI on 127.0.0.1:8000 — earnings-summary's morning
 REM pipeline (Stage 0c weights + Stage 0f fit) does a LIVE fetch against it,
 REM so this process must survive reboots; ad-hoc detached uvicorns died on
