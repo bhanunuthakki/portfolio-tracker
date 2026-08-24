@@ -20,9 +20,8 @@ interface Row {
  * Edit the user's policy-portfolio weights.
  *
  * Stored in basis points server-side; surfaced as percent for usability.
- * Total must sum to ~100% to be considered "balanced" (the API flags it
- * but doesn't reject sub/over-balanced policies — useful when the user
- * wants to model leverage or holding cash).
+ * The normalized total must land within one basis point of 100%; the API
+ * rejects empty or unbalanced replacement requests.
  */
 export function PolicyEditor(): JSX.Element {
   const queryClient = useQueryClient();
@@ -49,15 +48,19 @@ export function PolicyEditor(): JSX.Element {
 
   const save = useMutation({
     mutationFn: (next: Row[]) =>
-      api.putPolicy(
-        next
+      api.putPolicy({
+        weights: next
           .filter((r) => r.ticker.trim())
           .map((r) => ({
             ticker: r.ticker.trim().toUpperCase(),
             weight_pct: parseFloat(r.weight_pct) || 0,
             notes: r.notes.trim() || null,
           })),
-      ),
+        expected_revision: data?.revision ?? 0,
+        idempotency_key: crypto.randomUUID(),
+        source: "portfolio_tracker_ui",
+        as_of: new Date().toISOString(),
+      }),
     onSuccess: () => {
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["policy"] });
@@ -68,8 +71,17 @@ export function PolicyEditor(): JSX.Element {
     onError: (err) => setError(err instanceof Error ? err.message : "Save failed"),
   });
 
-  const total = rows.reduce((s, r) => s + (parseFloat(r.weight_pct) || 0), 0);
-  const isBalanced = Math.abs(total - 100) < 0.01;
+  const policyRows = rows.filter((r) => r.ticker.trim());
+  const total = policyRows.reduce(
+    (sum, row) => sum + (parseFloat(row.weight_pct) || 0),
+    0,
+  );
+  const normalizedTotalBps = policyRows.reduce(
+    (sum, row) => sum + Math.round((parseFloat(row.weight_pct) || 0) * 100),
+    0,
+  );
+  const isBalanced =
+    policyRows.length > 0 && Math.abs(normalizedTotalBps - 10_000) <= 1;
 
   const updateRow = (idx: number, patch: Partial<Row>) => {
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
@@ -169,10 +181,15 @@ export function PolicyEditor(): JSX.Element {
             <SecondaryButton onClick={addRow}>+ Add ticker</SecondaryButton>
             <PrimaryButton
               onClick={() => save.mutate(rows)}
-              disabled={save.isPending}
+              disabled={save.isPending || !isBalanced}
             >
               Save policy
             </PrimaryButton>
+            {!isBalanced && (
+              <span className="text-xs font-medium text-amber-700">
+                Save requires a non-empty total from 99.99% to 100.01%.
+              </span>
+            )}
             <span className="ml-auto text-xs text-slate-500">
               After saving a new ticker, run{" "}
               <code className="bg-white border border-slate-200 px-1 rounded">

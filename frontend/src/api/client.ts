@@ -6,7 +6,7 @@ import type {
   ItemOut,
   LinkTokenOut,
   PolicyOut,
-  PolicyWeightIn,
+  PolicyReplaceIn,
   PositioningOut,
   SecurityClassificationOut,
   TransactionOverrideIn,
@@ -15,11 +15,11 @@ import type {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
+    ...init,
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
     },
-    ...init,
   });
   if (!response.ok) {
     const text = await response.text();
@@ -91,8 +91,12 @@ export const api = {
 
   getPolicy: (): Promise<PolicyOut> => request("/api/policy"),
 
-  putPolicy: (weights: PolicyWeightIn[]): Promise<PolicyOut> =>
-    request("/api/policy", { method: "PUT", body: JSON.stringify(weights) }),
+  putPolicy: (input: PolicyReplaceIn): Promise<PolicyOut> =>
+    request("/api/policy", {
+      method: "PUT",
+      headers: { "X-Portfolio-Write-Intent": "replace-policy" },
+      body: JSON.stringify(input),
+    }),
 
   setCostBasisOverride: (input: {
     account_id: number;

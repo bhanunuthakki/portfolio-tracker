@@ -72,12 +72,34 @@ export interface PolicyOut {
   weights: PolicyWeightOut[];
   total_pct: string;
   is_balanced: boolean;
+  revision: number;
+  source: string;
+  as_of: string;
+  recomputation: {
+    status: "current" | "required";
+    policy_revision: number;
+    reason: "policy_weights_changed" | null;
+  };
+  receipt: {
+    receipt_id: string;
+    idempotency_key: string;
+    outcome: "applied" | "unchanged";
+    recorded_at: string;
+  } | null;
 }
 
 export interface PolicyWeightIn {
   ticker: string;
   weight_pct: number;
   notes?: string | null;
+}
+
+export interface PolicyReplaceIn {
+  weights: PolicyWeightIn[];
+  expected_revision: number;
+  idempotency_key: string;
+  source: "portfolio_tracker_ui";
+  as_of: string;
 }
 
 export type TxClassification = "external_in" | "external_out" | "internal";

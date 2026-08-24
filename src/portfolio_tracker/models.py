@@ -13,6 +13,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -21,6 +22,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -400,6 +402,61 @@ class PolicyWeight(Base):
         server_default=func.now(),
         onupdate=func.now(),
         nullable=False,
+    )
+
+
+class PolicyState(Base):
+    """Singleton revision and benchmark-invalidation state for policy weights."""
+
+    __tablename__ = "policy_state"
+    __table_args__ = (
+        CheckConstraint("singleton_id = 1", name="ck_policy_state_singleton"),
+        CheckConstraint("revision >= 0", name="ck_policy_state_revision_nonnegative"),
+        CheckConstraint(
+            "benchmark_status IN ('current', 'required')",
+            name="ck_policy_state_benchmark_status",
+        ),
+    )
+
+    singleton_id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    revision: Mapped[int] = mapped_column(nullable=False, default=0)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    benchmark_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    benchmark_invalidated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PolicyWriteReceipt(Base):
+    """Durable idempotency and audit receipt for a policy replacement."""
+
+    __tablename__ = "policy_write_receipts"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_policy_write_receipts_key"),
+        CheckConstraint(
+            "outcome IN ('applied', 'unchanged')",
+            name="ck_policy_write_receipts_outcome",
+        ),
+    )
+
+    receipt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expected_revision: Mapped[int] = mapped_column(nullable=False)
+    accepted_revision: Mapped[int] = mapped_column(nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

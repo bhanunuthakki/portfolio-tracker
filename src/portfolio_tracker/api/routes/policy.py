@@ -1,96 +1,98 @@
-"""Policy-portfolio target allocation endpoints.
-
-The user's policy weights define the synthetic "what if I'd just stuck to
-my IPS" benchmark. Returns are computed by building a synthetic portfolio
-that started with the same V_start and received the same cashflows as the
-actual portfolio — but invested in the policy mix.
-
-Editing weights triggers a benchmarks-job re-run on the next chart load
-(the prices for new tickers get pulled lazily). Setting a weight to 0 is
-the way to remove a ticker.
-"""
+"""Read and govern the single-user policy benchmark allocation."""
 
 from __future__ import annotations
 
-from decimal import ROUND_HALF_UP, Decimal
+from ipaddress import ip_address
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
+from portfolio_tracker.config import get_settings
 from portfolio_tracker.db import get_session
-from portfolio_tracker.models import PolicyWeight
-from portfolio_tracker.schemas import (
-    PolicyOut,
-    PolicyWeightIn,
-    PolicyWeightOut,
+from portfolio_tracker.schemas import PolicyOut, PolicyReplaceIn
+from portfolio_tracker.services.policy_write import (
+    PolicyIdempotencyConflictError,
+    PolicyRecomputationError,
+    PolicyRevisionConflictError,
+    PolicyValidationError,
+    read_policy,
+    replace_policy,
 )
 
 router = APIRouter(prefix="/api/policy", tags=["policy"])
+_WRITE_INTENT = "replace-policy"
 
-# Total weights are considered "balanced" when within this tolerance of 100%.
-_BALANCE_TOLERANCE_PCT = Decimal("0.01")
+
+def authorize_policy_write(
+    request: Request,
+    intent: Annotated[str | None, Header(alias="X-Portfolio-Write-Intent")] = None,
+) -> None:
+    """Authorize a state change for this deliberately localhost-only service.
+
+    The peer must be loopback, browser origins must be configured, and the
+    caller must opt into the destructive full-replacement semantics. No
+    credential is put in a URL, browser bundle, exception, or log.
+    """
+    peer = request.client.host if request.client is not None else ""
+    try:
+        is_loopback = ip_address(peer).is_loopback
+    except ValueError:
+        is_loopback = False
+    origin = request.headers.get("origin")
+    origin_allowed = origin is None or origin in get_settings().cors_origins_list
+    if not is_loopback or not origin_allowed or intent != _WRITE_INTENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "POLICY_WRITE_UNAUTHORIZED"},
+        )
 
 
 @router.get("", response_model=PolicyOut)
 def get_policy(session: Annotated[Session, Depends(get_session)]) -> PolicyOut:
-    rows = session.execute(select(PolicyWeight).order_by(PolicyWeight.ticker)).scalars().all()
-    weights = [_to_out(r) for r in rows]
-    total = sum((w.weight_pct for w in weights), Decimal(0))
-    return PolicyOut(
-        weights=weights,
-        total_pct=total,
-        is_balanced=abs(total - Decimal(100)) <= _BALANCE_TOLERANCE_PCT,
-    )
+    return read_policy(session)
 
 
-@router.put("", response_model=PolicyOut)
-def replace_policy(
-    body: list[PolicyWeightIn],
+@router.put(
+    "",
+    response_model=PolicyOut,
+    dependencies=[Depends(authorize_policy_write)],
+)
+def put_policy(
+    body: PolicyReplaceIn,
+    response: Response,
     session: Annotated[Session, Depends(get_session)],
 ) -> PolicyOut:
-    """Replace the entire policy in one shot. PUT semantics — the request
-    body is the complete new state. Tickers not in the body are removed.
-    """
-    seen: set[str] = set()
-    cleaned: list[tuple[str, int, str | None]] = []
-    for row in body:
-        ticker = row.ticker.strip().upper()
-        if not ticker:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "ticker must be non-empty")
-        if ticker in seen:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"duplicate ticker {ticker} in policy",
-            )
-        if row.weight_pct < 0:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"weight for {ticker} must be non-negative",
-            )
-        seen.add(ticker)
-        cleaned.append((ticker, _pct_to_bps(row.weight_pct), row.notes))
-
-    session.execute(delete(PolicyWeight))
-    for ticker, bps, notes in cleaned:
-        session.add(PolicyWeight(ticker=ticker, weight_bps=bps, notes=notes))
-    session.commit()
-    return get_policy(session)
-
-
-def _to_out(row: PolicyWeight) -> PolicyWeightOut:
-    return PolicyWeightOut(
-        ticker=row.ticker,
-        weight_pct=_bps_to_pct(row.weight_bps),
-        notes=row.notes,
-        updated_at=row.updated_at,
-    )
-
-
-def _bps_to_pct(bps: int) -> Decimal:
-    return (Decimal(bps) / Decimal(100)).quantize(Decimal("0.01"))
-
-
-def _pct_to_bps(pct: Decimal) -> int:
-    return int((pct * Decimal(100)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    """Atomically replace the complete policy at an expected revision."""
+    try:
+        result, replayed = replace_policy(session, body)
+    except PolicyValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={"code": "POLICY_VALIDATION_FAILED", "reason": exc.reason},
+        ) from None
+    except PolicyIdempotencyConflictError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "POLICY_IDEMPOTENCY_CONFLICT"},
+        ) from None
+    except PolicyRevisionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "POLICY_REVISION_CONFLICT",
+                "expected_revision": exc.expected_revision,
+                "current_revision": exc.current_revision,
+            },
+        ) from None
+    except PolicyRecomputationError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "POLICY_RECOMPUTATION_INVALIDATION_FAILED",
+                "retryable": True,
+            },
+        ) from None
+    if replayed:
+        response.headers["Idempotency-Replayed"] = "true"
+    return result

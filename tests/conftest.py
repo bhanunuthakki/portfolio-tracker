@@ -71,7 +71,9 @@ def client(engine: Engine) -> Generator[object, None, None]:
 
     app.dependency_overrides[get_session] = _override
     try:
-        with TestClient(app) as c:
+        # Production is a localhost-only app. Exercise that real peer boundary
+        # instead of Starlette's synthetic ``testclient`` hostname.
+        with TestClient(app, client=("127.0.0.1", 50000)) as c:
             yield c
     finally:
         app.dependency_overrides.pop(get_session, None)
