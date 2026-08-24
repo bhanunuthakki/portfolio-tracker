@@ -17,11 +17,12 @@ from typing import Any, cast
 
 import typer
 import yfinance as yf
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import SessionLocal
-from portfolio_tracker.models import Benchmark, PolicyWeight
+from portfolio_tracker.models import Benchmark, PolicyState, PolicyWeight
 
 # The 11 SPDR Select Sector ETFs — one per GICS sector. Stored like benchmarks
 # so the Brinson allocation/selection attribution (`services.brinson`) can value
@@ -49,12 +50,33 @@ _SECTOR_ETFS: tuple[str, ...] = (
 _DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX", *_SECTOR_ETFS)
 
 
+class PolicyBenchmarkCoverageError(RuntimeError):
+    """The requested window lacks data for one or more policy components."""
+
+    def __init__(self, missing_tickers: tuple[str, ...]) -> None:
+        self.missing_tickers = missing_tickers
+        super().__init__("policy benchmark coverage incomplete")
+
+
 def run(start_date: date, end_date: date) -> int:
     rows_written = 0
     with SessionLocal() as session:
-        symbols = sorted(set(_DEFAULT_BENCHMARKS) | _policy_tickers(session))
+        policy_tickers = _policy_tickers(session)
+        state = session.get(PolicyState, 1)
+        target_revision = (
+            state.revision if state is not None and state.benchmark_status == "required" else None
+        )
+        symbols = sorted(set(_DEFAULT_BENCHMARKS) | policy_tickers)
         for symbol in symbols:
             rows_written += _fetch_symbol(session, symbol, start_date, end_date)
+        if target_revision is not None:
+            _complete_policy_recomputation(
+                session,
+                policy_revision=target_revision,
+                policy_tickers=policy_tickers,
+                start_date=start_date,
+                end_date=end_date,
+            )
         session.commit()
     return rows_written
 
@@ -62,6 +84,53 @@ def run(start_date: date, end_date: date) -> int:
 def _policy_tickers(session: Session) -> set[str]:
     rows = session.execute(select(PolicyWeight.ticker)).scalars().all()
     return {t for t in rows if t}
+
+
+def _complete_policy_recomputation(
+    session: Session,
+    *,
+    policy_revision: int,
+    policy_tickers: set[str],
+    start_date: date,
+    end_date: date,
+) -> bool:
+    """Clear one unchanged policy revision only after component coverage exists."""
+    session.flush()
+    missing = tuple(
+        sorted(
+            ticker
+            for ticker in policy_tickers
+            if session.scalar(
+                select(Benchmark.symbol)
+                .where(
+                    Benchmark.symbol == ticker,
+                    Benchmark.date >= start_date,
+                    Benchmark.date <= end_date,
+                    Benchmark.total_return_close.is_not(None),
+                )
+                .limit(1)
+            )
+            is None
+        )
+    )
+    if missing:
+        raise PolicyBenchmarkCoverageError(missing)
+    result = cast(
+        CursorResult[Any],
+        session.execute(
+            update(PolicyState)
+            .where(
+                PolicyState.singleton_id == 1,
+                PolicyState.revision == policy_revision,
+                PolicyState.benchmark_status == "required",
+            )
+            .values(
+                benchmark_status="current",
+                benchmark_invalidated_at=None,
+            )
+        ),
+    )
+    return result.rowcount == 1
 
 
 def _fetch_symbol(session: Session, symbol: str, start_date: date, end_date: date) -> int:

@@ -6,10 +6,11 @@ crossing the HTTP boundary is one of these.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LinkTokenOut(BaseModel):
@@ -308,9 +309,50 @@ class PolicyWeightIn(BaseModel):
     basis points internally. Frontend handles % directly for usability.
     """
 
-    ticker: str
-    weight_pct: Decimal
-    notes: str | None = None
+    ticker: str = Field(min_length=1, max_length=16)
+    weight_pct: Decimal = Field(ge=0, le=100)
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("ticker")
+    @classmethod
+    def _normalize_ticker(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized:
+            raise ValueError("ticker must be non-empty")
+        return normalized
+
+    @field_validator("notes")
+    @classmethod
+    def _normalize_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
+class PolicyReplaceIn(BaseModel):
+    weights: list[PolicyWeightIn] = Field(max_length=500)
+    expected_revision: int = Field(ge=0)
+    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    source: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_-]*$")
+    as_of: datetime
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _strip_idempotency_key(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("source")
+    @classmethod
+    def _normalize_source(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("as_of")
+    @classmethod
+    def _require_aware_as_of(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("as_of must include a UTC offset")
+        return value.astimezone(UTC)
 
 
 class PolicyWeightOut(BaseModel):
@@ -320,10 +362,28 @@ class PolicyWeightOut(BaseModel):
     updated_at: datetime
 
 
+class PolicyRecomputationOut(BaseModel):
+    status: Literal["current", "required"]
+    policy_revision: int
+    reason: Literal["policy_weights_changed"] | None = None
+
+
+class PolicyWriteReceiptOut(BaseModel):
+    receipt_id: str
+    idempotency_key: str
+    outcome: Literal["applied", "unchanged"]
+    recorded_at: datetime
+
+
 class PolicyOut(BaseModel):
     weights: list[PolicyWeightOut]
     total_pct: Decimal
     is_balanced: bool
+    revision: int
+    source: str
+    as_of: datetime
+    recomputation: PolicyRecomputationOut
+    receipt: PolicyWriteReceiptOut | None = None
 
 
 # ---------------------------------------------------------------------------
