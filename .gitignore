@@ -77,3 +77,10 @@ scripts/private/
 CIO_CONTEXT.md
 CIO_CONTEXT.local.md
 *.local.md
+
+# Broad local-data boundary for imports, exports, reports, and snapshots.
+exports/
+reports/
+imports/
+snapshots/
+*.jsonl

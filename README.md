@@ -8,6 +8,10 @@ for trade decisions.
 Runs entirely on localhost. No multi-tenant auth, no cloud dependencies except
 your aggregator(s) and yfinance.
 
+All numbers in checked-in fixtures and examples are synthetic. They are for
+development and contract tests only, not investment advice or any person's
+portfolio.
+
 > **Anonymized public template.** This repository is scrubbed of personal data
 > — no names, addresses, account numbers, balances, holdings, or tax records,
 > in either the current tree or its git history (history was rewritten to
@@ -68,7 +72,7 @@ your aggregator(s) and yfinance.
   pattern mining.
 - **CIO coaching panel** (`/api/coaching/tips`) — deterministic
   red-flag tips against the rubric in
-  [`CIO_CONTEXT.md`](CIO_CONTEXT.md): IRR below the 10–12% bar on
+  [`CIO_CONTEXT.example.md`](CIO_CONTEXT.example.md): IRR below the 10–12% bar on
   3+ year holds, concentration against human-capital buckets
   (Big-Tech/Ads, Startup/VC), stale theses, multiples-detachment trim
   candidates, drawdowns without thesis audits. Edit `CIO_CONTEXT.md`
