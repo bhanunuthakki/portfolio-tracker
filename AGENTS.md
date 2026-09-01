@@ -1,6 +1,6 @@
 # Portfolio Tracker — Project Rulebook
 
-Layers on the global `C:\Users\Bhanu\.gemini\AGENTS.md`; it does NOT repeat global rules (safety, TDD, Deep Modules, code standards, pre-push order). Only repo-specific facts live here.
+Layers on the runtime's global `AGENTS.md`; it does NOT repeat global rules (safety, TDD, Deep Modules, code standards, pre-push order). Only repo-specific facts live here.
 
 ## What this is
 

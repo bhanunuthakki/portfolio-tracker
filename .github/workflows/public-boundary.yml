@@ -1,0 +1,19 @@
+name: Public Boundary
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  public-boundary:
+    name: Public Boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify tracked public tree
+        run: bash scripts/check_public_tree.sh
+      - name: Test the boundary guard
+        run: bash scripts/test_public_tree_guard.sh
