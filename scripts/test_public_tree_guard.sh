@@ -51,3 +51,39 @@ if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); th
   echo "guard accepted a personal account fact" >&2
   exit 1
 fi
+
+git -C "$fixture_root" rm -q -f private.txt
+printf 'password="UltraSecretValue123"\n' > "$fixture_root/private.txt"
+git -C "$fixture_root" add -f private.txt
+if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); then
+  echo "guard accepted a quoted generic credential" >&2
+  exit 1
+fi
+
+git -C "$fixture_root" rm -q -f private.txt
+printf '{"cost_basis":1234}\n' > "$fixture_root/private.json"
+git -C "$fixture_root" add -f private.json
+if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); then
+  echo "guard accepted a standalone cost basis" >&2
+  exit 1
+fi
+
+git -C "$fixture_root" rm -q -f private.json
+printf '{"shares":250}\n' > "$fixture_root/private.json"
+git -C "$fixture_root" add -f private.json
+if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); then
+  echo "guard accepted a standalone share quantity" >&2
+  exit 1
+fi
+
+git -C "$fixture_root" rm -q -f private.json
+printf '{"weight":0.08,"position_size":0.08}\n' > "$fixture_root/public.json"
+git -C "$fixture_root" add -f public.json
+(cd "$fixture_root" && bash scripts/check_public_tree.sh)
+
+printf 'opaque bytes\n' > "$fixture_root/private.xlsx"
+git -C "$fixture_root" add -f private.xlsx
+if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); then
+  echo "guard accepted an uninspected binary artifact" >&2
+  exit 1
+fi

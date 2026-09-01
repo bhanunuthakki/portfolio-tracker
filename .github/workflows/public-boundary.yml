@@ -3,12 +3,16 @@ name: Public Boundary
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 14 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   public-boundary:
+    if: github.event_name != 'schedule'
     name: Public Boundary
     runs-on: ubuntu-latest
     steps:
@@ -17,3 +21,13 @@ jobs:
         run: bash scripts/check_public_tree.sh
       - name: Test the boundary guard
         run: bash scripts/test_public_tree_guard.sh
+
+  all-public-refs:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: All Public Refs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - run: bash scripts/audit_public_refs.sh
