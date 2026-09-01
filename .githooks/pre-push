@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+exec bash "$repo_root/scripts/check_public_tree.sh"
