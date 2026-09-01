@@ -1,6 +1,6 @@
 # Portfolio Tracker — Project Rulebook
 
-Layers on the global `C:\Users\Bhanu\.gemini\AGENTS.md`; it does NOT repeat global rules (safety, TDD, Deep Modules, code standards, pre-push order). Only repo-specific facts live here.
+Layers on the runtime's global `AGENTS.md`; it does NOT repeat global rules (safety, TDD, Deep Modules, code standards, pre-push order). Only repo-specific facts live here.
 
 ## What this is
 
@@ -14,6 +14,12 @@ Self-hosted, **single-user** personal investment tracker. Pulls holdings + trans
 - Frontend dev: `cd frontend && npm run dev` → http://localhost:5173.
 - Daily ingest CLIs: `python -m portfolio_tracker.jobs.<name>` (`daily_refresh`, `snapshot`, `backfill`, `prices`, `benchmarks`, `backup`, …).
 - DB init / migrate: `alembic upgrade head`.
+
+## Mac/Windows listener ownership
+
+- The always-on API is owned by Windows and remains bound to `127.0.0.1:8000`. Earnings Summary on the same Windows host is its remote-facing consumer.
+- Do not point a Mac client at Mac `127.0.0.1:8000`, a remembered Windows computer name, or a raw Tailnet IP, and do not expose port 8000 separately. Remote Mac access goes through the Earnings Summary HTTPS origin printed by live Windows `tailscale serve status`.
+- A Windows or Tailscale rename requires repairing the Earnings Summary Serve mapping and its exact CORS origin; it does not change the tracker loopback URL or justify a public listener.
 
 ## Toolchain (read from `pyproject.toml` / `frontend/package.json`)
 

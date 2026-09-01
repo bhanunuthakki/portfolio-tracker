@@ -12,11 +12,6 @@ token.json
 # Database
 *.db
 *.db-journal
-# Any sidecar of the live DB. `*.db` / `*.bak` alone miss the ones with a
-# trailing label (portfolio.db.bak.positioning, portfolio.db.pre-0016-migration.bak)
-# — those carry real holdings and balances and were sitting untracked, one
-# `git add -A` from being committed.
-portfolio.db.*
 *.sqlite
 *.sqlite3
 
@@ -82,3 +77,10 @@ scripts/private/
 CIO_CONTEXT.md
 CIO_CONTEXT.local.md
 *.local.md
+
+# Broad local-data boundary for imports, exports, reports, and snapshots.
+exports/
+reports/
+imports/
+snapshots/
+*.jsonl
