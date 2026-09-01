@@ -35,3 +35,19 @@ if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); th
   echo "guard accepted a private report path" >&2
   exit 1
 fi
+
+git -C "$fixture_root" rm -q -f reports/holdings.csv
+printf 'api_key=%s\n' 'ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' > "$fixture_root/private.txt"
+git -C "$fixture_root" add -f private.txt
+if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); then
+  echo "guard accepted credential material" >&2
+  exit 1
+fi
+
+git -C "$fixture_root" rm -q -f private.txt
+printf 'my portfolio cost basis: $1234\n' > "$fixture_root/private.txt"
+git -C "$fixture_root" add -f private.txt
+if (cd "$fixture_root" && bash scripts/check_public_tree.sh >/dev/null 2>&1); then
+  echo "guard accepted a personal account fact" >&2
+  exit 1
+fi
