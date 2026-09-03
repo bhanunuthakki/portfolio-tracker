@@ -175,6 +175,7 @@ _ROBINHOOD_HEADERS: tuple[str, ...] = (
     "Amount",
 )
 _SUPPORTED_EXTERNAL_CASH_CODES = frozenset({"ACH", "MTCH", "ACATI", "DRFRO", "CFIR"})
+_SUPPORTED_IN_KIND_TRANSFER_CODES = frozenset({"ACATI"})
 
 
 class ManifestValidationError(ValueError):
@@ -212,7 +213,9 @@ class _SourceRow:
     activity_date: str
     process_date: str
     settlement_date: str
+    instrument: str
     transaction_code: str
+    quantity: str
     amount: str
     source_row_sha256: str
 
@@ -583,7 +586,9 @@ def _parse_robinhood_csv(source_bytes: bytes) -> tuple[_SourceRow, ...]:
                 row[0],
                 row[1],
                 row[2],
+                row[3],
                 row[5],
+                row[6],
                 row[8],
                 _digest(
                     {
@@ -636,8 +641,32 @@ def _external_cash_candidate_amount(
 ) -> Decimal | None:
     if row.transaction_code.strip() not in _SUPPORTED_EXTERNAL_CASH_CODES:
         return None
+    if _is_in_kind_transfer(row):
+        return None
     amount = _parse_robinhood_amount(row.amount, context)
     return amount if amount != 0 else None
+
+
+def _is_nonzero_numeric_quantity(value: str) -> bool:
+    normalized = value.strip().replace(",", "")
+    try:
+        quantity = Decimal(normalized)
+    except InvalidOperation:
+        return False
+    return quantity.is_finite() and quantity != 0
+
+
+def _is_in_kind_transfer(row: _SourceRow) -> bool:
+    if (
+        row.transaction_code.strip() not in _SUPPORTED_IN_KIND_TRANSFER_CODES
+        or row.amount.strip() not in {"", "--"}
+    ):
+        return False
+    try:
+        _parse_robinhood_amount(row.amount, "in-kind transfer")
+    except ManifestValidationError:
+        return bool(row.instrument.strip()) and _is_nonzero_numeric_quantity(row.quantity)
+    return False
 
 
 def _account_identity_sha256(account: Account) -> str:
@@ -1051,6 +1080,16 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     coverage_end = _expect_date(payload["coverage_end"], "manifest.coverage_end")
     if coverage_start > coverage_end:
         raise ManifestValidationError("manifest coverage dates are reversed")
+    if any(
+        _is_in_kind_transfer(row)
+        and coverage_start
+        <= _parse_robinhood_date(row.activity_date, "in-kind transfer")
+        <= coverage_end
+        for row in source_rows
+    ):
+        raise ManifestValidationError(
+            "in-kind transfer inside requested performance window requires explicit reconciliation"
+        )
     source_type = _expect_string(payload["source_type"], "manifest.source_type")
     if source_type not in _SOURCE_TYPES:
         raise ManifestValidationError("manifest.source_type is invalid")

@@ -81,6 +81,16 @@ candidate-row count and every candidate has exactly one disposition:
 with zero candidates may certify only when the parser records zero candidates;
 an empty hand-authored event list is insufficient.
 
+An `ACATI` statement row with `Amount="--"`, an instrument, and a nonzero
+quantity is an in-kind transfer, not a zero-dollar cash flow. When it predates
+the requested reconstruction boundary, its positions remain part of opening
+capital and no dated flow is added to `(start, end]`. If such a row falls
+inside the requested source-coverage window, manifest construction and
+independent manifest validation fail closed until the transferred quantity is
+matched and valued explicitly. Robinhood attestations created before parser
+version `robinhood_activity_csv.v4` are non-certifying because those versions
+did not encode this distinction.
+
 ## Reconstruction
 
 For each account/security, quantities are reconstructed on a common

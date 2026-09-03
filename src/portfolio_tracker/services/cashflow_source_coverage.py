@@ -39,6 +39,9 @@ from portfolio_tracker.schemas import (
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CERTIFYING_PARSER_VERSIONS: dict[str, frozenset[str]] = {
+    "robinhood_activity_csv": frozenset({"robinhood_activity_csv.v4"}),
+}
 
 DateRange = tuple[date, date]
 
@@ -310,6 +313,12 @@ def _validation_reason_codes(
         reasons.add("source_attestation_invalid_manifest_sha256")
     if attestation.account_mapping_confidence == "provisional":
         reasons.add("source_attestation_account_mapping_provisional")
+    accepted_parser_versions = _CERTIFYING_PARSER_VERSIONS.get(attestation.source_format or "")
+    if (
+        accepted_parser_versions is not None
+        and attestation.parser_version not in accepted_parser_versions
+    ):
+        reasons.add("source_attestation_parser_version_unsupported")
     if attestation.cashflow_candidate_count != len(events):
         reasons.add("source_attestation_candidate_count_mismatch")
     if attestation.source_event_set_sha256 != canonical_source_event_set_sha256(events):

@@ -969,6 +969,73 @@ def test_backfill_applies_statement_activity_date_not_later_provider_posting(ses
     assert result[date(2025, 1, 6)] == Decimal(1100)
 
 
+def test_preperiod_in_kind_transfer_remains_in_opening_positions(session):
+    item = Item(
+        source="plaid",
+        plaid_item_id="preperiod-in-kind-item",
+        institution_name="Broker",
+        is_data_active=True,
+    )
+    account = Account(
+        item=item,
+        plaid_account_id="preperiod-in-kind-account",
+        name="Preperiod in-kind",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="preperiod-in-kind-security",
+        ticker="INKIND",
+        type="cs",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    start_date = date(2025, 1, 1)
+    anchor_date = date(2025, 1, 10)
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=anchor_date,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(10),
+                institution_price=Decimal(100),
+                institution_value=Decimal(1000),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="preperiod-in-kind-transfer",
+                account_id=account.account_id,
+                security_id=security.security_id,
+                date=start_date - timedelta(days=1),
+                name="Incoming account transfer",
+                quantity=Decimal(10),
+                amount=Decimal(0),
+                type="cash",
+                subtype="external_asset_transfer_in",
+                currency="USD",
+            ),
+        ]
+    )
+    for offset in range(0, 11):
+        session.add(
+            Price(
+                security_id=security.security_id,
+                date=start_date - timedelta(days=1) + timedelta(days=offset),
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            )
+        )
+    session.commit()
+
+    result = _backfill_values_from_transactions(
+        session, start_date, anchor_date - timedelta(days=1)
+    )
+
+    assert result[start_date] == Decimal(1000)
+    assert all(value == Decimal(1000) for value in result.values())
+
+
 def test_modeled_opening_rejects_future_snapshot_price_as_fallback(session):
     item = Item(source="plaid", plaid_item_id="future-mark-item", is_data_active=True)
     account = Account(

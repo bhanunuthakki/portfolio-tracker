@@ -162,6 +162,32 @@ def test_legacy_document_only_attestation_is_visible_but_non_certifying(session)
     )
 
 
+def test_pre_in_kind_parser_attestation_is_visible_but_non_certifying(session):
+    account = _valued_account(session, "old-robinhood-parser")
+    attestation = _attestation(
+        session,
+        account,
+        key="old-robinhood-parser",
+        start=date(2026, 1, 2),
+        end=date(2026, 1, 31),
+    )
+    attestation.source_format = "robinhood_activity_csv"
+    attestation.parser_version = "robinhood_activity_csv.v3"
+    session.commit()
+
+    result = assess_cashflow_source_coverage(
+        session,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        account_ids=frozenset({account.account_id}),
+    )
+
+    assert result.is_complete is False
+    assert result.attestations[0].validation_reason_codes == (
+        "source_attestation_parser_version_unsupported",
+    )
+
+
 def test_declared_candidate_count_must_equal_persisted_source_events(session):
     account = _valued_account(session, "count")
     attestation = _attestation(

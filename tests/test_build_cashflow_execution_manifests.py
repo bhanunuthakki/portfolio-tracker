@@ -317,6 +317,7 @@ def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> No
         event["source_code"] = source_code
     database, inventory, csv_path = _inputs(tmp_path, events)
     non_external_rows = (
+        "12/31/2024,12/31/2024,12/31/2024,SYN,private description,ACATI,2,,--\n"
         "02/01/2025,02/01/2025,02/01/2025,,private description,SLIP,,,$7.00\n"
         "02/02/2025,02/02/2025,02/02/2025,,private description,FEE,,,($2.00)\n"
         "02/03/2025,02/03/2025,02/03/2025,,private description,GOLD,,,$5.00\n"
@@ -338,7 +339,8 @@ def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> No
     assert result.event_count == 5
     manifest = json.loads(next((tmp_path / "output").glob("*.json")).read_text())
     assert manifest["cashflow_candidate_count"] == 5
-    assert manifest["source_row_count"] == 9
+    assert manifest["source_row_count"] == 10
+    assert manifest["parser_version"] == "robinhood_activity_csv.v4"
     assert [event["source_code"] for event in manifest["events"]] == [
         "ACH",
         "MTCH",
@@ -361,6 +363,71 @@ def test_nonnumeric_amount_fails_closed_for_supported_external_cash_code(
 
     with pytest.raises(builder.BuildError, match="csv_amount_invalid"):
         builder._parse_csv(csv_path)
+
+
+@pytest.mark.parametrize(
+    ("source_code", "instrument", "quantity"),
+    (
+        ("ACATI", "", "2"),
+        ("ACATI", "SYN", ""),
+        ("ACH", "SYN", "2"),
+    ),
+)
+def test_nonnumeric_allowlisted_row_requires_sufficient_in_kind_evidence(
+    tmp_path: Path,
+    source_code: str,
+    instrument: str,
+    quantity: str,
+) -> None:
+    csv_path = tmp_path / "insufficient-in-kind.csv"
+    csv_path.write_text(
+        "Activity Date,Process Date,Settle Date,Instrument,Description,"
+        "Trans Code,Quantity,Price,Amount\n"
+        f"02/01/2025,02/01/2025,02/01/2025,{instrument},private description,"
+        f"{source_code},{quantity},,--\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(builder.BuildError, match="csv_amount_invalid"):
+        builder._parse_csv(csv_path)
+
+
+def test_in_kind_transfer_inside_requested_window_fails_closed(tmp_path: Path) -> None:
+    events = _events(1)
+    database, inventory, csv_path = _inputs(tmp_path, events)
+    with csv_path.open("a", encoding="utf-8") as handle:
+        handle.write("02/01/2025,02/01/2025,02/01/2025,SYN,private description,ACATI,2,,--\n")
+    inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
+    inventory_payload["source_document_sha256"] = _sha256(csv_path)
+    inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
+
+    with pytest.raises(builder.BuildError, match="in_kind_transfer_inside_requested_window"):
+        builder.build_execution_manifests(
+            database,
+            [inventory],
+            [csv_path],
+            tmp_path / "output",
+        )
+
+
+def test_blank_amount_is_accepted_for_proven_acati_in_kind_row_outside_window(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "blank-in-kind-amount.csv"
+    csv_path.write_text(
+        "Activity Date,Process Date,Settle Date,Instrument,Description,"
+        "Trans Code,Quantity,Price,Amount\n"
+        "12/31/2024,12/31/2024,12/31/2024,SYN,private description,ACATI,2,,\n",
+        encoding="utf-8",
+    )
+
+    _source_hash, rows = builder._parse_csv(csv_path)
+
+    assert len(rows) == 1
+    assert rows[0].is_in_kind_transfer is True
+    assert rows[0].is_cashflow_candidate is False
+    assert rows[0].signed_amount is None
+    assert len(rows[0].source_row_sha256) == 64
 
 
 def test_shifted_provider_date_is_deduplicated_and_recorded(tmp_path: Path) -> None:

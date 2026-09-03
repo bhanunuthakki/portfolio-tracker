@@ -46,7 +46,7 @@ from portfolio_tracker.models import (  # noqa: E402
 from portfolio_tracker.services.active_items import valued_account_ids  # noqa: E402
 
 EXPECTED_ALEMBIC_REVISION = "0026"
-PARSER_VERSION = "robinhood_activity_csv.v3"
+PARSER_VERSION = "robinhood_activity_csv.v4"
 SOURCE_TIMEZONE = "America/New_York"
 _DATE_SHIFT_DAYS = 14
 _HEADERS: tuple[str, ...] = (
@@ -68,6 +68,7 @@ _STATUS_ORDER = (
     "unresolved",
 )
 _SUPPORTED_EXTERNAL_CASH_CODES = frozenset({"ACH", "MTCH", "ACATI", "DRFRO", "CFIR"})
+_SUPPORTED_IN_KIND_TRANSFER_CODES = frozenset({"ACATI"})
 
 
 class BuildError(RuntimeError):
@@ -220,6 +221,7 @@ class SourceRow:
     signed_amount: Decimal | None
     source_row_sha256: str
     is_cashflow_candidate: bool
+    is_in_kind_transfer: bool
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,15 @@ def _parse_amount(value: str) -> Decimal:
     return -result if negative else result
 
 
+def _is_nonzero_numeric_quantity(value: str) -> bool:
+    normalized = value.strip().replace(",", "")
+    try:
+        quantity = Decimal(normalized)
+    except InvalidOperation:
+        return False
+    return quantity.is_finite() and quantity != 0
+
+
 def _parse_optional_date(value: str) -> date | None:
     normalized = value.strip()
     if not normalized:
@@ -340,10 +351,17 @@ def _parse_csv(path: Path) -> tuple[str, tuple[SourceRow, ...]]:
         source_code = record[5].strip()
         if not source_code or len(source_code) > 32:
             raise BuildError("csv_source_code_invalid")
+        is_in_kind_transfer = False
         try:
             signed_amount = _parse_amount(record[8])
         except BuildError:
-            if source_code in _SUPPORTED_EXTERNAL_CASH_CODES:
+            is_in_kind_transfer = (
+                source_code in _SUPPORTED_IN_KIND_TRANSFER_CODES
+                and record[8].strip() in {"", "--"}
+                and bool(record[3].strip())
+                and _is_nonzero_numeric_quantity(record[6])
+            )
+            if source_code in _SUPPORTED_EXTERNAL_CASH_CODES and not is_in_kind_transfer:
                 raise
             signed_amount = None
         rows.append(
@@ -360,6 +378,7 @@ def _parse_csv(path: Path) -> tuple[str, tuple[SourceRow, ...]]:
                     and signed_amount is not None
                     and signed_amount != 0
                 ),
+                is_in_kind_transfer=is_in_kind_transfer,
             )
         )
     return _sha256(raw), tuple(rows)
@@ -375,6 +394,16 @@ def _load_inventory(path: Path) -> EvidenceInventory:
 def _match_source_rows(
     inventory: EvidenceInventory, rows: tuple[SourceRow, ...]
 ) -> tuple[tuple[EvidenceEvent, SourceRow], ...]:
+    # A fully identified in-kind ACATI row outside the requested performance
+    # window is retained and hashed as source evidence, but is not a monetary
+    # cash flow.  Inside the window it must be reconciled explicitly because
+    # silently omitting transferred positions could distort return attribution.
+    if any(
+        row.is_in_kind_transfer
+        and inventory.coverage_start <= row.activity_date <= inventory.coverage_end
+        for row in rows
+    ):
+        raise BuildError("in_kind_transfer_inside_requested_window")
     matched: list[tuple[EvidenceEvent, SourceRow]] = []
     used: set[int] = set()
     for event in inventory.events:
