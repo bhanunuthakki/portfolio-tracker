@@ -246,9 +246,18 @@ def _seed(
             adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
         )
 
-    benchmark_dates = {analytics_start + timedelta(days=offset) for offset in range(0, 366, 7)} | {
+    from portfolio_tracker.services.performance import (
+        _is_us_market_session,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    position_dates = {analytics_start + timedelta(days=offset) for offset in range(0, 366, 7)} | {
         trade_date,
         FIXTURE_TODAY,
+    }
+    benchmark_dates = {
+        analytics_start + timedelta(days=offset)
+        for offset in range(366)
+        if _is_us_market_session(analytics_start + timedelta(days=offset))
     }
 
     def stepped_benchmark(symbol: str, d: date) -> Benchmark:
@@ -267,8 +276,8 @@ def _seed(
 
     session.add_all(
         [
-            *(stepped_position(stock_a, d) for d in sorted(benchmark_dates)),
-            *(stepped_position(stock_b, d) for d in sorted(benchmark_dates)),
+            *(stepped_position(stock_a, d) for d in sorted(position_dates)),
+            *(stepped_position(stock_b, d) for d in sorted(position_dates)),
             *(stepped_benchmark("SPY", d) for d in sorted(benchmark_dates)),
             *(stepped_benchmark("QQQ", d) for d in sorted(benchmark_dates)),
         ]

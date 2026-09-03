@@ -228,6 +228,16 @@ class PerformanceDatedCashflow(BaseModel):
     amount: Decimal
 
 
+class PerformanceBenchmarkPriceInput(BaseModel):
+    """A benchmark close resolved for one valuation or flow-deployment date."""
+
+    ticker: str
+    target_date: date
+    source_date: date
+    close: Decimal
+    resolution: Literal["same_day_close", "previous_market_close"]
+
+
 class PerformanceBenchmarkEquation(BaseModel):
     """One cash-flow-matched counterfactual under the shared Dietz basis."""
 
@@ -239,6 +249,7 @@ class PerformanceBenchmarkEquation(BaseModel):
     percentage_point_alpha: Decimal
     equation_residual: Decimal
     price_input_id: str
+    price_inputs: list[PerformanceBenchmarkPriceInput]
 
 
 class PerformanceEquationReceipt(BaseModel):
@@ -250,7 +261,7 @@ class PerformanceEquationReceipt(BaseModel):
     included_account_ids: list[int]
     requested_start_date: date
     requested_end_date: date
-    benchmark_price_max_age_days: int
+    benchmark_price_resolution_policy: Literal["same_day_or_previous_us_market_close"]
     opening_value: Decimal
     dated_external_cashflows: list[PerformanceDatedCashflow]
     net_external_cashflow_in: Decimal
@@ -278,6 +289,25 @@ class PerformanceEquationReceipt(BaseModel):
         for benchmark in (self.spy, self.qqq, self.policy):
             if benchmark is None:
                 continue
+            if not benchmark.price_inputs:
+                raise ValueError(f"{benchmark.benchmark} price inputs must not be empty")
+            for price_input in benchmark.price_inputs:
+                if price_input.close <= 0:
+                    raise ValueError(
+                        f"{benchmark.benchmark} price inputs must contain positive closes"
+                    )
+                if (
+                    price_input.resolution == "same_day_close"
+                    and price_input.source_date != price_input.target_date
+                ):
+                    raise ValueError(
+                        f"{benchmark.benchmark} same-day price input dates do not match"
+                    )
+                if (
+                    price_input.resolution == "previous_market_close"
+                    and price_input.source_date >= price_input.target_date
+                ):
+                    raise ValueError(f"{benchmark.benchmark} prior-close price input is not prior")
             if benchmark.ending_value - self.opening_value - net_flow != benchmark.investment_gain:
                 raise ValueError(f"{benchmark.benchmark} value bridge does not reconcile")
             if benchmark.equation_residual != 0:

@@ -52,12 +52,12 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
-    PortfolioValueDaily,
     Price,
     Security,
 )
 from portfolio_tracker.schemas import (
     PerformanceBenchmarkEquation,
+    PerformanceBenchmarkPriceInput,
     PerformanceDatedCashflow,
     PerformanceEquationReceipt,
     PerformancePoint,
@@ -89,6 +89,7 @@ _PARTIAL_SNAPSHOT_START_DATE = "partial_snapshot_start_date"
 _PARTIAL_SNAPSHOT_END_DATE = "partial_snapshot_end_date"
 _MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE = "modeled_opening_account_coverage_incomplete"
 _MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE = "modeled_opening_valuation_coverage_incomplete"
+_UNPRICEABLE_HOLDING_SNAPSHOT = "unpriceable_holding_snapshot"
 
 _ValueProvenance = Literal["observed_complete_snapshot", "modeled_transaction_walkback"]
 _OBSERVED_VALUE: _ValueProvenance = "observed_complete_snapshot"
@@ -97,10 +98,9 @@ _SPY_BENCHMARK_PRICE_UNAVAILABLE = "spy_benchmark_price_unavailable"
 _QQQ_BENCHMARK_PRICE_UNAVAILABLE = "qqq_benchmark_price_unavailable"
 _POLICY_BENCHMARK_PRICE_UNAVAILABLE = "policy_benchmark_price_unavailable"
 
-# A 14-calendar-day window covers weekends, exchange holidays, and short data
-# ingestion delays without accepting an old mark as current. Every displayed
-# valuation date and every dated flow deployment must resolve inside it.
-BENCHMARK_PRICE_MAX_AGE_DAYS = 14
+# Query cushion only. Resolution below accepts exactly the target market close
+# or, for a weekend/known US-market holiday, the immediately preceding close.
+_BENCHMARK_QUERY_LOOKBACK_DAYS = 7
 _EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE = "external_flow_source_coverage_incomplete"
 
 
@@ -256,36 +256,53 @@ def compute_performance_series(
     source_coverage_read = source_coverage_out(source_coverage)
     value_assessment = _daily_portfolio_value_assessment(session, start_date, end_date)
     daily_value = value_assessment.values
-    if not daily_value:
-        no_value_reasons = set(value_assessment.calculation_reason_codes) or {_NO_PORTFOLIO_VALUES}
-        if not source_coverage.is_complete:
-            no_value_reasons.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
-        return PerformanceSeries(
-            methodology="performance.modified_dietz",
-            methodology_version="2",
-            calculation_status="unavailable",
-            calculation_reason_codes=sorted(no_value_reasons),
-            start_date=start_date,
-            end_date=end_date,
-            base_value=Decimal(0),
-            net_external_cashflow_in=None,
-            backfill_start_unreliable=False,
-            opening_value_provenance=None,
-            ending_value_provenance=None,
-            valuation_account_ids=list(value_assessment.valuation_account_ids),
-            points=[],
-            equation_receipt=None,
-            source_coverage=source_coverage_read,
-        )
+    opening_provenance = value_assessment.provenance.get(start_date)
+    ending_provenance = value_assessment.provenance.get(end_date)
+    cashflow_assessment = _daily_external_cashflow_assessment(session, start_date, end_date)
+    daily_cashflow = cashflow_assessment.cashflows
+    benchmark_series = _benchmark_series(session, start_date, end_date)
+    policy_weights = load_policy_weights(session)
 
+    # Gather every independently assessable prerequisite before returning for
+    # an unsupported valuation boundary. This gives reconciliation one closure
+    # packet instead of revealing ledger and benchmark gaps one retry at a time.
     boundary_reason_codes = set(value_assessment.calculation_reason_codes)
+    boundary_reason_codes.update(cashflow_assessment.calculation_reason_codes)
+    if not daily_value:
+        boundary_reason_codes.add(_NO_PORTFOLIO_VALUES)
     if start_date not in daily_value:
         boundary_reason_codes.add(_PORTFOLIO_START_VALUE_UNAVAILABLE)
     if end_date not in daily_value:
         boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
+    if daily_value and ending_provenance != _OBSERVED_VALUE:
+        boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
     if not source_coverage.is_complete:
         boundary_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
-    if boundary_reason_codes:
+
+    preliminary_price_dates = sorted(
+        {start_date, end_date, *daily_value}
+        | {flow_date for flow_date in daily_cashflow if start_date < flow_date <= end_date}
+    )
+    if _resolved_price_inputs(benchmark_series.get("SPY", {}), preliminary_price_dates) is None:
+        boundary_reason_codes.add(_SPY_BENCHMARK_PRICE_UNAVAILABLE)
+    if _resolved_price_inputs(benchmark_series.get("QQQ", {}), preliminary_price_dates) is None:
+        boundary_reason_codes.add(_QQQ_BENCHMARK_PRICE_UNAVAILABLE)
+    required_policy_tickers = {ticker for ticker, weight in policy_weights.items() if weight > 0}
+    if any(
+        _resolved_price_inputs(benchmark_series.get(ticker, {}), preliminary_price_dates) is None
+        for ticker in required_policy_tickers
+    ):
+        boundary_reason_codes.add(_POLICY_BENCHMARK_PRICE_UNAVAILABLE)
+
+    has_valuation_boundary_failure = (
+        not daily_value
+        or start_date not in daily_value
+        or end_date not in daily_value
+        or ending_provenance != _OBSERVED_VALUE
+        or bool(value_assessment.calculation_reason_codes)
+        or not source_coverage.is_complete
+    )
+    if has_valuation_boundary_failure:
         return PerformanceSeries(
             methodology="performance.modified_dietz",
             methodology_version="2",
@@ -310,29 +327,13 @@ def compute_performance_series(
             ],
             earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
             net_external_cashflow_in=None,
-            backfill_start_unreliable=(
-                value_assessment.provenance.get(start_date) != _OBSERVED_VALUE
-            ),
-            opening_value_provenance=value_assessment.provenance.get(start_date),
-            ending_value_provenance=value_assessment.provenance.get(end_date),
+            backfill_start_unreliable=(opening_provenance != _OBSERVED_VALUE),
+            opening_value_provenance=opening_provenance,
+            ending_value_provenance=ending_provenance,
             valuation_account_ids=list(value_assessment.valuation_account_ids),
             equation_receipt=None,
             source_coverage=source_coverage_read,
         )
-
-    valuation_reason_codes = set(value_assessment.calculation_reason_codes)
-    opening_provenance = value_assessment.provenance.get(start_date)
-    ending_provenance = value_assessment.provenance.get(end_date)
-    if start_date not in daily_value:
-        valuation_reason_codes.add(_PORTFOLIO_START_VALUE_UNAVAILABLE)
-    if end_date not in daily_value:
-        valuation_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
-    if ending_provenance != _OBSERVED_VALUE:
-        valuation_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
-
-    cashflow_assessment = _daily_external_cashflow_assessment(session, start_date, end_date)
-    daily_cashflow = cashflow_assessment.cashflows
-    benchmark_series = _benchmark_series(session, start_date, end_date)
 
     sorted_dates = sorted(daily_value.keys())
 
@@ -371,7 +372,6 @@ def compute_performance_series(
         else daily_value_active
     )
 
-    policy_weights = load_policy_weights(session)
     required_price_dates = sorted(set(sorted_dates) | set(daily_cashflow))
     spy_price_inputs = _resolved_price_inputs(benchmark_series.get("SPY", {}), required_price_dates)
     qqq_price_inputs = _resolved_price_inputs(benchmark_series.get("QQQ", {}), required_price_dates)
@@ -384,7 +384,6 @@ def compute_performance_series(
             policy_price_inputs[ticker] = resolved
 
     calculation_reason_codes = set(cashflow_assessment.calculation_reason_codes)
-    calculation_reason_codes.update(valuation_reason_codes)
     if spy_price_inputs is None:
         calculation_reason_codes.add(_SPY_BENCHMARK_PRICE_UNAVAILABLE)
     if qqq_price_inputs is None:
@@ -573,6 +572,24 @@ def _price_input_id(
     )
 
 
+def _price_input_rows(
+    ticker: str,
+    resolved_prices: dict[date, tuple[date, Decimal]],
+) -> list[PerformanceBenchmarkPriceInput]:
+    return [
+        PerformanceBenchmarkPriceInput(
+            ticker=ticker,
+            target_date=target_date,
+            source_date=source_date,
+            close=price,
+            resolution=(
+                "same_day_close" if target_date == source_date else "previous_market_close"
+            ),
+        )
+        for target_date, (source_date, price) in sorted(resolved_prices.items())
+    ]
+
+
 def _build_benchmark_equation(
     *,
     benchmark: str,
@@ -583,6 +600,7 @@ def _build_benchmark_equation(
     portfolio_return_pct: Decimal,
     return_pct: Decimal,
     price_input_id: str,
+    price_inputs: list[PerformanceBenchmarkPriceInput],
 ) -> PerformanceBenchmarkEquation:
     investment_gain = ending_value - opening_value - net_external_cashflow
     return PerformanceBenchmarkEquation(
@@ -594,6 +612,7 @@ def _build_benchmark_equation(
         percentage_point_alpha=portfolio_return_pct - return_pct,
         equation_residual=(ending_value - opening_value - net_external_cashflow - investment_gain),
         price_input_id=price_input_id,
+        price_inputs=price_inputs,
     )
 
 
@@ -648,6 +667,7 @@ def _build_equation_receipt(
         portfolio_return_pct=portfolio_return_pct,
         return_pct=spy_return_pct,
         price_input_id=_price_input_id("SPY", spy_price_inputs),
+        price_inputs=_price_input_rows("SPY", spy_price_inputs),
     )
     qqq = _build_benchmark_equation(
         benchmark="QQQ",
@@ -658,6 +678,7 @@ def _build_equation_receipt(
         portfolio_return_pct=portfolio_return_pct,
         return_pct=qqq_return_pct,
         price_input_id=_price_input_id("QQQ", qqq_price_inputs),
+        price_inputs=_price_input_rows("QQQ", qqq_price_inputs),
     )
     policy: PerformanceBenchmarkEquation | None = None
     if policy_equivalent and policy_return_pct is not None:
@@ -678,6 +699,11 @@ def _build_equation_receipt(
             portfolio_return_pct=portfolio_return_pct,
             return_pct=policy_return_pct,
             price_input_id=policy_input_id,
+            price_inputs=[
+                row
+                for ticker, resolved in sorted(policy_price_inputs.items())
+                for row in _price_input_rows(ticker, resolved)
+            ],
         )
     calculation_id = _stable_input_id(
         "performance-equation-receipt-v2",
@@ -706,7 +732,7 @@ def _build_equation_receipt(
         included_account_ids=list(cashflow_assessment.account_ids),
         requested_start_date=start_date,
         requested_end_date=end_date,
-        benchmark_price_max_age_days=BENCHMARK_PRICE_MAX_AGE_DAYS,
+        benchmark_price_resolution_policy="same_day_or_previous_us_market_close",
         opening_value=base_value,
         dated_external_cashflows=[
             PerformanceDatedCashflow(date=flow_date, amount=amount)
@@ -1016,11 +1042,7 @@ def _policy_matched_value(
         total = Decimal(0)
         for lot in lots:
             for ticker, qty in lot.items():
-                price_today = _last_known_price_within(
-                    benchmark_series.get(ticker, {}),
-                    current_date,
-                    days=BENCHMARK_PRICE_MAX_AGE_DAYS,
-                )
+                price_today = _benchmark_price(benchmark_series.get(ticker, {}), current_date)
                 if price_today is None:
                     continue
                 total += qty * price_today
@@ -1045,7 +1067,7 @@ def _build_lot_renormalized(
     surviving_weight = Decimal(0)
     for ticker, weight in weights.items():
         closes = benchmark_series.get(ticker, {})
-        price = _last_known_price_within(closes, on_date, days=BENCHMARK_PRICE_MAX_AGE_DAYS)
+        price = _benchmark_price(closes, on_date)
         if price is None:
             continue
         priceable.append((ticker, weight, price))
@@ -1078,14 +1100,10 @@ def _money_flow_matched_value(
         return {}
     start_date = sorted_dates[0]
     if any(
-        _last_known_price_within(benchmark_closes, current_date, days=BENCHMARK_PRICE_MAX_AGE_DAYS)
-        is None
-        for current_date in sorted_dates
+        _benchmark_price(benchmark_closes, current_date) is None for current_date in sorted_dates
     ):
         return {}
-    base_price = _last_known_price_within(
-        benchmark_closes, start_date, days=BENCHMARK_PRICE_MAX_AGE_DAYS
-    )
+    base_price = _benchmark_price(benchmark_closes, start_date)
     if base_price is None:
         return {}
 
@@ -1105,16 +1123,12 @@ def _money_flow_matched_value(
             and cashflow_events[cashflow_index][0] <= current_date
         ):
             cashflow_date, cf = cashflow_events[cashflow_index]
-            cf_price = _last_known_price_within(
-                benchmark_closes, cashflow_date, days=BENCHMARK_PRICE_MAX_AGE_DAYS
-            )
+            cf_price = _benchmark_price(benchmark_closes, cashflow_date)
             if cf_price is None:
                 return {}
             lots.append((cashflow_date, cf / cf_price))
             cashflow_index += 1
-        price_today = _last_known_price_within(
-            benchmark_closes, current_date, days=BENCHMARK_PRICE_MAX_AGE_DAYS
-        )
+        price_today = _benchmark_price(benchmark_closes, current_date)
         if price_today is None:
             continue
         total_shares = sum((qty for _, qty in lots), Decimal(0))
@@ -1624,24 +1638,19 @@ def effective_classification(
 def _daily_portfolio_value(  # pyright: ignore[reportUnusedFunction]
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    """Daily total portfolio value across three sources, in priority order:
+    """Daily total portfolio value across two certified sources:
 
     1. **`holdings_snapshots`** (forward) — real broker data for the date.
        Authoritative whenever it exists. Includes the day's late-arriving
        SnapTrade pulls if the daily-refresh cron has run.
-    2. **`portfolio_values_daily`** (cache) — pre-baked from earlier runs.
-       Used only for dates with no forward snapshot. Avoids re-walking
-       transactions for old dates that are otherwise stable.
-    3. **Transaction walk-back** — reconstructs anything still missing
+    2. **Transaction walk-back** — reconstructs anything still missing
        before the earliest snapshot, with cash adjustment so V_start
        doesn't collapse on net deployment.
 
-    Cache must NEVER override forward snapshots. Earlier versions of this
-    function did `merged.update(cached)` which clobbered fresh snapshot
-    data with stale cached values — every time the SnapTrade leg of the
-    daily refresh wrote new rows for "today," the next chart load would
-    show the older mid-morning V instead of the post-sync V, manifesting
-    as a fake $80k drop on the chart.
+    Unversioned `portfolio_values_daily` backfill rows are deliberately not
+    consumed here. They cannot prove which transactions, owner overrides,
+    prices, or account universe produced them, so a later correction could
+    otherwise leave certified performance using stale modeled values.
     """
     return _daily_portfolio_value_assessment(session, start_date, end_date).values
 
@@ -1659,25 +1668,22 @@ def _daily_portfolio_value_assessment(
     accts = valued_account_ids(session)
     account_ids = tuple(sorted(accts))
     forward = _forward_values_from_snapshots(session, start_date, end_date)
-    cached_rows = _cached_daily_value_rows(session, start_date, end_date)
-    cached = {d: value for d, value, source in cached_rows if source == "backfill"}
-
-    # Snapshot wins on overlap; cache fills anything the snapshot missed.
-    merged: dict[date, Decimal] = dict(cached)
-    merged.update(forward)
-    provenance: dict[date, _ValueProvenance] = {d: _MODELED_VALUE for d in cached}
-    provenance.update({d: _OBSERVED_VALUE for d in forward})
+    merged: dict[date, Decimal] = dict(forward)
+    provenance: dict[date, _ValueProvenance] = {d: _OBSERVED_VALUE for d in forward}
 
     snapshot_candidates = _snapshot_dates(session, start_date, end_date)
     partial = partial_snapshot_dates(session, snapshot_candidates)
+    unpriceable = unpriceable_snapshot_dates(session, snapshot_candidates)
     reasons: set[str] = set()
-    for partial_date in partial:
-        merged.pop(partial_date, None)
-        provenance.pop(partial_date, None)
+    for unsupported_date in set(partial) | unpriceable:
+        merged.pop(unsupported_date, None)
+        provenance.pop(unsupported_date, None)
     if start_date in partial:
         reasons.add(_PARTIAL_SNAPSHOT_START_DATE)
     if end_date in partial:
         reasons.add(_PARTIAL_SNAPSHOT_END_DATE)
+    if unpriceable:
+        reasons.add(_UNPRICEABLE_HOLDING_SNAPSHOT)
 
     if (
         snapshot_candidates
@@ -1699,16 +1705,16 @@ def _daily_portfolio_value_assessment(
             and start_date not in backfill
         ):
             reasons.add(_MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE)
-        # Don't overwrite snapshot or cache rows we already have.
+        # Don't overwrite observed snapshot rows we already have.
         for d, v in backfill.items():
             merged.setdefault(d, v)
             provenance.setdefault(d, _MODELED_VALUE)
 
     # A partial broker observation is evidence that the date is incomplete;
     # never replace it with a modeled/cache value after gap filling.
-    for partial_date in partial:
-        merged.pop(partial_date, None)
-        provenance.pop(partial_date, None)
+    for unsupported_date in set(partial) | unpriceable:
+        merged.pop(unsupported_date, None)
+        provenance.pop(unsupported_date, None)
 
     if (
         provenance.get(start_date) == _MODELED_VALUE
@@ -1724,19 +1730,6 @@ def _daily_portfolio_value_assessment(
         valuation_account_ids=account_ids,
         calculation_reason_codes=tuple(sorted(reasons)),
     )
-
-
-def _cached_daily_value_rows(
-    session: Session, start_date: date, end_date: date
-) -> list[tuple[date, Decimal, str]]:
-    rows = session.execute(
-        select(
-            PortfolioValueDaily.date, PortfolioValueDaily.total_value, PortfolioValueDaily.source
-        )
-        .where(PortfolioValueDaily.date >= start_date)
-        .where(PortfolioValueDaily.date <= end_date)
-    ).all()
-    return [(d, Decimal(v), source) for d, v, source in rows]
 
 
 def _snapshot_dates(session: Session, start_date: date, end_date: date) -> set[date]:
@@ -1777,7 +1770,33 @@ def partial_snapshot_dates(session: Session, candidates: set[date]) -> dict[date
 
 
 def _complete_snapshot_dates(session: Session, candidates: set[date]) -> frozenset[date]:
-    return frozenset(candidates - set(partial_snapshot_dates(session, candidates)))
+    return frozenset(
+        candidates
+        - set(partial_snapshot_dates(session, candidates))
+        - unpriceable_snapshot_dates(session, candidates)
+    )
+
+
+def unpriceable_snapshot_dates(session: Session, candidates: set[date]) -> set[date]:
+    """Dates containing a nonzero holding with no usable broker valuation."""
+    if not candidates:
+        return set()
+    accts = valued_account_ids(session)
+    if not accts:
+        return set()
+    return set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date.in_(candidates))
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .where(HoldingSnapshot.quantity != 0)
+            .where(HoldingSnapshot.institution_value.is_(None))
+            .where(HoldingSnapshot.institution_price.is_(None))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
 
 
 def _reconstruction_anchor_date(session: Session) -> date | None:
@@ -1882,59 +1901,25 @@ def _backfill_values_from_transactions(
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     daily_cash_adj: dict[date, Decimal] = {}
     rolling_positions = dict(positions)
-    first_tx_by_account: dict[int, date] = {
-        account_id: first
-        for account_id, first in session.execute(
-            select(InvestmentTransaction.account_id, func.min(InvestmentTransaction.date))
-            .where(InvestmentTransaction.account_id.in_(accts))
-            .group_by(InvestmentTransaction.account_id)
-        ).all()
-    }
-    first_external_flow_accounts: set[int] = set()
-    if first_tx_by_account:
-        first_transactions = (
-            session.execute(
-                select(InvestmentTransaction).where(
-                    InvestmentTransaction.account_id.in_(first_tx_by_account)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        for first_tx in first_transactions:
-            if first_tx.date != first_tx_by_account[first_tx.account_id]:
-                continue
-            decision = external_flow_ledger.classify_transaction_cashflow(
-                first_tx.type,
-                first_tx.subtype,
-                Decimal(first_tx.amount),
-                override=tx_overrides.get(first_tx.plaid_investment_transaction_id),
-                name=first_tx.name,
-            )
-            if decision is not None and decision.classification != "internal":
-                first_external_flow_accounts.add(first_tx.account_id)
     rolling_cash_by_account: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
 
-    def _clamped_cash_adj(on_date: date) -> Decimal:
-        return sum(
-            (
-                adjustment
-                for account_id, adjustment in rolling_cash_by_account.items()
-                if first_tx_by_account.get(account_id, date.min) <= on_date
-                or account_id in first_external_flow_accounts
-            ),
-            Decimal(0),
-        )
+    def _cash_adjustment() -> Decimal:
+        # Every reversed transaction changes the prior-day cash state. Do not
+        # suppress the adjustment merely because the first retained row is a
+        # BUY: that is precisely the deployment whose pre-trade cash must keep
+        # the opening book value intact. Certified callers separately require
+        # approved source coverage for the requested history window.
+        return sum(rolling_cash_by_account.values(), Decimal(0))
 
     cursor_date = anchor_date - timedelta(days=1)
     daily_quantities[cursor_date] = dict(rolling_positions)
-    daily_cash_adj[cursor_date] = _clamped_cash_adj(cursor_date)
+    daily_cash_adj[cursor_date] = _cash_adjustment()
 
     for tx in backward_tx:
         while cursor_date > tx.date:
             cursor_date -= timedelta(days=1)
             daily_quantities[cursor_date] = dict(rolling_positions)
-            daily_cash_adj[cursor_date] = _clamped_cash_adj(cursor_date)
+            daily_cash_adj[cursor_date] = _cash_adjustment()
 
         if tx.security_id is not None and tx.security_id not in cash_equivalent_security_ids:
             delta = _reverse_transaction_quantity(tx)
@@ -1960,7 +1945,7 @@ def _backfill_values_from_transactions(
     while cursor_date > start_date:
         cursor_date -= timedelta(days=1)
         daily_quantities[cursor_date] = dict(rolling_positions)
-        daily_cash_adj[cursor_date] = _clamped_cash_adj(cursor_date)
+        daily_cash_adj[cursor_date] = _cash_adjustment()
 
     return _value_quantities_with_prices(
         session, daily_quantities, daily_cash_adj, start_date, end_date
@@ -2227,24 +2212,116 @@ def _last_known_price(series: dict[date, Decimal], target_date: date) -> Decimal
     return series[max(candidates)]
 
 
-def _last_known_price_within(
-    series: dict[date, Decimal], target_date: date, *, days: int
-) -> Decimal | None:
-    """Last close on/before target, bounded so stale marks cannot value flows."""
-    resolved = _last_known_price_point_within(series, target_date, days=days)
-    return resolved[1] if resolved is not None else None
+def _observed_fixed_holiday(on_date: date) -> date:
+    if on_date.weekday() == 5:  # Saturday -> Friday
+        return on_date - timedelta(days=1)
+    if on_date.weekday() == 6:  # Sunday -> Monday
+        return on_date + timedelta(days=1)
+    return on_date
 
 
-def _last_known_price_point_within(
-    series: dict[date, Decimal], target_date: date, *, days: int
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + 7 * (occurrence - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    last = next_month - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter date, used for the NYSE Good Friday closure."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    ell = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ell) // 451
+    month = (h + ell - 7 * m + 114) // 31
+    day = ((h + ell - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+_SPECIAL_US_MARKET_CLOSURES = frozenset(
+    {
+        date(2001, 9, 11),
+        date(2001, 9, 12),
+        date(2001, 9, 13),
+        date(2001, 9, 14),
+        date(2004, 6, 11),
+        date(2007, 1, 2),
+        date(2012, 10, 29),
+        date(2012, 10, 30),
+        date(2018, 12, 5),
+        date(2025, 1, 9),
+    }
+)
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    holidays = {
+        _observed_fixed_holiday(date(year, 1, 1)),
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),  # Good Friday
+        _last_weekday(year, 5, 0),  # Memorial Day
+        _observed_fixed_holiday(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+        _observed_fixed_holiday(date(year, 12, 25)),
+        # When next New Year's Day is Saturday, its observed closure falls in
+        # this calendar year on December 31.
+        _observed_fixed_holiday(date(year + 1, 1, 1)),
+    }
+    if year >= 2022:
+        holidays.add(_observed_fixed_holiday(date(year, 6, 19)))
+    return holidays
+
+
+def _is_us_market_session(on_date: date) -> bool:
+    if on_date.weekday() >= 5:
+        return False
+    return (
+        on_date not in _us_market_holidays(on_date.year)
+        and on_date not in _SPECIAL_US_MARKET_CLOSURES
+    )
+
+
+def _expected_benchmark_source_date(target_date: date) -> date:
+    source_date = target_date
+    while not _is_us_market_session(source_date):
+        source_date -= timedelta(days=1)
+    return source_date
+
+
+def _benchmark_price_point(
+    series: dict[date, Decimal], target_date: date
 ) -> tuple[date, Decimal] | None:
-    """Return both source date and price for a bounded positive close."""
-    earliest = target_date - timedelta(days=days)
-    candidates = [d for d, price in series.items() if earliest <= d <= target_date and price > 0]
-    if not candidates:
+    """Resolve only the exact or immediately preceding US market close."""
+    exact_price = series.get(target_date)
+    if exact_price is not None and exact_price > 0:
+        return target_date, exact_price
+    if _is_us_market_session(target_date):
         return None
-    source_date = max(candidates)
-    return source_date, series[source_date]
+    source_date = _expected_benchmark_source_date(target_date)
+    price = series.get(source_date)
+    if price is None or price <= 0:
+        return None
+    return source_date, price
+
+
+def _benchmark_price(series: dict[date, Decimal], target_date: date) -> Decimal | None:
+    resolved = _benchmark_price_point(series, target_date)
+    return resolved[1] if resolved is not None else None
 
 
 def _resolved_price_inputs(
@@ -2253,9 +2330,7 @@ def _resolved_price_inputs(
     """Resolve every required mark or return None; partial inputs are unusable."""
     resolved: dict[date, tuple[date, Decimal]] = {}
     for target_date in required_dates:
-        price_point = _last_known_price_point_within(
-            series, target_date, days=BENCHMARK_PRICE_MAX_AGE_DAYS
-        )
+        price_point = _benchmark_price_point(series, target_date)
         if price_point is None:
             return None
         resolved[target_date] = price_point
@@ -2278,7 +2353,7 @@ def _benchmark_series(
 ) -> dict[str, dict[date, Decimal]]:
     """Pull benchmark closes covering `[start_date, end_date]`.
 
-    Extends the query backward by 14 days so we can anchor a synthetic
+    Extends the query backward by seven days so we can anchor a synthetic
     benchmark portfolio whose `start_date` falls on a non-trading day
     (e.g., YTD = Jan 1, a holiday). Without this lookback, `_last_known_price`
     has no candidates ≤ start_date in the filtered dict and returns None,
@@ -2295,7 +2370,7 @@ def _benchmark_series(
             Benchmark.date,
             func.coalesce(Benchmark.total_return_close, Benchmark.close),
         )
-        .where(Benchmark.date >= start_date - timedelta(days=BENCHMARK_PRICE_MAX_AGE_DAYS))
+        .where(Benchmark.date >= start_date - timedelta(days=_BENCHMARK_QUERY_LOOKBACK_DAYS))
         .where(Benchmark.date <= end_date)
     ).all()
     out: dict[str, dict[date, Decimal]] = defaultdict(dict)

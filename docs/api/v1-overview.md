@@ -40,7 +40,7 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
-| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields unless exact requested opening/ending valuations, approved source evidence for every valued account over `(start, end]`, priceable external flows, and positive benchmark marks no more than 14 calendar days old are all available |
+| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields unless exact requested opening/ending valuations, approved source evidence for every valued account over `(start, end]`, priceable external flows, and exact same-day or immediately previous U.S.-market closes are all available |
 | `GET /api/v1/analytics/position-performance` | Split-normalized invested-position price/trade return and per-ticker dollar alpha vs cash-flow-matched price-return counterfactuals (`position_alpha.split_normalized_price_trade_modified_dietz` v3); derived fields are null with stable reason codes when share movements or price provenance cannot be reconciled |
 | `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v2); drawdown fails closed with the performance reason codes when its return index is unavailable |
 | `GET /api/v1/analytics/beta` | The regression half of `risk` alone — for consumers that don't need drawdown |
@@ -55,10 +55,16 @@ flows, ending value, investment gain, shared Modified-Dietz denominator,
 portfolio return, and SPY/QQQ/configured-policy counterfactual gains, returns,
 dollar alpha, and percentage-point alpha. Opaque SHA-256 identifiers bind the
 receipt to its flow-ledger, valuation, and resolved benchmark-price inputs.
+Each benchmark equation also exposes the target date, actual source close date,
+positive close value, and whether resolution used the same day or the immediately
+previous U.S. market close; a missing close on a market session fails closed.
 Unavailable results set the receipt and all derived point fields to null and
 return stable reason codes such as `portfolio_start_value_unavailable`,
 `portfolio_end_value_unavailable`, `spy_benchmark_price_unavailable`,
-`qqq_benchmark_price_unavailable`, and `policy_benchmark_price_unavailable`.
+`qqq_benchmark_price_unavailable`, `policy_benchmark_price_unavailable`, and
+`unpriceable_holding_snapshot`. Certified modeled boundaries are recomputed
+from current transactions, overrides, prices, and the complete observed anchor;
+unversioned `portfolio_values_daily` backfill cache rows are not consumed.
 
 **Deferred:** `GET/POST /api/v1/sync-runs` requires a run-log schema migration
 on the live database and ships with the Phase 3 migration batch (backup +

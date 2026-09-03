@@ -369,6 +369,17 @@ def test_performance_series_requires_exact_requested_valuation_boundaries(monkey
             calculation_reason_codes=(),
         ),
     )
+    closes = {
+        date(2024, 12, 31): Decimal(100),
+        date(2025, 1, 2): Decimal(100),
+        end: Decimal(100),
+    }
+    monkeypatch.setattr(
+        performance_service,
+        "_benchmark_series",
+        lambda *_args: {"SPY": closes, "QQQ": closes},
+    )
+    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
 
     series = performance_service.compute_performance_series(session, start, end)
 
@@ -496,6 +507,148 @@ def test_performance_series_requires_every_configured_policy_component(monkeypat
     assert series.equation_receipt is None
 
 
+def test_performance_series_rejects_a_missing_market_session_close(monkeypatch, session):
+    start = date(2025, 1, 6)  # Monday
+    end = date(2025, 1, 10)  # Friday
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={start: Decimal(1000), end: Decimal(1100)},
+            provenance={
+                start: "observed_complete_snapshot",
+                end: "observed_complete_snapshot",
+            },
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_external_cashflow_assessment",
+        lambda *_args: performance_service._CashflowAssessment(
+            cashflows={}, calculation_reason_codes=()
+        ),
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_benchmark_series",
+        lambda *_args: {
+            "SPY": {start: Decimal(100)},
+            "QQQ": {start: Decimal(100)},
+        },
+    )
+    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
+
+    series = performance_service.compute_performance_series(session, start, end)
+
+    assert series.calculation_status == "unavailable"
+    assert series.calculation_reason_codes == [
+        "qqq_benchmark_price_unavailable",
+        "spy_benchmark_price_unavailable",
+    ]
+    assert series.equation_receipt is None
+
+
+def test_performance_receipt_exposes_prior_market_close_resolution(monkeypatch, session):
+    prior_close = date(2025, 1, 3)  # Friday
+    start = date(2025, 1, 4)  # Saturday
+    end = date(2025, 1, 5)  # Sunday
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={start: Decimal(1000), end: Decimal(1000)},
+            provenance={
+                start: "observed_complete_snapshot",
+                end: "observed_complete_snapshot",
+            },
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_external_cashflow_assessment",
+        lambda *_args: performance_service._CashflowAssessment(
+            cashflows={}, calculation_reason_codes=()
+        ),
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_benchmark_series",
+        lambda *_args: {
+            "SPY": {prior_close: Decimal(100)},
+            "QQQ": {prior_close: Decimal(200)},
+        },
+    )
+    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
+
+    series = performance_service.compute_performance_series(session, start, end)
+
+    assert series.calculation_status == "available"
+    receipt = series.equation_receipt
+    assert receipt is not None
+    assert receipt.benchmark_price_resolution_policy == "same_day_or_previous_us_market_close"
+    assert [
+        (row.target_date, row.source_date, row.resolution)
+        for row in receipt.spy.price_inputs
+    ] == [
+        (start, prior_close, "previous_market_close"),
+        (end, prior_close, "previous_market_close"),
+    ]
+
+
+def test_benchmark_resolution_uses_prior_close_for_known_market_holiday():
+    prior_close = date(2025, 1, 17)
+    mlk_day = date(2025, 1, 20)
+
+    resolved = performance_service._resolved_price_inputs(
+        {prior_close: Decimal(100)}, [mlk_day]
+    )
+
+    assert resolved == {mlk_day: (prior_close, Decimal(100))}
+
+
+def test_boundary_failure_also_reports_independent_flow_and_benchmark_gaps(
+    monkeypatch, session
+):
+    start = date(2025, 1, 6)
+    end = date(2025, 1, 10)
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={},
+            provenance={},
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_external_cashflow_assessment",
+        lambda *_args: performance_service._CashflowAssessment(
+            cashflows={},
+            calculation_reason_codes=("external_share_movement_price_unavailable",),
+        ),
+    )
+    monkeypatch.setattr(performance_service, "_benchmark_series", lambda *_args: {})
+    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
+
+    series = performance_service.compute_performance_series(session, start, end)
+
+    assert series.calculation_status == "unavailable"
+    assert series.calculation_reason_codes == [
+        "external_share_movement_price_unavailable",
+        "no_portfolio_values",
+        "portfolio_end_value_unavailable",
+        "portfolio_start_value_unavailable",
+        "qqq_benchmark_price_unavailable",
+        "spy_benchmark_price_unavailable",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _reverse_transaction_quantity
 # ---------------------------------------------------------------------------
@@ -617,23 +770,13 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
             account_id=account.account_id,
             security_id=aapl.security_id,
             quantity=Decimal(10),
+            institution_price=Decimal(100),
+            institution_value=Decimal(1000),
         )
     )
     # Bought 4 shares for $400 on Jan 5. Walking back, positions drop to 6 but
     # the +$400 cash adjustment compensates: at a flat $100 price, V stays
     # $1000 every day (no fake ramp from the deployment).
-    session.add(
-        InvestmentTransaction(
-            plaid_investment_transaction_id="tx-marker",
-            account_id=account.account_id,
-            security_id=None,
-            date=date(2025, 1, 1),
-            type="cash",
-            subtype="dividend",
-            quantity=Decimal(0),
-            amount=Decimal(0),
-        )
-    )
     session.add(
         InvestmentTransaction(
             plaid_investment_transaction_id="tx-buy",
@@ -660,6 +803,65 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
     assert result[date(2025, 1, 4)] == Decimal(1000)
     # Post-deployment day: positions 10 × 100, cash adj 0.
     assert result[date(2025, 1, 9)] == Decimal(1000)
+
+
+def test_modeled_values_ignore_stale_cache_after_transaction_mutation(session):
+    item = Item(source="plaid", plaid_item_id="cache-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="cache-account",
+        name="Cache test",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="cache-security",
+        ticker="CACHE",
+        type="cs",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    start = date(2025, 1, 1)
+    anchor = date(2025, 1, 10)
+    transaction = InvestmentTransaction(
+        plaid_investment_transaction_id="cache-buy",
+        account_id=account.account_id,
+        security_id=security.security_id,
+        date=date(2025, 1, 5),
+        type="buy",
+        quantity=Decimal(4),
+        amount=Decimal(400),
+    )
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=anchor,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(10),
+                institution_value=Decimal(1000),
+            ),
+            transaction,
+            PortfolioValueDaily(
+                date=start,
+                total_value=Decimal(1000),
+                total_cost_basis=None,
+                source="backfill",
+            ),
+        ]
+    )
+    for day in range(1, 11):
+        session.add(
+            Price(security_id=security.security_id, date=date(2025, 1, day), close=Decimal(100))
+        )
+    session.commit()
+
+    transaction.amount = Decimal(500)
+    session.commit()
+    assessment = performance_service._daily_portfolio_value_assessment(session, start, anchor)
+
+    assert assessment.values[start] == Decimal(1100)
+    assert assessment.provenance[start] == "modeled_transaction_walkback"
 
 
 def test_share_transfer_cashflow_nets_provider_ids_after_split_normalization(session):
@@ -1093,6 +1295,72 @@ def test_performance_rejects_partial_requested_end_boundary(session):
     assert result.ending_value_provenance is None
 
 
+def test_unpriceable_holding_makes_observed_boundary_unavailable(session):
+    item = Item(source="plaid", plaid_item_id="unpriceable-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="unpriceable-account",
+        name="Unpriceable",
+        type="investment",
+    )
+    priced = Security(
+        plaid_security_id="priced-security",
+        ticker="GOOD",
+        type="equity",
+        is_cash_equivalent=False,
+    )
+    missing = Security(
+        plaid_security_id="missing-security",
+        ticker="MISS",
+        type="equity",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, priced, missing])
+    session.flush()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 2)
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=priced.security_id,
+                quantity=Decimal(1),
+                institution_value=Decimal(100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=priced.security_id,
+                quantity=Decimal(1),
+                institution_value=Decimal(110),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=missing.security_id,
+                quantity=Decimal(1),
+                institution_value=None,
+                institution_price=None,
+            ),
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
+        ]
+    )
+    _approve_source_coverage(session, account, start, end)
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert "unpriceable_holding_snapshot" in result.calculation_reason_codes
+    assert "portfolio_end_value_unavailable" in result.calculation_reason_codes
+    assert result.ending_value_provenance is None
+    assert result.equation_receipt is None
+
+
 def test_performance_reports_observed_boundary_provenance(session):
     item = Item(source="plaid", plaid_item_id="observed-item", is_data_active=True)
     account = Account(
@@ -1172,8 +1440,10 @@ def test_performance_reports_supported_modeled_opening_provenance(session):
     session.add_all(
         [
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=date(2026, 1, 2), close=Decimal(105)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
             Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2026, 1, 2), close=Decimal(105)),
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )

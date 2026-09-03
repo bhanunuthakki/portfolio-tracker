@@ -1779,6 +1779,13 @@
             "title": "Price Input Id",
             "type": "string"
           },
+          "price_inputs": {
+            "items": {
+              "$ref": "#/components/schemas/PerformanceBenchmarkPriceInput"
+            },
+            "title": "Price Inputs",
+            "type": "array"
+          },
           "return_pct": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Return Pct",
@@ -1793,9 +1800,51 @@
           "dollar_alpha",
           "percentage_point_alpha",
           "equation_residual",
-          "price_input_id"
+          "price_input_id",
+          "price_inputs"
         ],
         "title": "PerformanceBenchmarkEquation",
+        "type": "object"
+      },
+      "PerformanceBenchmarkPriceInput": {
+        "description": "A benchmark close resolved for one valuation or flow-deployment date.",
+        "properties": {
+          "close": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Close",
+            "type": "string"
+          },
+          "resolution": {
+            "enum": [
+              "same_day_close",
+              "previous_market_close"
+            ],
+            "title": "Resolution",
+            "type": "string"
+          },
+          "source_date": {
+            "format": "date",
+            "title": "Source Date",
+            "type": "string"
+          },
+          "target_date": {
+            "format": "date",
+            "title": "Target Date",
+            "type": "string"
+          },
+          "ticker": {
+            "title": "Ticker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "target_date",
+          "source_date",
+          "close",
+          "resolution"
+        ],
+        "title": "PerformanceBenchmarkPriceInput",
         "type": "object"
       },
       "PerformanceDatedCashflow": {
@@ -1822,9 +1871,10 @@
       "PerformanceEquationReceipt": {
         "description": "Atomic, reproducible bridge for one whole-portfolio calculation.",
         "properties": {
-          "benchmark_price_max_age_days": {
-            "title": "Benchmark Price Max Age Days",
-            "type": "integer"
+          "benchmark_price_resolution_policy": {
+            "const": "same_day_or_previous_us_market_close",
+            "title": "Benchmark Price Resolution Policy",
+            "type": "string"
           },
           "calculation_id": {
             "title": "Calculation Id",
@@ -1921,7 +1971,7 @@
           "included_account_ids",
           "requested_start_date",
           "requested_end_date",
-          "benchmark_price_max_age_days",
+          "benchmark_price_resolution_policy",
           "opening_value",
           "dated_external_cashflows",
           "net_external_cashflow_in",
