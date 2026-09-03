@@ -130,7 +130,10 @@ def test_drawdown_propagates_unpriceable_external_share_transfer(session):
     result = compute_drawdown(session, _START, _END)
 
     assert result.calculation_status == "unavailable"
-    assert result.calculation_reason_codes == ["external_share_movement_price_unavailable"]
+    assert result.calculation_reason_codes == [
+        "external_flow_source_coverage_incomplete",
+        "external_share_movement_price_unavailable",
+    ]
     assert result.max_drawdown_pct is None
     assert result.annualized_return_pct is None
     assert result.underwater == []

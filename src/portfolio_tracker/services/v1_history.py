@@ -18,7 +18,7 @@ import binascii
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
@@ -29,7 +29,13 @@ from portfolio_tracker.models import (
     Security,
     SecurityClassification,
 )
-from portfolio_tracker.schemas import CashFlowSourceCoverageOut
+from portfolio_tracker.schemas import (
+    CashFlowDecisionAuthorityOut,
+    CashFlowDecisionConfidenceOut,
+    CashFlowEffectiveDateBasisOut,
+    CashFlowSourceCoverageOut,
+    CashFlowTransactionOrigin,
+)
 from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
 from portfolio_tracker.services.cashflow_source_coverage import (
     assess_cashflow_source_coverage,
@@ -281,6 +287,14 @@ class CashFlowV1(BaseModel):
     valuation_price: Decimal | None
     valuation_price_date: date | None
     valuation_price_source: str | None
+    transaction_origin: CashFlowTransactionOrigin = "aggregator_transaction"
+    source_event_ids: list[str] = Field(default_factory=list)
+    source_attestation_keys: list[str] = Field(default_factory=list)
+    active_decision_keys: list[str] = Field(default_factory=list)
+    decision_authorities: list[CashFlowDecisionAuthorityOut] = []
+    decision_confidences: list[CashFlowDecisionConfidenceOut] = []
+    assumption_codes: list[str] = Field(default_factory=list)
+    effective_date_bases: list[CashFlowEffectiveDateBasisOut] = []
 
 
 class CashFlowIssueV1(BaseModel):
@@ -392,6 +406,14 @@ def build_cash_flows_page(
             valuation_price=entry.valuation_price,
             valuation_price_date=entry.valuation_price_date,
             valuation_price_source=entry.valuation_price_source,
+            transaction_origin=entry.transaction_origin,
+            source_event_ids=list(entry.source_event_ids),
+            source_attestation_keys=list(entry.source_attestation_keys),
+            active_decision_keys=list(entry.active_decision_keys),
+            decision_authorities=list(entry.decision_authorities),
+            decision_confidences=list(entry.decision_confidences),
+            assumption_codes=list(entry.assumption_codes),
+            effective_date_bases=list(entry.effective_date_bases),
         )
         for entry in page
     ]

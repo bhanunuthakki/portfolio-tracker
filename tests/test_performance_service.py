@@ -16,7 +16,9 @@ from decimal import Decimal
 from portfolio_tracker.models import (
     Account,
     Benchmark,
+    CashFlowReconciliationDecision,
     CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -28,6 +30,10 @@ from portfolio_tracker.models import (
     StockSplit,
 )
 from portfolio_tracker.services import performance as performance_service
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_decision_payload_sha256,
+    canonical_source_event_set_sha256,
+)
 from portfolio_tracker.services.external_flow_ledger import classify_transaction_cashflow
 from portfolio_tracker.services.performance import (
     _backfill_values_from_transactions,
@@ -74,6 +80,16 @@ def _approve_source_coverage(session, account: Account, start: date, end: date) 
             captured_at=datetime(2026, 1, 1, tzinfo=UTC),
             approved_at=datetime(2026, 1, 2, tzinfo=UTC),
             methodology_version="1",
+            account_identity_sha256="b" * 64,
+            account_mapping_basis="owner_confirmed",
+            account_mapping_confidence="exact",
+            source_format="synthetic",
+            parser_version="test-v1",
+            source_timezone="UTC",
+            source_row_count=0,
+            cashflow_candidate_count=0,
+            source_event_set_sha256=canonical_source_event_set_sha256(()),
+            manifest_sha256="d" * 64,
         )
     )
 
@@ -324,6 +340,11 @@ def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
         (flow_date, Decimal(200)),
         (end, Decimal(-100)),
     ]
+    assert all(flow.flow_ids for flow in receipt.dated_external_cashflows)
+    assert {flow.date: flow.amount for flow in receipt.operative_external_cashflows} == {
+        flow_date: Decimal(200),
+        end: Decimal(-100),
+    }
     assert receipt.net_external_cashflow_in == Decimal(100)
     assert receipt.ending_value == Decimal(1300)
     assert receipt.investment_gain == Decimal(200)
@@ -339,6 +360,7 @@ def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
         assert benchmark.dollar_alpha == Decimal(200)
         assert benchmark.percentage_point_alpha == receipt.portfolio_return_pct
         assert benchmark.equation_residual == Decimal(0)
+        assert all(row.return_basis == "raw_price_fallback" for row in benchmark.price_inputs)
     assert receipt.policy is not None
     assert receipt.policy.ending_value == Decimal(1100)
     assert receipt.policy.investment_gain == Decimal(0)
@@ -591,8 +613,7 @@ def test_performance_receipt_exposes_prior_market_close_resolution(monkeypatch, 
     assert receipt is not None
     assert receipt.benchmark_price_resolution_policy == "same_day_or_previous_us_market_close"
     assert [
-        (row.target_date, row.source_date, row.resolution)
-        for row in receipt.spy.price_inputs
+        (row.target_date, row.source_date, row.resolution) for row in receipt.spy.price_inputs
     ] == [
         (start, prior_close, "previous_market_close"),
         (end, prior_close, "previous_market_close"),
@@ -603,9 +624,7 @@ def test_benchmark_resolution_uses_prior_close_for_known_market_holiday():
     prior_close = date(2025, 1, 17)
     mlk_day = date(2025, 1, 20)
 
-    resolved = performance_service._resolved_price_inputs(
-        {prior_close: Decimal(100)}, [mlk_day]
-    )
+    resolved = performance_service._resolved_price_inputs({prior_close: Decimal(100)}, [mlk_day])
 
     assert resolved == {mlk_day: (prior_close, Decimal(100))}
 
@@ -625,9 +644,7 @@ def test_benchmark_resolution_ignores_erroneous_non_session_row():
     assert resolved == {saturday: (prior_close, Decimal(100))}
 
 
-def test_boundary_failure_also_reports_independent_flow_and_benchmark_gaps(
-    monkeypatch, session
-):
+def test_boundary_failure_also_reports_independent_flow_and_benchmark_gaps(monkeypatch, session):
     start = date(2025, 1, 6)
     end = date(2025, 1, 10)
     monkeypatch.setattr(
@@ -805,7 +822,13 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
     )
     for day in range(1, 11):
         session.add(
-            Price(security_id=aapl.security_id, date=date(2025, 1, day), close=Decimal(100))
+            Price(
+                security_id=aapl.security_id,
+                date=date(2025, 1, day),
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            )
         )
     session.commit()
 
@@ -818,6 +841,165 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
     assert result[date(2025, 1, 4)] == Decimal(1000)
     # Post-deployment day: positions 10 × 100, cash adj 0.
     assert result[date(2025, 1, 9)] == Decimal(1000)
+
+
+def test_backfill_applies_statement_activity_date_not_later_provider_posting(session):
+    item = Item(
+        source="plaid",
+        plaid_item_id="shifted-flow-item",
+        institution_name="Broker",
+        is_data_active=True,
+    )
+    account = Account(
+        item=item,
+        plaid_account_id="shifted-flow-account",
+        name="Shifted flow",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="shifted-flow-security",
+        ticker="SHIFT",
+        type="cs",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    activity_date = date(2025, 1, 5)
+    provider_date = date(2025, 1, 8)
+    anchor_date = date(2025, 1, 10)
+    transaction_id = "provider-shifted-deposit"
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=anchor_date,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(11),
+                institution_price=Decimal(100),
+                institution_value=Decimal(1100),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id=transaction_id,
+                account_id=account.account_id,
+                security_id=None,
+                date=provider_date,
+                name="Incoming transfer",
+                quantity=Decimal(0),
+                amount=Decimal(-100),
+                type="cash",
+                subtype="transfer",
+                currency="USD",
+            ),
+        ]
+    )
+    for day in range(1, 11):
+        session.add(
+            Price(
+                security_id=security.security_id,
+                date=date(2025, 1, day),
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            )
+        )
+    attestation = CashFlowSourceAttestation(
+        attestation_key="shifted-flow-attestation",
+        account_id=account.account_id,
+        coverage_start=activity_date,
+        coverage_end=activity_date,
+        source_type="brokerage_statement",
+        source_reference="private:shifted-flow-statement",
+        source_sha256="1" * 64,
+        captured_at=datetime(2025, 1, 11, tzinfo=UTC),
+        approved_at=datetime(2025, 1, 12, tzinfo=UTC),
+        methodology_version="2",
+        account_identity_sha256="2" * 64,
+        account_mapping_basis="owner_confirmed",
+        account_mapping_confidence="exact",
+        source_format="synthetic",
+        parser_version="test-v1",
+        source_timezone="America/New_York",
+        source_row_count=1,
+        cashflow_candidate_count=1,
+        source_event_set_sha256="3" * 64,
+        manifest_sha256="4" * 64,
+    )
+    session.add(attestation)
+    session.flush()
+    event = CashFlowSourceEvent(
+        source_event_id="5" * 64,
+        attestation_id=attestation.attestation_id,
+        source_locator_kind="row",
+        source_locator="row:1",
+        source_row_ordinal=1,
+        source_row_sha256="6" * 64,
+        activity_date=activity_date,
+        source_amount=Decimal(100),
+        source_amount_sign_basis="statement_printed",
+        currency="USD",
+    )
+    decision = CashFlowReconciliationDecision(
+        decision_key="7" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id=transaction_id,
+        resolution_kind="provider_exact",
+        classification="external_in",
+        signed_external_amount=Decimal(100),
+        effective_date=activity_date,
+        effective_date_basis="source_activity",
+        effective_timezone="America/New_York",
+        decision_authority="brokerage_statement",
+        confidence="exact",
+        assumption_code="statement_activity_date",
+        methodology_version="2",
+        decision_payload_sha256="8" * 64,
+        approved_at=datetime(2025, 1, 12, tzinfo=UTC),
+    )
+    attestation.source_event_set_sha256 = canonical_source_event_set_sha256((event,))
+    decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+    session.add_all([event, decision])
+    session.commit()
+
+    result = _backfill_values_from_transactions(
+        session, date(2025, 1, 1), anchor_date - timedelta(days=1)
+    )
+
+    assert result[date(2025, 1, 4)] == Decimal(1000)
+    assert result[activity_date] == Decimal(1100)
+    assert result[date(2025, 1, 6)] == Decimal(1100)
+
+
+def test_modeled_opening_rejects_future_snapshot_price_as_fallback(session):
+    item = Item(source="plaid", plaid_item_id="future-mark-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="future-mark-account",
+        name="Future mark",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="future-mark-security",
+        ticker="FUTURE",
+        type="cs",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=date(2025, 1, 10),
+            account_id=account.account_id,
+            security_id=security.security_id,
+            quantity=Decimal(10),
+            institution_price=Decimal(100),
+            institution_value=Decimal(1000),
+        )
+    )
+    session.commit()
+
+    result = _backfill_values_from_transactions(session, date(2025, 1, 1), date(2025, 1, 9))
+
+    assert result == {}
 
 
 def test_modeled_values_ignore_stale_cache_after_transaction_mutation(session):
@@ -867,7 +1049,13 @@ def test_modeled_values_ignore_stale_cache_after_transaction_mutation(session):
     )
     for day in range(1, 11):
         session.add(
-            Price(security_id=security.security_id, date=date(2025, 1, day), close=Decimal(100))
+            Price(
+                security_id=security.security_id,
+                date=date(2025, 1, day),
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            )
         )
     session.commit()
 
@@ -1536,6 +1724,7 @@ def test_performance_reports_supported_modeled_opening_provenance(session):
 
     assert result.calculation_status == "available"
     assert result.opening_value_provenance == "modeled_transaction_walkback"
+    assert result.reconstruction_certification == "modeled_provisional"
     assert result.ending_value_provenance == "observed_complete_snapshot"
     assert result.backfill_start_unreliable is True
 

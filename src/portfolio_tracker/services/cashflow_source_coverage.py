@@ -13,15 +13,23 @@ of structural ledger issues is never treated as evidence of completeness.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio_tracker.models import CashFlowSourceAttestation, CashFlowSourceGap
+from portfolio_tracker.models import (
+    CashFlowReconciliationDecision,
+    CashFlowSourceAttestation,
+    CashFlowSourceEvent,
+    CashFlowSourceGap,
+)
 from portfolio_tracker.schemas import (
     CashFlowAccountSourceCoverageOut,
     CashFlowSourceAttestationOut,
@@ -33,6 +41,76 @@ from portfolio_tracker.schemas import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 DateRange = tuple[date, date]
+
+
+def _canonical_digest(payload: object) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _decimal_text(value: object) -> str | None:
+    if value is None:
+        return None
+    decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+    if decimal_value == 0:
+        return "0"
+    return format(decimal_value.normalize(), "f")
+
+
+def canonical_source_event_set_sha256(events: tuple[CashFlowSourceEvent, ...]) -> str:
+    """Recompute the producer's ordered source-row set commitment."""
+    return _canonical_digest(sorted(event.source_row_sha256 for event in events))
+
+
+def canonical_decision_payload_sha256(decision: CashFlowReconciliationDecision) -> str:
+    """Recompute the immutable decision payload commitment."""
+    return _canonical_digest(
+        {
+            "source_event_id": decision.source_event_id,
+            "target_transaction_id": decision.target_transaction_id,
+            "resolution_kind": decision.resolution_kind,
+            "classification": decision.classification,
+            "signed_external_amount": _decimal_text(decision.signed_external_amount),
+            "effective_date": (
+                decision.effective_date.isoformat() if decision.effective_date is not None else None
+            ),
+            "effective_date_basis": decision.effective_date_basis,
+            "effective_timezone": decision.effective_timezone,
+            "decision_authority": decision.decision_authority,
+            "confidence": decision.confidence,
+            "assumption_code": decision.assumption_code,
+            "methodology_version": decision.methodology_version,
+        }
+    )
+
+
+def decision_date_basis_matches_source(
+    decision: CashFlowReconciliationDecision,
+    event: CashFlowSourceEvent,
+) -> bool:
+    """Validate date-basis semantics that can be proven from source evidence."""
+    basis = decision.effective_date_basis
+    effective_date = decision.effective_date
+    if decision.resolution_kind == "unresolved":
+        return basis is None and effective_date is None
+    if basis == "source_activity":
+        return event.activity_date is not None and effective_date == event.activity_date
+    if basis == "source_process":
+        return event.process_date is not None and effective_date == event.process_date
+    if basis == "source_settlement":
+        return event.settlement_date is not None and effective_date == event.settlement_date
+    if basis == "provider_posting":
+        # The target transaction is loaded by the ledger and checked there.
+        return effective_date is not None and decision.target_transaction_id is not None
+    if basis == "owner_resolved":
+        return (
+            effective_date is not None
+            and decision.decision_authority == "owner_approved"
+            and bool(decision.assumption_code)
+        )
+    return False
 
 
 @dataclass(frozen=True)
@@ -57,6 +135,17 @@ class SourceAttestationEvidence:
     superseded_at: datetime | None
     superseded_by_attestation_key: str | None
     methodology_version: str
+    account_identity_sha256: str | None
+    account_mapping_basis: str | None
+    account_mapping_confidence: str | None
+    source_format: str | None
+    parser_version: str | None
+    source_timezone: str | None
+    source_row_count: int | None
+    cashflow_candidate_count: int | None
+    persisted_source_event_count: int
+    source_event_set_sha256: str | None
+    manifest_sha256: str | None
     gaps: tuple[SourceGapEvidence, ...]
     validation_reason_codes: tuple[str, ...]
 
@@ -124,6 +213,17 @@ def source_coverage_out(
                 superseded_at=row.superseded_at,
                 superseded_by_attestation_key=row.superseded_by_attestation_key,
                 methodology_version=row.methodology_version,
+                account_identity_sha256=row.account_identity_sha256,
+                account_mapping_basis=row.account_mapping_basis,
+                account_mapping_confidence=row.account_mapping_confidence,
+                source_format=row.source_format,
+                parser_version=row.parser_version,
+                source_timezone=row.source_timezone,
+                source_row_count=row.source_row_count,
+                cashflow_candidate_count=row.cashflow_candidate_count,
+                persisted_source_event_count=row.persisted_source_event_count,
+                source_event_set_sha256=row.source_event_set_sha256,
+                manifest_sha256=row.manifest_sha256,
                 gaps=[
                     CashFlowSourceGapOut(
                         start_date=gap.start_date,
@@ -174,7 +274,10 @@ def _uncovered_ranges(required: DateRange, covered: tuple[DateRange, ...]) -> tu
 
 
 def _validation_reason_codes(
-    attestation: CashFlowSourceAttestation, gaps: tuple[CashFlowSourceGap, ...]
+    attestation: CashFlowSourceAttestation,
+    gaps: tuple[CashFlowSourceGap, ...],
+    events: tuple[CashFlowSourceEvent, ...],
+    current_decisions: dict[str, tuple[CashFlowReconciliationDecision, ...]],
 ) -> tuple[str, ...]:
     reasons: set[str] = set()
     if not _SHA256_RE.fullmatch(attestation.source_sha256):
@@ -184,6 +287,64 @@ def _validation_reason_codes(
         for gap in gaps
     ):
         reasons.add("source_attestation_gap_outside_coverage")
+    enhanced_fields = (
+        attestation.account_identity_sha256,
+        attestation.account_mapping_basis,
+        attestation.account_mapping_confidence,
+        attestation.source_format,
+        attestation.parser_version,
+        attestation.source_timezone,
+        attestation.source_row_count,
+        attestation.cashflow_candidate_count,
+        attestation.source_event_set_sha256,
+        attestation.manifest_sha256,
+    )
+    if any(value is None for value in enhanced_fields):
+        reasons.add("source_attestation_event_provenance_missing")
+        return tuple(sorted(reasons))
+    if not _SHA256_RE.fullmatch(attestation.account_identity_sha256 or ""):
+        reasons.add("source_attestation_invalid_account_identity_sha256")
+    if not _SHA256_RE.fullmatch(attestation.source_event_set_sha256 or ""):
+        reasons.add("source_attestation_invalid_event_set_sha256")
+    if not _SHA256_RE.fullmatch(attestation.manifest_sha256 or ""):
+        reasons.add("source_attestation_invalid_manifest_sha256")
+    if attestation.account_mapping_confidence == "provisional":
+        reasons.add("source_attestation_account_mapping_provisional")
+    if attestation.cashflow_candidate_count != len(events):
+        reasons.add("source_attestation_candidate_count_mismatch")
+    if attestation.source_event_set_sha256 != canonical_source_event_set_sha256(events):
+        reasons.add("source_attestation_event_set_digest_mismatch")
+    for event in events:
+        if not _SHA256_RE.fullmatch(event.source_row_sha256):
+            reasons.add("source_attestation_event_invalid_row_sha256")
+        event_dates = tuple(
+            candidate
+            for candidate in (event.activity_date, event.process_date, event.settlement_date)
+            if candidate is not None
+        )
+        if not event_dates or all(
+            candidate < attestation.coverage_start or candidate > attestation.coverage_end
+            for candidate in event_dates
+        ):
+            reasons.add("source_attestation_event_outside_coverage")
+        decisions = current_decisions.get(event.source_event_id, ())
+        if not decisions:
+            reasons.add("source_attestation_event_current_decision_missing")
+            continue
+        if len(decisions) != 1:
+            reasons.add("source_attestation_event_current_decision_conflict")
+            continue
+        decision = decisions[0]
+        if decision.approved_at is None:
+            reasons.add("source_attestation_event_decision_unapproved")
+        if decision.decision_payload_sha256 != canonical_decision_payload_sha256(decision):
+            reasons.add("source_attestation_event_decision_digest_mismatch")
+        if not decision_date_basis_matches_source(decision, event):
+            reasons.add("source_attestation_event_effective_date_basis_mismatch")
+        if decision.resolution_kind == "unresolved":
+            reasons.add("source_attestation_event_decision_unresolved")
+        if decision.confidence == "provisional":
+            reasons.add("source_attestation_event_decision_provisional")
     return tuple(sorted(reasons))
 
 
@@ -240,6 +401,8 @@ def assess_cashflow_source_coverage(
     )
     attestation_ids = [row.attestation_id for row in rows]
     gaps_by_attestation: dict[int, list[CashFlowSourceGap]] = defaultdict(list)
+    events_by_attestation: dict[int, list[CashFlowSourceEvent]] = defaultdict(list)
+    current_decisions: dict[str, list[CashFlowReconciliationDecision]] = defaultdict(list)
     if attestation_ids:
         gap_rows = (
             session.execute(
@@ -256,6 +419,37 @@ def assess_cashflow_source_coverage(
         )
         for gap in gap_rows:
             gaps_by_attestation[gap.attestation_id].append(gap)
+        event_rows = (
+            session.execute(
+                select(CashFlowSourceEvent)
+                .where(CashFlowSourceEvent.attestation_id.in_(attestation_ids))
+                .order_by(
+                    CashFlowSourceEvent.attestation_id,
+                    CashFlowSourceEvent.source_event_id,
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for event in event_rows:
+            events_by_attestation[event.attestation_id].append(event)
+        event_ids = [event.source_event_id for event in event_rows]
+        if event_ids:
+            decision_rows = (
+                session.execute(
+                    select(CashFlowReconciliationDecision)
+                    .where(CashFlowReconciliationDecision.source_event_id.in_(event_ids))
+                    .where(CashFlowReconciliationDecision.superseded_at.is_(None))
+                    .order_by(
+                        CashFlowReconciliationDecision.source_event_id,
+                        CashFlowReconciliationDecision.decision_key,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for decision in decision_rows:
+                current_decisions[decision.source_event_id].append(decision)
 
     replacement_ids = {
         row.superseded_by_attestation_id
@@ -278,7 +472,13 @@ def assess_cashflow_source_coverage(
     keys_by_account: dict[int, list[str]] = defaultdict(list)
     for row in rows:
         raw_gaps = tuple(gaps_by_attestation[row.attestation_id])
-        validation_reasons = _validation_reason_codes(row, raw_gaps)
+        raw_events = tuple(events_by_attestation[row.attestation_id])
+        validation_reasons = _validation_reason_codes(
+            row,
+            raw_gaps,
+            raw_events,
+            {key: tuple(value) for key, value in current_decisions.items()},
+        )
         if row.superseded_at is not None or row.superseded_by_attestation_id is not None:
             lifecycle_status = "superseded"
         elif row.approved_at is None:
@@ -304,6 +504,17 @@ def assess_cashflow_source_coverage(
                     else None
                 ),
                 methodology_version=row.methodology_version,
+                account_identity_sha256=row.account_identity_sha256,
+                account_mapping_basis=row.account_mapping_basis,
+                account_mapping_confidence=row.account_mapping_confidence,
+                source_format=row.source_format,
+                parser_version=row.parser_version,
+                source_timezone=row.source_timezone,
+                source_row_count=row.source_row_count,
+                cashflow_candidate_count=row.cashflow_candidate_count,
+                persisted_source_event_count=len(raw_events),
+                source_event_set_sha256=row.source_event_set_sha256,
+                manifest_sha256=row.manifest_sha256,
                 gaps=tuple(
                     SourceGapEvidence(
                         start_date=gap.gap_start,

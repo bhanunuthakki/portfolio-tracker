@@ -17,6 +17,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     UniqueConstraint,
     and_,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql.elements import ColumnElement
@@ -575,6 +577,90 @@ class CashFlowSourceGapReason(StrEnum):
     UNRECONCILED_DIFFERENCE = "unreconciled_difference"
 
 
+class CashFlowAccountMappingBasis(StrEnum):
+    """Evidence used to associate a private source with a normalized account."""
+
+    PROVIDER_ACCOUNT_ID = "provider_account_id"
+    STATEMENT_ACCOUNT_IDENTIFIER = "statement_account_identifier"
+    OWNER_CONFIRMED = "owner_confirmed"
+
+
+class CashFlowEvidenceConfidence(StrEnum):
+    """Review confidence retained with account mappings and flow decisions."""
+
+    EXACT = "exact"
+    HIGH = "high"
+    PROVISIONAL = "provisional"
+
+
+class CashFlowSourceLocatorKind(StrEnum):
+    """Stable locator shape for one immutable Source event."""
+
+    ROW = "row"
+    PAGE_LINE = "page_line"
+    PROVIDER_RECORD = "provider_record"
+
+
+class CashFlowSourceAmountSignBasis(StrEnum):
+    """Meaning of the amount sign as observed in a Source event."""
+
+    STATEMENT_PRINTED = "statement_printed"
+    PROVIDER_REPORTED = "provider_reported"
+    NORMALIZED_EXTERNAL = "normalized_external"
+
+
+class CashFlowResolutionKind(StrEnum):
+    """How a Source event resolves into the normalized transaction authority."""
+
+    PROVIDER_EXACT = "provider_exact"
+    STATEMENT_SUPPLEMENT = "statement_supplement"
+    INTERNAL = "internal"
+    EXCLUDED = "excluded"
+    UNRESOLVED = "unresolved"
+    PROVIDER_SUPERSEDES_SUPPLEMENT = "provider_supersedes_supplement"
+
+
+class CashFlowEffectiveDateBasis(StrEnum):
+    """Source date selected for end-of-day Modified-Dietz weighting."""
+
+    SOURCE_ACTIVITY = "source_activity"
+    SOURCE_PROCESS = "source_process"
+    SOURCE_SETTLEMENT = "source_settlement"
+    PROVIDER_POSTING = "provider_posting"
+    OWNER_RESOLVED = "owner_resolved"
+
+
+class CashFlowDecisionAuthority(StrEnum):
+    """Authority responsible for a Reconciliation decision."""
+
+    PROVIDER = "provider"
+    BROKERAGE_STATEMENT = "brokerage_statement"
+    OWNER_APPROVED = "owner_approved"
+
+
+class CashFlowReconciliationRunStatus(StrEnum):
+    """Durable lifecycle of one approved reconciliation plan."""
+
+    PREVIEWED = "previewed"
+    APPLIED = "applied"
+
+
+class CashFlowReconciliationRunDecisionKind(StrEnum):
+    """How a decision participated in one reconciliation run."""
+
+    CREATED = "created"
+    SUPERSEDED = "superseded"
+    VERIFIED = "verified"
+
+
+class CashFlowReconciliationTransactionMutationKind(StrEnum):
+    """Normalized transaction-side mutation performed by a reconciliation run."""
+
+    TRANSACTION_INSERT = "transaction_insert"
+    OVERRIDE_INSERT = "override_insert"
+    OVERRIDE_UPDATE = "override_update"
+
+
 class CashFlowSourceAttestation(Base):
     """Owner-approved evidence that reconciles one account over a date range.
 
@@ -611,6 +697,54 @@ class CashFlowSourceAttestation(Base):
             "(superseded_at IS NOT NULL AND superseded_by_attestation_id IS NOT NULL)",
             name="ck_cashflow_source_attestations_supersession_pair",
         ),
+        CheckConstraint(
+            "account_identity_sha256 IS NULL OR length(account_identity_sha256) = 64",
+            name="ck_cashflow_source_attestations_account_sha256_length",
+        ),
+        CheckConstraint(
+            "account_mapping_basis IS NULL OR account_mapping_basis IN "
+            "('provider_account_id', 'statement_account_identifier', 'owner_confirmed')",
+            name="ck_cashflow_source_attestations_mapping_basis",
+        ),
+        CheckConstraint(
+            "account_mapping_confidence IS NULL OR account_mapping_confidence IN "
+            "('exact', 'high', 'provisional')",
+            name="ck_cashflow_source_attestations_mapping_confidence",
+        ),
+        CheckConstraint(
+            "source_row_count IS NULL OR source_row_count >= 0",
+            name="ck_cashflow_source_attestations_source_row_count",
+        ),
+        CheckConstraint(
+            "cashflow_candidate_count IS NULL OR cashflow_candidate_count >= 0",
+            name="ck_cashflow_source_attestations_candidate_count",
+        ),
+        CheckConstraint(
+            "source_row_count IS NULL OR cashflow_candidate_count IS NULL OR "
+            "cashflow_candidate_count <= source_row_count",
+            name="ck_cashflow_source_attestations_candidate_within_rows",
+        ),
+        CheckConstraint(
+            "source_event_set_sha256 IS NULL OR length(source_event_set_sha256) = 64",
+            name="ck_cashflow_source_attestations_event_set_sha256_length",
+        ),
+        CheckConstraint(
+            "manifest_sha256 IS NULL OR length(manifest_sha256) = 64",
+            name="ck_cashflow_source_attestations_manifest_sha256_length",
+        ),
+        CheckConstraint(
+            "(account_identity_sha256 IS NULL AND account_mapping_basis IS NULL AND "
+            "account_mapping_confidence IS NULL AND source_format IS NULL AND "
+            "parser_version IS NULL AND source_timezone IS NULL AND source_row_count IS NULL AND "
+            "cashflow_candidate_count IS NULL AND source_event_set_sha256 IS NULL AND "
+            "manifest_sha256 IS NULL) OR "
+            "(account_identity_sha256 IS NOT NULL AND account_mapping_basis IS NOT NULL AND "
+            "account_mapping_confidence IS NOT NULL AND source_format IS NOT NULL AND "
+            "parser_version IS NOT NULL AND source_timezone IS NOT NULL AND "
+            "source_row_count IS NOT NULL AND cashflow_candidate_count IS NOT NULL AND "
+            "source_event_set_sha256 IS NOT NULL AND manifest_sha256 IS NOT NULL)",
+            name="ck_cashflow_source_attestations_provenance_bundle",
+        ),
         Index(
             "ix_cashflow_source_attestations_account_dates",
             "account_id",
@@ -632,6 +766,19 @@ class CashFlowSourceAttestation(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     methodology_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1")
+    # Nullable as one coherent bundle so migration-0025 rows remain readable but
+    # later certification logic can fail closed until exact event provenance is
+    # imported from the owner-approved private source.
+    account_identity_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    account_mapping_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    account_mapping_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    source_format: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parser_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_row_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cashflow_candidate_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_event_set_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -668,6 +815,356 @@ class CashFlowSourceGap(Base):
     gap_start: Mapped[date] = mapped_column(Date, nullable=False)
     gap_end: Mapped[date] = mapped_column(Date, nullable=False)
     reason_code: Mapped[str] = mapped_column(String(48), nullable=False)
+
+
+class CashFlowSourceEvent(Base):
+    """One immutable Source event from an attested document or provider record."""
+
+    __tablename__ = "cashflow_source_events"
+    __table_args__ = (
+        CheckConstraint(
+            "length(source_event_id) = 64",
+            name="ck_cashflow_source_events_id_length",
+        ),
+        CheckConstraint(
+            "length(source_row_sha256) = 64",
+            name="ck_cashflow_source_events_row_sha256_length",
+        ),
+        CheckConstraint(
+            "source_locator_kind IN ('row', 'page_line', 'provider_record')",
+            name="ck_cashflow_source_events_locator_kind",
+        ),
+        CheckConstraint(
+            "source_amount_sign_basis IN "
+            "('statement_printed', 'provider_reported', 'normalized_external')",
+            name="ck_cashflow_source_events_amount_sign_basis",
+        ),
+        CheckConstraint(
+            "activity_date IS NOT NULL OR process_date IS NOT NULL OR settlement_date IS NOT NULL",
+            name="ck_cashflow_source_events_has_date",
+        ),
+        CheckConstraint(
+            "(source_locator_kind = 'row' AND source_row_ordinal IS NOT NULL AND "
+            "source_page IS NULL AND source_line IS NULL) OR "
+            "(source_locator_kind = 'page_line' AND source_row_ordinal IS NULL AND "
+            "source_page IS NOT NULL AND source_line IS NOT NULL) OR "
+            "(source_locator_kind = 'provider_record' AND source_row_ordinal IS NULL AND "
+            "source_page IS NULL AND source_line IS NULL AND source_record_id IS NOT NULL)",
+            name="ck_cashflow_source_events_locator_shape",
+        ),
+        CheckConstraint(
+            "source_row_ordinal IS NULL OR source_row_ordinal > 0",
+            name="ck_cashflow_source_events_row_ordinal_positive",
+        ),
+        CheckConstraint(
+            "source_page IS NULL OR source_page > 0",
+            name="ck_cashflow_source_events_page_positive",
+        ),
+        CheckConstraint(
+            "source_line IS NULL OR source_line > 0",
+            name="ck_cashflow_source_events_line_positive",
+        ),
+        UniqueConstraint(
+            "attestation_id",
+            "source_locator_kind",
+            "source_locator",
+            name="uq_cashflow_source_events_attestation_locator",
+        ),
+        Index("ix_cashflow_source_events_attestation", "attestation_id"),
+        Index("ix_cashflow_source_events_activity_date", "activity_date"),
+    )
+
+    source_event_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attestation_id: Mapped[int] = mapped_column(
+        ForeignKey("cashflow_source_attestations.attestation_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_record_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_locator_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_locator: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_row_ordinal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_row_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    activity_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    process_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    settlement_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    source_amount: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    source_amount_sign_basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CashFlowReconciliationDecision(Base):
+    """Append-only Reconciliation decision for one immutable Source event."""
+
+    __tablename__ = "cashflow_reconciliation_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "length(decision_key) = 64",
+            name="ck_cashflow_reconciliation_decisions_key_length",
+        ),
+        CheckConstraint(
+            "length(decision_payload_sha256) = 64",
+            name="ck_cashflow_reconciliation_decisions_payload_sha256_length",
+        ),
+        CheckConstraint(
+            "resolution_kind IN ('provider_exact', 'statement_supplement', 'internal', "
+            "'excluded', 'unresolved', 'provider_supersedes_supplement')",
+            name="ck_cashflow_reconciliation_decisions_resolution_kind",
+        ),
+        CheckConstraint(
+            "classification IS NULL OR classification IN "
+            "('external_in', 'external_out', 'internal', 'excluded')",
+            name="ck_cashflow_reconciliation_decisions_classification",
+        ),
+        CheckConstraint(
+            "decision_authority IN ('provider', 'brokerage_statement', 'owner_approved')",
+            name="ck_cashflow_reconciliation_decisions_authority",
+        ),
+        CheckConstraint(
+            "confidence IN ('exact', 'high', 'provisional')",
+            name="ck_cashflow_reconciliation_decisions_confidence",
+        ),
+        CheckConstraint(
+            "effective_date_basis IS NULL OR effective_date_basis IN "
+            "('source_activity', 'source_process', 'source_settlement', "
+            "'provider_posting', 'owner_resolved')",
+            name="ck_cashflow_reconciliation_decisions_date_basis",
+        ),
+        CheckConstraint(
+            "(resolution_kind = 'unresolved' AND classification IS NULL AND "
+            "signed_external_amount IS NULL AND effective_date IS NULL AND "
+            "effective_date_basis IS NULL AND effective_timezone IS NULL AND "
+            "target_transaction_id IS NULL) OR "
+            "(resolution_kind != 'unresolved' AND classification IS NOT NULL AND "
+            "signed_external_amount IS NOT NULL AND effective_date IS NOT NULL AND "
+            "effective_date_basis IS NOT NULL AND effective_timezone IS NOT NULL)",
+            name="ck_cashflow_reconciliation_decisions_resolution_fields",
+        ),
+        CheckConstraint(
+            "(classification = 'external_in' AND signed_external_amount > 0) OR "
+            "(classification = 'external_out' AND signed_external_amount < 0) OR "
+            "(classification IN ('internal', 'excluded') AND signed_external_amount = 0) OR "
+            "(classification IS NULL AND signed_external_amount IS NULL)",
+            name="ck_cashflow_reconciliation_decisions_amount_direction",
+        ),
+        CheckConstraint(
+            "(resolution_kind IN ('provider_exact', 'statement_supplement', "
+            "'provider_supersedes_supplement') AND "
+            "classification IN ('external_in', 'external_out') AND "
+            "target_transaction_id IS NOT NULL) OR "
+            "(resolution_kind = 'internal' AND classification = 'internal' AND "
+            "signed_external_amount = 0) OR "
+            "(resolution_kind = 'excluded' AND classification = 'excluded' AND "
+            "signed_external_amount = 0) OR "
+            "(resolution_kind = 'unresolved' AND classification IS NULL AND "
+            "signed_external_amount IS NULL AND target_transaction_id IS NULL)",
+            name="ck_cashflow_reconciliation_decisions_resolution_semantics",
+        ),
+        CheckConstraint(
+            "(superseded_at IS NULL AND superseded_by_decision_key IS NULL) OR "
+            "(superseded_at IS NOT NULL AND superseded_by_decision_key IS NOT NULL)",
+            name="ck_cashflow_reconciliation_decisions_supersession_pair",
+        ),
+        CheckConstraint(
+            "superseded_by_decision_key IS NULL OR superseded_by_decision_key != decision_key",
+            name="ck_cashflow_reconciliation_decisions_no_self_supersession",
+        ),
+        UniqueConstraint(
+            "source_event_id",
+            "decision_key",
+            name="uq_cashflow_reconciliation_decisions_event_key",
+        ),
+        ForeignKeyConstraint(
+            ["source_event_id", "superseded_by_decision_key"],
+            [
+                "cashflow_reconciliation_decisions.source_event_id",
+                "cashflow_reconciliation_decisions.decision_key",
+            ],
+            name="fk_cashflow_reconciliation_decisions_same_event_successor",
+            ondelete="RESTRICT",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        Index(
+            "uq_cashflow_reconciliation_decisions_current_event",
+            "source_event_id",
+            unique=True,
+            sqlite_where=text("superseded_at IS NULL"),
+        ),
+        Index("ix_cashflow_reconciliation_decisions_target", "target_transaction_id"),
+    )
+
+    decision_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source_event_id: Mapped[str] = mapped_column(
+        ForeignKey("cashflow_source_events.source_event_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    target_transaction_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "investment_transactions.plaid_investment_transaction_id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+    resolution_kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    classification: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    signed_external_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    effective_date_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    effective_timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    decision_authority: Mapped[str] = mapped_column(String(32), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(16), nullable=False)
+    assumption_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    methodology_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    decision_payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_by_decision_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class CashFlowReconciliationRun(Base):
+    """Durable receipt for one previewed or applied reconciliation plan."""
+
+    __tablename__ = "cashflow_reconciliation_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "length(run_id) = 64",
+            name="ck_cashflow_reconciliation_runs_id_length",
+        ),
+        CheckConstraint(
+            "length(plan_digest) = 64",
+            name="ck_cashflow_reconciliation_runs_plan_digest_length",
+        ),
+        CheckConstraint(
+            "length(manifest_set_sha256) = 64",
+            name="ck_cashflow_reconciliation_runs_manifest_sha256_length",
+        ),
+        CheckConstraint(
+            "affected_start <= affected_end",
+            name="ck_cashflow_reconciliation_runs_date_order",
+        ),
+        CheckConstraint(
+            "affected_account_count >= 0 AND source_event_count >= 0 AND "
+            "planned_mutation_count >= 0 AND applied_mutation_count >= 0 AND "
+            "applied_mutation_count <= planned_mutation_count",
+            name="ck_cashflow_reconciliation_runs_counts",
+        ),
+        CheckConstraint(
+            "status IN ('previewed', 'applied')",
+            name="ck_cashflow_reconciliation_runs_status",
+        ),
+        CheckConstraint(
+            "(status = 'previewed' AND applied_at IS NULL AND applied_mutation_count = 0) OR "
+            "(status = 'applied' AND approved_at IS NOT NULL AND applied_at IS NOT NULL AND "
+            "applied_at >= approved_at AND applied_mutation_count = planned_mutation_count)",
+            name="ck_cashflow_reconciliation_runs_status_fields",
+        ),
+        Index("ix_cashflow_reconciliation_runs_status_created", "status", "created_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    plan_digest: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    manifest_set_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    software_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    backup_reference: Mapped[str] = mapped_column(String(512), nullable=False)
+    preview_reference: Mapped[str] = mapped_column(String(512), nullable=False)
+    affected_start: Mapped[date] = mapped_column(Date, nullable=False)
+    affected_end: Mapped[date] = mapped_column(Date, nullable=False)
+    affected_account_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    planned_mutation_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    applied_mutation_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CashFlowReconciliationRunDecision(Base):
+    """Append-only membership of one decision in a reconciliation run receipt."""
+
+    __tablename__ = "cashflow_reconciliation_run_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "membership_kind IN ('created', 'superseded', 'verified')",
+            name="ck_cashflow_reconciliation_run_decisions_membership_kind",
+        ),
+        Index(
+            "ix_cashflow_reconciliation_run_decisions_decision",
+            "decision_key",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("cashflow_reconciliation_runs.run_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    decision_key: Mapped[str] = mapped_column(
+        ForeignKey("cashflow_reconciliation_decisions.decision_key", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    membership_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CashFlowReconciliationRunTransactionMutation(Base):
+    """Append-only before/after receipt for one transaction-side mutation."""
+
+    __tablename__ = "cashflow_reconciliation_run_transaction_mutations"
+    __table_args__ = (
+        CheckConstraint(
+            "mutation_kind IN ('transaction_insert', 'override_insert', 'override_update')",
+            name="ck_cashflow_reconciliation_run_tx_mutations_kind",
+        ),
+        CheckConstraint(
+            "before_payload_sha256 IS NULL OR length(before_payload_sha256) = 64",
+            name="ck_cashflow_reconciliation_run_tx_mutations_before_sha256_length",
+        ),
+        CheckConstraint(
+            "length(after_payload_sha256) = 64",
+            name="ck_cashflow_reconciliation_run_tx_mutations_after_sha256_length",
+        ),
+        CheckConstraint(
+            "(mutation_kind IN ('transaction_insert', 'override_insert') AND "
+            "before_payload_sha256 IS NULL) OR "
+            "(mutation_kind = 'override_update' AND before_payload_sha256 IS NOT NULL)",
+            name="ck_cashflow_reconciliation_run_tx_mutations_payload_shape",
+        ),
+        Index(
+            "ix_cashflow_reconciliation_run_tx_mutations_target",
+            "target_transaction_id",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("cashflow_reconciliation_runs.run_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    target_transaction_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "investment_transactions.plaid_investment_transaction_id",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    mutation_kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    before_payload_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    after_payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class TickerOverride(Base):

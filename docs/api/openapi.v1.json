@@ -531,6 +531,39 @@
             "title": "Account Id",
             "type": "integer"
           },
+          "account_identity_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Identity Sha256"
+          },
+          "account_mapping_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Mapping Basis"
+          },
+          "account_mapping_confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Mapping Confidence"
+          },
           "approved_at": {
             "anyOf": [
               {
@@ -551,6 +584,17 @@
             "format": "date-time",
             "title": "Captured At",
             "type": "string"
+          },
+          "cashflow_candidate_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cashflow Candidate Count"
           },
           "coverage_end": {
             "format": "date",
@@ -573,17 +617,88 @@
             "title": "Lifecycle Status",
             "type": "string"
           },
+          "manifest_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Sha256"
+          },
           "methodology_version": {
             "title": "Methodology Version",
             "type": "string"
+          },
+          "parser_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parser Version"
+          },
+          "persisted_source_event_count": {
+            "default": 0,
+            "title": "Persisted Source Event Count",
+            "type": "integer"
+          },
+          "source_event_set_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Event Set Sha256"
+          },
+          "source_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Format"
           },
           "source_reference": {
             "title": "Source Reference",
             "type": "string"
           },
+          "source_row_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Row Count"
+          },
           "source_sha256": {
             "title": "Source Sha256",
             "type": "string"
+          },
+          "source_timezone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Timezone"
           },
           "source_type": {
             "title": "Source Type",
@@ -768,10 +883,24 @@
             ],
             "title": "Account Name"
           },
+          "active_decision_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Active Decision Keys",
+            "type": "array"
+          },
           "amount": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Amount",
             "type": "string"
+          },
+          "assumption_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assumption Codes",
+            "type": "array"
           },
           "classification": {
             "title": "Classification",
@@ -800,6 +929,47 @@
             "format": "date",
             "title": "Date",
             "type": "string"
+          },
+          "decision_authorities": {
+            "default": [],
+            "items": {
+              "enum": [
+                "provider",
+                "brokerage_statement",
+                "owner_approved"
+              ],
+              "type": "string"
+            },
+            "title": "Decision Authorities",
+            "type": "array"
+          },
+          "decision_confidences": {
+            "default": [],
+            "items": {
+              "enum": [
+                "exact",
+                "high",
+                "provisional"
+              ],
+              "type": "string"
+            },
+            "title": "Decision Confidences",
+            "type": "array"
+          },
+          "effective_date_bases": {
+            "default": [],
+            "items": {
+              "enum": [
+                "source_activity",
+                "source_process",
+                "source_settlement",
+                "provider_posting",
+                "owner_resolved"
+              ],
+              "type": "string"
+            },
+            "title": "Effective Date Bases",
+            "type": "array"
           },
           "flow_id": {
             "title": "Flow Id",
@@ -838,6 +1008,20 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Signed External Amount",
             "type": "string"
+          },
+          "source_attestation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Attestation Keys",
+            "type": "array"
+          },
+          "source_event_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Event Ids",
+            "type": "array"
           },
           "source_kind": {
             "title": "Source Kind",
@@ -879,6 +1063,16 @@
               }
             ],
             "title": "Transaction Id"
+          },
+          "transaction_origin": {
+            "default": "aggregator_transaction",
+            "enum": [
+              "aggregator_transaction",
+              "statement_supplement",
+              "derived_share_transfer"
+            ],
+            "title": "Transaction Origin",
+            "type": "string"
           },
           "type": {
             "title": "Type",
@@ -1822,6 +2016,15 @@
             "title": "Resolution",
             "type": "string"
           },
+          "return_basis": {
+            "default": "raw_price_fallback",
+            "enum": [
+              "total_return_adjusted",
+              "raw_price_fallback"
+            ],
+            "title": "Return Basis",
+            "type": "string"
+          },
           "source_date": {
             "format": "date",
             "title": "Source Date",
@@ -1859,6 +2062,13 @@
             "format": "date",
             "title": "Date",
             "type": "string"
+          },
+          "flow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Flow Ids",
+            "type": "array"
           }
         },
         "required": [
@@ -1923,6 +2133,13 @@
             "title": "Opening Value",
             "type": "string"
           },
+          "operative_external_cashflows": {
+            "items": {
+              "$ref": "#/components/schemas/PerformanceOperativeCashflow"
+            },
+            "title": "Operative External Cashflows",
+            "type": "array"
+          },
           "policy": {
             "anyOf": [
               {
@@ -1974,6 +2191,7 @@
           "benchmark_price_resolution_policy",
           "opening_value",
           "dated_external_cashflows",
+          "operative_external_cashflows",
           "net_external_cashflow_in",
           "ending_value",
           "investment_gain",
@@ -1985,6 +2203,135 @@
           "policy"
         ],
         "title": "PerformanceEquationReceipt",
+        "type": "object"
+      },
+      "PerformanceOperativeCashflow": {
+        "description": "One operative ledger row and its immutable reconciliation lineage.",
+        "properties": {
+          "active_decision_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Active Decision Keys",
+            "type": "array"
+          },
+          "amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "assumption_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assumption Codes",
+            "type": "array"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "decision_authorities": {
+            "items": {
+              "enum": [
+                "provider",
+                "brokerage_statement",
+                "owner_approved"
+              ],
+              "type": "string"
+            },
+            "title": "Decision Authorities",
+            "type": "array"
+          },
+          "decision_confidences": {
+            "items": {
+              "enum": [
+                "exact",
+                "high",
+                "provisional"
+              ],
+              "type": "string"
+            },
+            "title": "Decision Confidences",
+            "type": "array"
+          },
+          "effective_date_bases": {
+            "items": {
+              "enum": [
+                "source_activity",
+                "source_process",
+                "source_settlement",
+                "provider_posting",
+                "owner_resolved"
+              ],
+              "type": "string"
+            },
+            "title": "Effective Date Bases",
+            "type": "array"
+          },
+          "flow_id": {
+            "title": "Flow Id",
+            "type": "string"
+          },
+          "source_attestation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Attestation Keys",
+            "type": "array"
+          },
+          "source_event_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Event Ids",
+            "type": "array"
+          },
+          "transaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
+          },
+          "transaction_origin": {
+            "anyOf": [
+              {
+                "enum": [
+                  "aggregator_transaction",
+                  "statement_supplement",
+                  "derived_share_transfer"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "calculation_adjustment",
+                "type": "string"
+              }
+            ],
+            "title": "Transaction Origin"
+          }
+        },
+        "required": [
+          "flow_id",
+          "date",
+          "amount",
+          "transaction_id",
+          "transaction_origin",
+          "source_event_ids",
+          "source_attestation_keys",
+          "active_decision_keys",
+          "decision_authorities",
+          "decision_confidences",
+          "assumption_codes",
+          "effective_date_bases"
+        ],
+        "title": "PerformanceOperativeCashflow",
         "type": "object"
       },
       "PerformancePoint": {
@@ -2209,6 +2556,16 @@
             },
             "title": "Points",
             "type": "array"
+          },
+          "reconstruction_certification": {
+            "default": "unavailable",
+            "enum": [
+              "observed_certified",
+              "modeled_provisional",
+              "unavailable"
+            ],
+            "title": "Reconstruction Certification",
+            "type": "string"
           },
           "source_coverage": {
             "$ref": "#/components/schemas/CashFlowSourceCoverageOut"

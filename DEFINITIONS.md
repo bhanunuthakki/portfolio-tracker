@@ -1,5 +1,9 @@
 # Definitions
 
+**Scope:** project
+**Owner:** portfolio-tracker
+**Inherits:** none
+
 Canonical domain vocabulary. Use these terms verbatim in code (variables,
 functions, types, columns), comments, commit messages, and conversation.
 Seeded with the **positioning** vocabulary; extend as other areas are
@@ -68,3 +72,53 @@ standardized.
   `canonical_account_id`, `included_in_totals`, and `exclusion_reason`
   (`duplicate_of_canonical` / `inactive` / `operator_excluded`); consumers
   never deduplicate by comparing balances.
+
+## Source Event
+
+**Definition.** An immutable observation of one exact record in an authoritative
+cash-flow source, identified by the source document or provider record, its
+stable locator, and a content digest. A Source event preserves what the source
+said; it does not decide whether the movement is external, internal, duplicated,
+or usable in a return calculation.
+**Lives in.** `cashflow_source_events`, linked to
+`cashflow_source_attestations`.
+**Not to be confused with.** An `investment_transactions` row is the normalized
+economic record; a Reconciliation decision interprets and links the Source
+event.
+
+## Reconciliation Decision
+
+**Definition.** An append-only, attributable resolution of one Source event. It
+records the normalized transaction target, external-flow classification,
+effective date and date basis, authority, confidence, assumptions, methodology,
+approval, and supersession history. Exactly one non-superseded decision may
+exist for a Source event.
+**Lives in.** `cashflow_reconciliation_decisions` and the apply receipt in
+`cashflow_reconciliation_runs`.
+**Not to be confused with.** A Transaction override is a legacy mutable
+classification input; it is not a complete provenance or decision history.
+
+## Effective External Flow
+
+**Definition.** The single deduplicated cash movement into or out of the tracked
+portfolio that is eligible for Modified-Dietz weighting after current approved
+Reconciliation decisions, transaction authority, account-universe scope, and
+supersession are applied. It is a derived projection, not a second persisted
+economic record.
+**Lives in.** The canonical external-flow ledger consumed by performance and
+benchmark calculations.
+**Not to be confused with.** A Source event may be corroborating, duplicated,
+internal, excluded, or unresolved and therefore need not become an Effective
+external flow.
+
+## Reconstruction Certification
+
+**Definition.** The fail-closed determination that a requested return window has
+supported opening and ending boundaries, a dated account universe, complete
+source-event dispositions, an Effective external flow set, required prices, and
+a reproducible calculation receipt. Certification describes evidence sufficiency;
+it is not the return value itself.
+**Lives in.** Portfolio performance prerequisite assessment and its equation
+receipt.
+**Not to be confused with.** A mathematically balanced equation or an approved
+source date range alone does not certify the underlying reconstruction.

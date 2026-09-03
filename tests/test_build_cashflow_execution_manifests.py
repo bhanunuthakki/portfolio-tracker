@@ -37,7 +37,7 @@ def _database(path: Path, events: list[dict[str, object]]) -> tuple[int, str]:
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32))")
-        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0025')")
+        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0026')")
     raw_account_identity = "private-provider-account-id"
     with Session(engine) as session:
         item = Item(
@@ -181,7 +181,8 @@ def _inputs(
     for event in events:
         event_date = date.fromisoformat(str(event["date"]))
         rows.append(
-            f"{event_date:%m/%d/%Y},,,,private description,{event['source_code']},,,"
+            f"{event_date:%m/%d/%Y},{event_date:%m/%d/%Y},{event_date:%m/%d/%Y},,"
+            f"private description,{event['source_code']},,,"
             f"${event['signed_external_amount']}\n"
         )
     csv_path.write_text(header + "".join(rows), encoding="utf-8")
@@ -218,9 +219,11 @@ def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     assert _sha256(database) == before
     assert result.event_count == 68
     assert result.status_counts == {
-        "existing_exact": 66,
-        "override_required": 1,
-        "manual_transaction": 1,
+        "provider_exact": 67,
+        "statement_supplement": 1,
+        "internal": 0,
+        "excluded": 0,
+        "unresolved": 0,
     }
     assert result.conflict_count == 0
     manifests = list(output.glob("*.json"))
@@ -229,6 +232,7 @@ def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     payload = json.loads(manifests[0].read_text(encoding="utf-8"))
     assert len(payload["events"]) == 68
     assert all("resolution" in event for event in payload["events"])
+    assert payload["events"][67]["disposition"] == "statement_supplement"
     assert payload["events"][67]["resolution"] == {"kind": "manual_transaction"}
     assert payload["events"][0]["resolution"]["transaction_identity_sha256"]
     serialized = manifests[0].read_text(encoding="utf-8")
@@ -286,6 +290,95 @@ def test_source_or_account_identity_mismatch_fails_closed(tmp_path: Path, change
 
     with pytest.raises(builder.BuildError, match=expected):
         builder.build_execution_manifests(database, [inventory], [csv_path], tmp_path / "output")
+
+
+def test_inventory_must_disposition_every_parsed_cashflow_candidate(tmp_path: Path) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(2))
+    payload = json.loads(inventory.read_text(encoding="utf-8"))
+    payload["events"] = payload["events"][:1]
+    inventory.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(builder.BuildError, match="cashflow_candidate_omitted"):
+        builder.build_execution_manifests(
+            database,
+            [inventory],
+            [csv_path],
+            tmp_path / "output",
+        )
+
+
+def test_shifted_provider_date_is_deduplicated_and_recorded(tmp_path: Path) -> None:
+    events = _events(1)
+    database, inventory, csv_path = _inputs(tmp_path, events)
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        transaction = session.get(
+            InvestmentTransaction,
+            "private-provider-transaction-0",
+        )
+        assert transaction is not None
+        transaction.date = date.fromisoformat(str(events[0]["date"])) + timedelta(days=7)
+        session.commit()
+    engine.dispose()
+
+    output = tmp_path / "private-execution-manifests"
+    result = builder.build_execution_manifests(database, [inventory], [csv_path], output)
+
+    assert result.status_counts["provider_exact"] == 1
+    assert result.status_counts["statement_supplement"] == 0
+    manifest = json.loads(next(output.glob("*.json")).read_text(encoding="utf-8"))
+    event = manifest["events"][0]
+    assert event["disposition"] == "provider_exact"
+    assert event["activity_date"] == str(events[0]["date"])
+    assert event["process_date"] == str(events[0]["date"])
+    assert event["settlement_date"] == str(events[0]["date"])
+    assert event["ledger_effective_date"] == str(events[0]["date"])
+    assert event["effective_date_basis"] == "source_activity"
+    assert event["assumption_code"] == "provider_posting_date_shift"
+    assert len(event["source_row_sha256"]) == 64
+    assert event["resolution"]["kind"] == "existing_transaction"
+
+
+def test_shifted_provider_match_fails_closed_when_bounded_candidates_are_ambiguous(
+    tmp_path: Path,
+) -> None:
+    events = _events(1)
+    database, inventory, csv_path = _inputs(tmp_path, events)
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        transaction = session.get(
+            InvestmentTransaction,
+            "private-provider-transaction-0",
+        )
+        assert transaction is not None
+        transaction.date = date.fromisoformat(str(events[0]["date"])) + timedelta(days=7)
+        session.add(
+            InvestmentTransaction(
+                plaid_investment_transaction_id="private-provider-shifted-duplicate",
+                account_id=transaction.account_id,
+                security_id=None,
+                date=date.fromisoformat(str(events[0]["date"])) + timedelta(days=6),
+                name="private shifted duplicate",
+                quantity=Decimal(0),
+                amount=transaction.amount,
+                price=None,
+                fees=None,
+                type="cash",
+                subtype="deposit",
+                currency="USD",
+                origin="broker",
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(builder.BuildError, match="transaction_match_ambiguous"):
+        builder.build_execution_manifests(
+            database,
+            [inventory],
+            [csv_path],
+            tmp_path / "output",
+        )
 
 
 def test_cli_stdout_contains_only_sanitized_counts_and_digests(

@@ -34,7 +34,12 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
     Account,
+    CashFlowReconciliationDecision,
+    CashFlowReconciliationRun,
+    CashFlowReconciliationRunDecision,
+    CashFlowReconciliationRunTransactionMutation,
     CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     CashFlowSourceGap,
     InvestmentTransaction,
     Item,
@@ -45,7 +50,7 @@ from portfolio_tracker.services.external_flow_ledger import (
     classify_transaction_cashflow,
 )
 
-Classification = Literal["external_in", "external_out"]
+Classification = Literal["external_in", "external_out", "internal", "excluded"]
 EntryStatus = Literal[
     "existing_exact",
     "override_required",
@@ -53,11 +58,31 @@ EntryStatus = Literal[
     "conflict",
     "excluded",
 ]
-ResolutionKind = Literal["existing_transaction", "manual_transaction"]
+ResolutionKind = Literal["existing_transaction", "manual_transaction", "no_transaction"]
+Disposition = Literal[
+    "provider_exact",
+    "statement_supplement",
+    "internal",
+    "excluded",
+    "unresolved",
+    "provider_supersedes_supplement",
+]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
-_CLASSIFICATIONS: frozenset[str] = frozenset({"external_in", "external_out"})
+_CLASSIFICATIONS: frozenset[str] = frozenset(
+    {"external_in", "external_out", "internal", "excluded"}
+)
+_DISPOSITIONS: frozenset[str] = frozenset(
+    {
+        "provider_exact",
+        "statement_supplement",
+        "internal",
+        "excluded",
+        "unresolved",
+        "provider_supersedes_supplement",
+    }
+)
 _SOURCE_TYPES: frozenset[str] = frozenset(
     {"brokerage_statement", "provider_export", "owner_reconciliation"}
 )
@@ -88,6 +113,14 @@ _TOP_LEVEL_KEYS = frozenset(
         "source_document_sha256",
         "captured_at",
         "methodology_version",
+        "account_mapping_basis",
+        "account_mapping_confidence",
+        "source_format",
+        "parser_version",
+        "source_timezone",
+        "source_row_count",
+        "cashflow_candidate_count",
+        "source_event_set_sha256",
         "gaps",
         "events",
     }
@@ -96,15 +129,28 @@ _REQUIRED_TOP_LEVEL_KEYS = _TOP_LEVEL_KEYS - {"schema_version"}
 _EVENT_KEYS = frozenset(
     {
         "source_row_ordinal",
+        "source_row_sha256",
+        "activity_date",
+        "process_date",
+        "settlement_date",
+        "source_amount",
+        "source_amount_sign_basis",
         "date",
         "signed_external_amount",
         "classification",
         "source_code",
         "currency",
+        "disposition",
+        "ledger_effective_date",
+        "effective_date_basis",
+        "effective_timezone",
+        "confidence",
+        "assumption_code",
+        "decision_authority",
         "resolution",
     }
 )
-_REQUIRED_EVENT_KEYS = _EVENT_KEYS - {"currency"}
+_REQUIRED_EVENT_KEYS = _EVENT_KEYS - {"currency", "date"}
 _EXISTING_RESOLUTION_KEYS = frozenset(
     {
         "kind",
@@ -115,6 +161,7 @@ _EXISTING_RESOLUTION_KEYS = frozenset(
     }
 )
 _MANUAL_RESOLUTION_KEYS = frozenset({"kind"})
+_NO_TRANSACTION_RESOLUTION_KEYS = frozenset({"kind"})
 _GAP_KEYS = frozenset({"gap_start", "gap_end", "reason_code"})
 _ROBINHOOD_HEADERS: tuple[str, ...] = (
     "Activity Date",
@@ -127,6 +174,7 @@ _ROBINHOOD_HEADERS: tuple[str, ...] = (
     "Price",
     "Amount",
 )
+_NON_CASH_CODES = frozenset({"Buy", "Sell", "CDIV", "INT", "SPL", "REC"})
 
 
 class ManifestValidationError(ValueError):
@@ -162,19 +210,34 @@ class _Gap:
 @dataclass(frozen=True)
 class _SourceRow:
     activity_date: str
+    process_date: str
+    settlement_date: str
     transaction_code: str
     amount: str
+    source_row_sha256: str
 
 
 @dataclass(frozen=True)
 class _Event:
     source_event_id: str
     source_row_ordinal: int
-    event_date: date
-    signed_external_amount: Decimal
-    classification: Classification
+    source_row_sha256: str
+    activity_date: date
+    process_date: date | None
+    settlement_date: date | None
+    source_amount: Decimal
+    source_amount_sign_basis: str
+    signed_external_amount: Decimal | None
+    classification: Classification | None
     source_code: str
     currency: str
+    disposition: Disposition
+    ledger_effective_date: date | None
+    effective_date_basis: str | None
+    effective_timezone: str | None
+    confidence: str
+    assumption_code: str | None
+    decision_authority: str
     resolution_kind: ResolutionKind
     transaction_id: str | None
     transaction_identity_sha256: str | None
@@ -185,11 +248,31 @@ class _Event:
         return {
             "source_event_id": self.source_event_id,
             "source_row_ordinal": self.source_row_ordinal,
-            "date": self.event_date.isoformat(),
-            "signed_external_amount": _decimal_text(self.signed_external_amount),
+            "source_row_sha256": self.source_row_sha256,
+            "activity_date": self.activity_date.isoformat(),
+            "process_date": self.process_date.isoformat() if self.process_date else None,
+            "settlement_date": (self.settlement_date.isoformat() if self.settlement_date else None),
+            "source_amount": _decimal_text(self.source_amount),
+            "source_amount_sign_basis": self.source_amount_sign_basis,
+            "signed_external_amount": (
+                _decimal_text(self.signed_external_amount)
+                if self.signed_external_amount is not None
+                else None
+            ),
             "classification": self.classification,
             "source_code": self.source_code,
             "currency": self.currency,
+            "disposition": self.disposition,
+            "ledger_effective_date": (
+                self.ledger_effective_date.isoformat()
+                if self.ledger_effective_date is not None
+                else None
+            ),
+            "effective_date_basis": self.effective_date_basis,
+            "effective_timezone": self.effective_timezone,
+            "confidence": self.confidence,
+            "assumption_code": self.assumption_code,
+            "decision_authority": self.decision_authority,
             "resolution_kind": self.resolution_kind,
             "transaction_id_hash": (
                 _sha256_text(self.transaction_id) if self.transaction_id is not None else None
@@ -212,9 +295,18 @@ class _Manifest:
     source_document_sha256: str
     captured_at: datetime
     methodology_version: str
+    account_mapping_basis: str
+    account_mapping_confidence: str
+    source_format: str
+    parser_version: str
+    source_timezone: str
+    source_row_count: int
+    cashflow_candidate_count: int
+    source_event_set_sha256: str
     gaps: tuple[_Gap, ...]
     events: tuple[_Event, ...]
     attestation_key: str
+    attestation_manifest_sha256: str
     manifest_digest: str
 
     def attestation_payload(self) -> dict[str, object]:
@@ -228,6 +320,16 @@ class _Manifest:
             "source_sha256": self.source_document_sha256,
             "captured_at": _datetime_text(self.captured_at),
             "methodology_version": self.methodology_version,
+            "account_identity_sha256": self.account_identity_sha256,
+            "account_mapping_basis": self.account_mapping_basis,
+            "account_mapping_confidence": self.account_mapping_confidence,
+            "source_format": self.source_format,
+            "parser_version": self.parser_version,
+            "source_timezone": self.source_timezone,
+            "source_row_count": self.source_row_count,
+            "cashflow_candidate_count": self.cashflow_candidate_count,
+            "source_event_set_sha256": self.source_event_set_sha256,
+            "manifest_sha256": self.attestation_manifest_sha256,
             "gaps": [gap.digest_payload() for gap in self.gaps],
         }
 
@@ -241,7 +343,7 @@ class PlanEntry:
     reason_code: str
     account_id: int
     event: _Event
-    resolved_transaction_id: str
+    resolved_transaction_id: str | None
     current_transaction_payload_sha256: str | None
     current_override: str | None
 
@@ -252,7 +354,11 @@ class PlanEntry:
             "reason_code": self.reason_code,
             "account_id": self.account_id,
             "event": self.event.digest_payload(),
-            "resolved_transaction_id_hash": _sha256_text(self.resolved_transaction_id),
+            "resolved_transaction_id_hash": (
+                _sha256_text(self.resolved_transaction_id)
+                if self.resolved_transaction_id is not None
+                else None
+            ),
             "current_transaction_payload_sha256": (self.current_transaction_payload_sha256),
             "current_override": self.current_override,
         }
@@ -324,6 +430,20 @@ class ReconciliationResult:
         }
 
 
+@dataclass(frozen=True)
+class _DecisionMembership:
+    decision_key: str
+    membership_kind: Literal["created", "superseded", "verified"]
+
+
+@dataclass(frozen=True)
+class _TransactionMutationReceipt:
+    target_transaction_id: str
+    mutation_kind: Literal["transaction_insert", "override_insert", "override_update"]
+    before_payload_sha256: str | None
+    after_payload_sha256: str
+
+
 def _canonical_json(payload: object) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
@@ -391,6 +511,12 @@ def _expect_sha256(value: object, context: str) -> str:
     return text_value
 
 
+def _expect_nonnegative_int(value: object, context: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ManifestValidationError(f"{context} must be a non-negative integer")
+    return value
+
+
 def _expect_date(value: object, context: str) -> date:
     text_value = _expect_string(value, context)
     try:
@@ -413,15 +539,16 @@ def _expect_datetime(value: object, context: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _expect_amount(value: object, context: str) -> Decimal:
+def _expect_decimal(value: object, context: str, *, allow_zero: bool) -> Decimal:
     if not isinstance(value, str) or _DECIMAL_RE.fullmatch(value) is None:
         raise ManifestValidationError(f"{context} must be a decimal string")
     try:
         parsed = Decimal(value)
     except InvalidOperation as exc:
         raise ManifestValidationError(f"{context} must be a finite decimal string") from exc
-    if not parsed.is_finite() or parsed == 0:
-        raise ManifestValidationError(f"{context} must be finite and non-zero")
+    if not parsed.is_finite() or (not allow_zero and parsed == 0):
+        qualifier = "finite" if allow_zero else "finite and non-zero"
+        raise ManifestValidationError(f"{context} must be {qualifier}")
     exponent = parsed.as_tuple().exponent
     if not isinstance(exponent, int) or exponent < -6 or abs(parsed) >= Decimal("100000000000000"):
         raise ManifestValidationError(f"{context} exceeds database precision")
@@ -449,7 +576,23 @@ def _parse_robinhood_csv(source_bytes: bytes) -> tuple[_SourceRow, ...]:
                 f"evidence source row {ordinal} has an unsupported CSV shape"
             )
         _parse_robinhood_date(row[0], f"evidence source row {ordinal}")
-        source_rows.append(_SourceRow(row[0], row[5], row[8]))
+        _parse_optional_robinhood_date(row[1], f"evidence source row {ordinal}.Process Date")
+        _parse_optional_robinhood_date(row[2], f"evidence source row {ordinal}.Settle Date")
+        source_rows.append(
+            _SourceRow(
+                row[0],
+                row[1],
+                row[2],
+                row[5],
+                row[8],
+                _digest(
+                    {
+                        header: value.strip()
+                        for header, value in zip(_ROBINHOOD_HEADERS, row, strict=True)
+                    }
+                ),
+            )
+        )
     return tuple(source_rows)
 
 
@@ -458,6 +601,12 @@ def _parse_robinhood_date(value: str, context: str) -> date:
         return datetime.strptime(value.strip(), "%m/%d/%Y").date()
     except ValueError as exc:
         raise ManifestValidationError(f"{context} has an invalid Activity Date") from exc
+
+
+def _parse_optional_robinhood_date(value: str, context: str) -> date | None:
+    if not value.strip():
+        return None
+    return _parse_robinhood_date(value, context)
 
 
 def _parse_robinhood_amount(value: str, context: str) -> Decimal:
@@ -511,16 +660,22 @@ def transaction_payload_sha256(transaction: InvestmentTransaction) -> str:
     )
 
 
+def _override_payload_sha256(classification: str, notes: str) -> str:
+    return _digest({"classification": classification, "notes": notes})
+
+
 def _manual_transaction_id(source_event_id: str) -> str:
     return f"manual:cashflow:v1:{source_event_id}"
 
 
 def _manual_payload(event: _Event, account_id: int) -> dict[str, object]:
+    if event.ledger_effective_date is None or event.signed_external_amount is None:
+        raise ReconciliationConflictError("supplemental event lacks economic fields")
     return {
         "plaid_investment_transaction_id": _manual_transaction_id(event.source_event_id),
         "account_id": account_id,
         "security_id": None,
-        "date": event.event_date,
+        "date": event.ledger_effective_date,
         "name": "Manual reconciled external cash flow",
         "quantity": Decimal(0),
         # Plaid transaction amounts use the opposite sign from external flows.
@@ -541,7 +696,7 @@ def _manual_payload_sha256(event: _Event, account_id: int) -> str:
             "transaction_id": values["plaid_investment_transaction_id"],
             "account_id": account_id,
             "security_id": None,
-            "date": event.event_date.isoformat(),
+            "date": cast(date, values["date"]).isoformat(),
             "name": values["name"],
             "quantity": "0",
             "amount": _decimal_text(cast(Decimal, values["amount"])),
@@ -576,29 +731,141 @@ def _parse_event(
     ordinal = payload["source_row_ordinal"]
     if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 1:
         raise ManifestValidationError(f"{context}.source_row_ordinal must be a positive integer")
-    event_date = _expect_date(payload["date"], f"{context}.date")
-    if not coverage_start <= event_date <= coverage_end:
-        raise ManifestValidationError(f"{context}.date is outside declared coverage")
-    amount = _expect_amount(payload["signed_external_amount"], f"{context}.signed_external_amount")
-    classification_value = _expect_string(payload["classification"], f"{context}.classification")
-    if classification_value not in _CLASSIFICATIONS:
-        raise ManifestValidationError(f"{context}.classification is not an external flow")
-    classification = cast(Classification, classification_value)
-    if (classification == "external_in") != (amount > 0):
-        raise ManifestValidationError(f"{context} classification conflicts with amount sign")
-    source_code = _expect_string(payload["source_code"], f"{context}.source_code", maximum=32)
     if ordinal > len(source_rows):
         raise ManifestValidationError(f"{context}.source_row_ordinal is outside the evidence CSV")
     source_row = source_rows[ordinal - 1]
-    if _parse_robinhood_date(source_row.activity_date, context) != event_date:
+    source_row_sha256 = _expect_sha256(payload["source_row_sha256"], f"{context}.source_row_sha256")
+    if source_row_sha256 != source_row.source_row_sha256:
+        raise ManifestValidationError(f"{context} row hash does not match its evidence CSV row")
+    activity_date = _expect_date(payload["activity_date"], f"{context}.activity_date")
+    process_date = (
+        _expect_date(payload["process_date"], f"{context}.process_date")
+        if payload["process_date"] is not None
+        else None
+    )
+    settlement_date = (
+        _expect_date(payload["settlement_date"], f"{context}.settlement_date")
+        if payload["settlement_date"] is not None
+        else None
+    )
+    if not coverage_start <= activity_date <= coverage_end:
+        raise ManifestValidationError(f"{context}.activity_date is outside declared coverage")
+    if _parse_robinhood_date(source_row.activity_date, context) != activity_date:
         raise ManifestValidationError(f"{context} date does not match its evidence CSV row")
+    if _parse_optional_robinhood_date(source_row.process_date, context) != process_date:
+        raise ManifestValidationError(f"{context} process date does not match its evidence CSV row")
+    if _parse_optional_robinhood_date(source_row.settlement_date, context) != settlement_date:
+        raise ManifestValidationError(
+            f"{context} settlement date does not match its evidence CSV row"
+        )
+    if (
+        payload.get("date") is not None
+        and _expect_date(payload["date"], f"{context}.date") != activity_date
+    ):
+        raise ManifestValidationError(f"{context}.date must equal activity_date")
+    source_amount = _expect_decimal(
+        payload["source_amount"], f"{context}.source_amount", allow_zero=True
+    )
+    if _parse_robinhood_amount(source_row.amount, context) != source_amount:
+        raise ManifestValidationError(f"{context} amount does not match its evidence CSV row")
+    source_amount_sign_basis = _expect_string(
+        payload["source_amount_sign_basis"],
+        f"{context}.source_amount_sign_basis",
+    )
+    if source_amount_sign_basis not in {
+        "statement_printed",
+        "provider_reported",
+        "normalized_external",
+    }:
+        raise ManifestValidationError(f"{context}.source_amount_sign_basis is invalid")
+    source_code = _expect_string(payload["source_code"], f"{context}.source_code", maximum=32)
     if source_row.transaction_code.strip() != source_code:
         raise ManifestValidationError(f"{context} source_code does not match its evidence CSV row")
-    if _parse_robinhood_amount(source_row.amount, context) != amount:
-        raise ManifestValidationError(f"{context} amount does not match its evidence CSV row")
     currency = _expect_string(payload.get("currency", "USD"), f"{context}.currency")
     if currency != "USD":
         raise ManifestValidationError(f"{context}.currency must be USD")
+
+    disposition_value = _expect_string(payload["disposition"], f"{context}.disposition")
+    if disposition_value not in _DISPOSITIONS:
+        raise ManifestValidationError(f"{context}.disposition is invalid")
+    disposition = cast(Disposition, disposition_value)
+    classification_raw = payload["classification"]
+    amount_raw = payload["signed_external_amount"]
+    ledger_date_raw = payload["ledger_effective_date"]
+    date_basis_raw = payload["effective_date_basis"]
+    timezone_raw = payload["effective_timezone"]
+    if disposition == "unresolved":
+        if any(
+            value is not None
+            for value in (
+                classification_raw,
+                amount_raw,
+                ledger_date_raw,
+                date_basis_raw,
+                timezone_raw,
+            )
+        ):
+            raise ManifestValidationError(f"{context} unresolved disposition has economic fields")
+        classification: Classification | None = None
+        signed_external_amount: Decimal | None = None
+        ledger_effective_date: date | None = None
+        effective_date_basis: str | None = None
+        effective_timezone: str | None = None
+    else:
+        classification_value = _expect_string(classification_raw, f"{context}.classification")
+        if classification_value not in _CLASSIFICATIONS:
+            raise ManifestValidationError(f"{context}.classification is invalid")
+        classification = cast(Classification, classification_value)
+        signed_external_amount = _expect_decimal(
+            amount_raw,
+            f"{context}.signed_external_amount",
+            allow_zero=classification in {"internal", "excluded"},
+        )
+        if classification == "external_in" and signed_external_amount <= 0:
+            raise ManifestValidationError(f"{context} external_in requires a positive amount")
+        if classification == "external_out" and signed_external_amount >= 0:
+            raise ManifestValidationError(f"{context} external_out requires a negative amount")
+        if classification in {"internal", "excluded"} and signed_external_amount != 0:
+            raise ManifestValidationError(f"{context} non-external disposition requires zero")
+        if disposition in {
+            "provider_exact",
+            "statement_supplement",
+            "provider_supersedes_supplement",
+        }:
+            if classification not in {"external_in", "external_out"}:
+                raise ManifestValidationError(f"{context} external disposition is misclassified")
+        elif disposition == "internal" and classification != "internal":
+            raise ManifestValidationError(f"{context} internal disposition is misclassified")
+        elif disposition == "excluded" and classification != "excluded":
+            raise ManifestValidationError(f"{context} excluded disposition is misclassified")
+        ledger_effective_date = _expect_date(ledger_date_raw, f"{context}.ledger_effective_date")
+        effective_date_basis = _expect_string(date_basis_raw, f"{context}.effective_date_basis")
+        if effective_date_basis not in {
+            "source_activity",
+            "source_process",
+            "source_settlement",
+            "provider_posting",
+            "owner_resolved",
+        }:
+            raise ManifestValidationError(f"{context}.effective_date_basis is invalid")
+        effective_timezone = _expect_string(
+            timezone_raw, f"{context}.effective_timezone", maximum=64
+        )
+
+    confidence = _expect_string(payload["confidence"], f"{context}.confidence")
+    if confidence not in {"exact", "high", "provisional"}:
+        raise ManifestValidationError(f"{context}.confidence is invalid")
+    assumption_raw = payload["assumption_code"]
+    assumption_code = (
+        _expect_string(assumption_raw, f"{context}.assumption_code", maximum=64)
+        if assumption_raw is not None
+        else None
+    )
+    decision_authority = _expect_string(
+        payload["decision_authority"], f"{context}.decision_authority"
+    )
+    if decision_authority not in {"provider", "brokerage_statement", "owner_approved"}:
+        raise ManifestValidationError(f"{context}.decision_authority is invalid")
 
     resolution = _expect_object(payload["resolution"], f"{context}.resolution")
     kind_value = _expect_string(resolution.get("kind"), f"{context}.resolution.kind")
@@ -613,6 +880,8 @@ def _parse_event(
             allowed=_MANUAL_RESOLUTION_KEYS,
             context=f"{context}.resolution",
         )
+        if disposition != "statement_supplement":
+            raise ManifestValidationError(f"{context} manual resolution requires supplement")
     elif kind_value == "existing_transaction":
         _expect_keys(
             resolution,
@@ -653,27 +922,66 @@ def _parse_event(
                 raise ManifestValidationError(
                     f"{context}.resolution.expected_current_override is invalid"
                 )
-    else:
-        raise ManifestValidationError(
-            f"{context}.resolution.kind must be existing_transaction or manual_transaction"
+        if disposition not in {"provider_exact", "provider_supersedes_supplement"}:
+            raise ManifestValidationError(f"{context} existing resolution requires provider")
+    elif kind_value == "no_transaction":
+        _expect_keys(
+            resolution,
+            required=_NO_TRANSACTION_RESOLUTION_KEYS,
+            allowed=_NO_TRANSACTION_RESOLUTION_KEYS,
+            context=f"{context}.resolution",
         )
+        if disposition not in {"internal", "excluded", "unresolved"}:
+            raise ManifestValidationError(f"{context} no-transaction resolution is invalid")
+    else:
+        raise ManifestValidationError(f"{context}.resolution.kind is invalid")
+    if ledger_effective_date is not None:
+        if effective_date_basis == "source_activity" and ledger_effective_date != activity_date:
+            raise ManifestValidationError(f"{context} activity basis does not match source date")
+        if effective_date_basis == "source_process" and (
+            process_date is None or ledger_effective_date != process_date
+        ):
+            raise ManifestValidationError(f"{context} process basis does not match source date")
+        if effective_date_basis == "source_settlement" and ledger_effective_date != settlement_date:
+            raise ManifestValidationError(f"{context} settlement basis does not match source date")
+        if effective_date_basis == "provider_posting" and kind_value != "existing_transaction":
+            raise ManifestValidationError(f"{context} provider posting requires provider target")
+        if effective_date_basis == "owner_resolved" and (
+            decision_authority != "owner_approved" or assumption_code is None
+        ):
+            raise ManifestValidationError(
+                f"{context} owner_resolved requires owner authority and assumption"
+            )
 
     source_event_id = _digest(
         {
-            "identity_version": "cashflow_source_row.v1",
+            "identity_version": "cashflow_source_row.v2",
             "source_document_sha256": source_sha256,
             "account_identity_sha256": account_identity_sha256,
             "source_row_ordinal": ordinal,
+            "source_row_sha256": source_row_sha256,
         }
     )
     return _Event(
         source_event_id=source_event_id,
         source_row_ordinal=ordinal,
-        event_date=event_date,
-        signed_external_amount=amount,
+        source_row_sha256=source_row_sha256,
+        activity_date=activity_date,
+        process_date=process_date,
+        settlement_date=settlement_date,
+        source_amount=source_amount,
+        source_amount_sign_basis=source_amount_sign_basis,
+        signed_external_amount=signed_external_amount,
         classification=classification,
         source_code=source_code,
         currency=currency,
+        disposition=disposition,
+        ledger_effective_date=ledger_effective_date,
+        effective_date_basis=effective_date_basis,
+        effective_timezone=effective_timezone,
+        confidence=confidence,
+        assumption_code=assumption_code,
+        decision_authority=decision_authority,
         resolution_kind=kind_value,
         transaction_id=transaction_id,
         transaction_identity_sha256=identity_sha256,
@@ -699,8 +1007,8 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         allowed=_TOP_LEVEL_KEYS,
         context="manifest",
     )
-    if payload.get("schema_version", "1") != "1":
-        raise ManifestValidationError("manifest.schema_version must be 1")
+    if payload.get("schema_version") != "2":
+        raise ManifestValidationError("manifest.schema_version must be 2")
 
     account_id = payload["account_id"]
     if isinstance(account_id, bool) or not isinstance(account_id, int) or account_id < 1:
@@ -747,6 +1055,36 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     methodology_version = _expect_string(
         payload["methodology_version"], "manifest.methodology_version", maximum=16
     )
+    account_mapping_basis = _expect_string(
+        payload["account_mapping_basis"], "manifest.account_mapping_basis"
+    )
+    if account_mapping_basis not in {
+        "provider_account_id",
+        "statement_account_identifier",
+        "owner_confirmed",
+    }:
+        raise ManifestValidationError("manifest.account_mapping_basis is invalid")
+    account_mapping_confidence = _expect_string(
+        payload["account_mapping_confidence"], "manifest.account_mapping_confidence"
+    )
+    if account_mapping_confidence not in {"exact", "high", "provisional"}:
+        raise ManifestValidationError("manifest.account_mapping_confidence is invalid")
+    source_format = _expect_string(payload["source_format"], "manifest.source_format")
+    parser_version = _expect_string(payload["parser_version"], "manifest.parser_version")
+    source_timezone = _expect_string(
+        payload["source_timezone"], "manifest.source_timezone", maximum=64
+    )
+    source_row_count = _expect_nonnegative_int(
+        payload["source_row_count"], "manifest.source_row_count"
+    )
+    cashflow_candidate_count = _expect_nonnegative_int(
+        payload["cashflow_candidate_count"], "manifest.cashflow_candidate_count"
+    )
+    source_event_set_sha256 = _expect_sha256(
+        payload["source_event_set_sha256"], "manifest.source_event_set_sha256"
+    )
+    if source_row_count != len(source_rows):
+        raise ManifestValidationError("manifest source row count does not match evidence")
 
     raw_gaps = payload["gaps"]
     if not isinstance(raw_gaps, list):
@@ -792,23 +1130,68 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         )
         for index, raw_event in enumerate(raw_event_items)
     )
+    if source_type == "brokerage_statement" and any(
+        event.ledger_effective_date is not None
+        and (
+            event.effective_date_basis != "source_activity"
+            or event.ledger_effective_date != event.activity_date
+        )
+        for event in events
+    ):
+        raise ManifestValidationError("statement-backed events must use the source activity date")
     ordinals = [event.source_row_ordinal for event in events]
     if len(ordinals) != len(set(ordinals)):
         raise ManifestValidationError("manifest source_row_ordinal values must be unique")
+    parsed_candidate_ordinals = {
+        ordinal
+        for ordinal, row in enumerate(source_rows, start=1)
+        if _parse_robinhood_amount(row.amount, f"evidence source row {ordinal}") != 0
+        and row.transaction_code.strip() not in _NON_CASH_CODES
+    }
+    event_ordinals = set(ordinals)
+    if parsed_candidate_ordinals != event_ordinals:
+        raise ManifestValidationError(
+            "manifest must disposition every source cashflow candidate exactly once"
+        )
+    if cashflow_candidate_count != len(parsed_candidate_ordinals):
+        raise ManifestValidationError("manifest cashflow candidate count does not match evidence")
+    actual_event_set_sha256 = _digest(
+        sorted(source_rows[ordinal - 1].source_row_sha256 for ordinal in event_ordinals)
+    )
+    if source_event_set_sha256 != actual_event_set_sha256:
+        raise ManifestValidationError("manifest source event set hash does not match evidence")
+    unresolved_dates = {
+        event.activity_date for event in events if event.disposition == "unresolved"
+    }
+    for unresolved_date in unresolved_dates:
+        if not any(
+            gap.reason_code == "unresolved_classification"
+            and gap.gap_start <= unresolved_date <= gap.gap_end
+            for gap in gaps
+        ):
+            raise ManifestValidationError("unresolved candidate requires an explicit source gap")
 
     identity_payload = {
-        "identity_version": "cashflow_attestation.v1",
+        "identity_version": "cashflow_attestation.v2",
         "account_identity_sha256": account_identity,
         "coverage_start": coverage_start.isoformat(),
         "coverage_end": coverage_end.isoformat(),
         "source_type": source_type,
         "source_document_sha256": source_sha256,
         "methodology_version": methodology_version,
+        "account_mapping_basis": account_mapping_basis,
+        "account_mapping_confidence": account_mapping_confidence,
+        "source_format": source_format,
+        "parser_version": parser_version,
+        "source_timezone": source_timezone,
+        "source_row_count": source_row_count,
+        "cashflow_candidate_count": cashflow_candidate_count,
+        "source_event_set_sha256": source_event_set_sha256,
         "gaps": [gap.digest_payload() for gap in gaps],
         "source_event_ids": sorted(event.source_event_id for event in events),
     }
     identity_digest = _digest(identity_payload)
-    attestation_key = f"cashflow:v1:{identity_digest[:52]}"
+    attestation_key = f"cashflow:v2:{identity_digest[:52]}"
     manifest_digest = _digest(
         {
             **identity_payload,
@@ -828,9 +1211,18 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         source_document_sha256=source_sha256,
         captured_at=captured_at,
         methodology_version=methodology_version,
+        account_mapping_basis=account_mapping_basis,
+        account_mapping_confidence=account_mapping_confidence,
+        source_format=source_format,
+        parser_version=parser_version,
+        source_timezone=source_timezone,
+        source_row_count=source_row_count,
+        cashflow_candidate_count=cashflow_candidate_count,
+        source_event_set_sha256=source_event_set_sha256,
         gaps=tuple(gaps),
         events=events,
         attestation_key=attestation_key,
+        attestation_manifest_sha256=identity_digest,
         manifest_digest=manifest_digest,
     )
 
@@ -858,10 +1250,11 @@ def _resolve_transaction_by_identity(
 def _event_matches_transaction(event: _Event, tx: InvestmentTransaction, account_id: int) -> bool:
     return (
         tx.account_id == account_id
-        and tx.date == event.event_date
+        and abs((tx.date - event.activity_date).days) <= 14
         and tx.currency == event.currency
         and tx.security_id is None
         and tx.quantity == 0
+        and event.signed_external_amount is not None
         and abs(tx.amount) == abs(event.signed_external_amount)
     )
 
@@ -882,6 +1275,17 @@ def _effective_flow_matches(event: _Event, tx: InvestmentTransaction, override: 
 
 
 def _plan_event(session: Session, manifest: _Manifest, event: _Event) -> PlanEntry:
+    if event.resolution_kind == "no_transaction":
+        return PlanEntry(
+            event.source_event_id,
+            "excluded",
+            f"source_event_{event.disposition}",
+            manifest.account_id,
+            event,
+            None,
+            None,
+            None,
+        )
     if event.resolution_kind == "manual_transaction":
         transaction_id = _manual_transaction_id(event.source_event_id)
         tx = session.get(InvestmentTransaction, transaction_id)
@@ -964,6 +1368,10 @@ def _plan_event(session: Session, manifest: _Manifest, event: _Event) -> PlanEnt
         reason = "existing_transaction_payload_changed"
     elif not _event_matches_transaction(event, tx, manifest.account_id):
         reason = "existing_transaction_does_not_match_source_event"
+    elif (
+        event.effective_date_basis == "provider_posting" and event.ledger_effective_date != tx.date
+    ):
+        reason = "provider_posting_basis_does_not_match_target_date"
     else:
         reason = ""
     if reason:
@@ -1011,6 +1419,117 @@ def _plan_event(session: Session, manifest: _Manifest, event: _Event) -> PlanEnt
     )
 
 
+def _source_event_values(event: _Event, attestation_id: int) -> dict[str, object]:
+    return {
+        "source_event_id": event.source_event_id,
+        "attestation_id": attestation_id,
+        "source_record_id": None,
+        "source_locator_kind": "row",
+        "source_locator": f"row:{event.source_row_ordinal}",
+        "source_row_ordinal": event.source_row_ordinal,
+        "source_page": None,
+        "source_line": None,
+        "source_row_sha256": event.source_row_sha256,
+        "activity_date": event.activity_date,
+        "process_date": event.process_date,
+        "settlement_date": event.settlement_date,
+        "source_amount": event.source_amount,
+        "source_amount_sign_basis": event.source_amount_sign_basis,
+        "currency": event.currency,
+        "source_code": event.source_code,
+    }
+
+
+def _source_event_matches(row: CashFlowSourceEvent, values: Mapping[str, object]) -> bool:
+    return all(getattr(row, key) == value for key, value in values.items())
+
+
+def _decision_values(event: _Event, target_transaction_id: str | None) -> dict[str, object]:
+    payload = {
+        "source_event_id": event.source_event_id,
+        "target_transaction_id": target_transaction_id,
+        "resolution_kind": event.disposition,
+        "classification": event.classification,
+        "signed_external_amount": event.signed_external_amount,
+        "effective_date": event.ledger_effective_date,
+        "effective_date_basis": event.effective_date_basis,
+        "effective_timezone": event.effective_timezone,
+        "decision_authority": event.decision_authority,
+        "confidence": event.confidence,
+        "assumption_code": event.assumption_code,
+        "methodology_version": "2",
+    }
+    payload_sha256 = _digest(
+        {
+            key: (
+                value.isoformat()
+                if isinstance(value, date)
+                else _decimal_text(value)
+                if isinstance(value, Decimal)
+                else value
+            )
+            for key, value in payload.items()
+        }
+    )
+    return {
+        "decision_key": _digest(
+            {
+                "identity_version": "cashflow_reconciliation_decision.v1",
+                "source_event_id": event.source_event_id,
+                "decision_payload_sha256": payload_sha256,
+            }
+        ),
+        **payload,
+        "decision_payload_sha256": payload_sha256,
+    }
+
+
+def _decision_matches(
+    row: CashFlowReconciliationDecision,
+    values: Mapping[str, object],
+) -> bool:
+    return all(getattr(row, key) == value for key, value in values.items())
+
+
+def _provenance_disposition(
+    session: Session,
+    manifest: _Manifest,
+    entry: PlanEntry,
+) -> tuple[int, str | None]:
+    attestation = session.scalar(
+        select(CashFlowSourceAttestation).where(
+            CashFlowSourceAttestation.attestation_key == manifest.attestation_key
+        )
+    )
+    source_event = session.get(CashFlowSourceEvent, entry.source_event_id)
+    source_mutations = 0
+    if source_event is None:
+        source_mutations = 1
+    elif attestation is None or not _source_event_matches(
+        source_event,
+        _source_event_values(entry.event, attestation.attestation_id),
+    ):
+        return 0, "source_event_drift"
+
+    desired = _decision_values(entry.event, entry.resolved_transaction_id)
+    current = session.scalar(
+        select(CashFlowReconciliationDecision).where(
+            CashFlowReconciliationDecision.source_event_id == entry.source_event_id,
+            CashFlowReconciliationDecision.superseded_at.is_(None),
+        )
+    )
+    if current is None:
+        return source_mutations + 1, None
+    if _decision_matches(current, desired):
+        return source_mutations, None
+    if (
+        entry.event.disposition == "provider_supersedes_supplement"
+        and current.resolution_kind == "statement_supplement"
+    ):
+        return source_mutations + 3, None
+    return 0, "current_reconciliation_decision_conflict"
+
+
 def _attestation_current_payload(
     session: Session, attestation: CashFlowSourceAttestation
 ) -> tuple[dict[str, object], tuple[_Gap, ...]]:
@@ -1037,6 +1556,16 @@ def _attestation_current_payload(
         "source_sha256": attestation.source_sha256,
         "captured_at": _datetime_text(_as_aware_utc(attestation.captured_at)),
         "methodology_version": attestation.methodology_version,
+        "account_identity_sha256": attestation.account_identity_sha256,
+        "account_mapping_basis": attestation.account_mapping_basis,
+        "account_mapping_confidence": attestation.account_mapping_confidence,
+        "source_format": attestation.source_format,
+        "parser_version": attestation.parser_version,
+        "source_timezone": attestation.source_timezone,
+        "source_row_count": attestation.source_row_count,
+        "cashflow_candidate_count": attestation.cashflow_candidate_count,
+        "source_event_set_sha256": attestation.source_event_set_sha256,
+        "manifest_sha256": attestation.manifest_sha256,
         "gaps": [gap.digest_payload() for gap in gaps],
     }
     return payload, gaps
@@ -1136,27 +1665,67 @@ def build_reconciliation_plan(
     entries = tuple(
         _plan_event(session, manifest, event) for manifest in manifests for event in manifest.events
     )
-    target_counts = Counter(entry.resolved_transaction_id for entry in entries)
-    entries = tuple(
-        replace(
+    manifest_by_event = {
+        event.source_event_id: manifest for manifest in manifests for event in manifest.events
+    }
+    provenance_mutations = 0
+    reconciled_entries: list[PlanEntry] = []
+    for entry in entries:
+        mutation_count, conflict_reason = _provenance_disposition(
+            session,
+            manifest_by_event[entry.source_event_id],
             entry,
-            status="conflict",
-            reason_code="transaction_target_reused_by_multiple_source_events",
         )
-        if target_counts[entry.resolved_transaction_id] > 1
-        else entry
-        for entry in entries
-    )
+        provenance_mutations += mutation_count
+        reconciled_entries.append(
+            replace(entry, status="conflict", reason_code=conflict_reason)
+            if conflict_reason is not None
+            else entry
+        )
+    entries = tuple(reconciled_entries)
+    classifications_by_target: dict[str, set[str]] = {}
+    for entry in entries:
+        if entry.resolved_transaction_id is None or entry.event.classification is None:
+            continue
+        classifications_by_target.setdefault(entry.resolved_transaction_id, set()).add(
+            entry.event.classification
+        )
+    conflicting_targets = {
+        target_id
+        for target_id, classifications in classifications_by_target.items()
+        if len(classifications) > 1
+    }
+    if conflicting_targets:
+        entries = tuple(
+            replace(
+                entry,
+                status="conflict",
+                reason_code="shared_transaction_classification_conflict",
+            )
+            if entry.resolved_transaction_id in conflicting_targets
+            else entry
+            for entry in entries
+        )
     attestations = tuple(_plan_attestation(session, manifest) for manifest in manifests)
     counts = Counter(entry.status for entry in entries)
     status_counts = {status: counts.get(status, 0) for status in _STATUS_ORDER}
     conflict_count = status_counts["conflict"] + sum(
         attestation.status == "conflict" for attestation in attestations
     )
-    planned_mutations = sum(
-        2 if entry.status == "missing_insert" else 1 if entry.status == "override_required" else 0
-        for entry in entries
-    ) + sum(attestation.planned_mutation_count for attestation in attestations)
+    manual_insert_ids = {
+        entry.resolved_transaction_id for entry in entries if entry.status == "missing_insert"
+    }
+    override_target_ids = {
+        entry.resolved_transaction_id for entry in entries if entry.status == "override_required"
+    }
+    planned_mutations = (
+        2 * len(manual_insert_ids)
+        + len(override_target_ids)
+        + sum(attestation.planned_mutation_count for attestation in attestations)
+    )
+    planned_mutations += provenance_mutations
+    if planned_mutations:
+        planned_mutations += 1  # durable applied-run receipt
     plan_payload = {
         "plan_version": "cashflow_reconciliation.v1",
         "manifests": [manifest.manifest_digest for manifest in manifests],
@@ -1197,6 +1766,55 @@ def _insert_manual_transaction(session: Session, entry: PlanEntry) -> None:
     )
 
 
+def _validate_decision_chain(
+    session: Session,
+    source_event_id: str,
+) -> None:
+    rows = tuple(
+        session.scalars(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id == source_event_id
+            )
+        )
+    )
+    by_key = {row.decision_key: row for row in rows}
+    for row in rows:
+        seen: set[str] = set()
+        cursor = row
+        while cursor.superseded_by_decision_key is not None:
+            if cursor.decision_key in seen:
+                raise ReconciliationConflictError("reconciliation decision cycle detected")
+            seen.add(cursor.decision_key)
+            successor = by_key.get(cursor.superseded_by_decision_key)
+            if successor is None or successor.source_event_id != source_event_id:
+                raise ReconciliationConflictError("reconciliation decision chain is invalid")
+            cursor = successor
+
+
+def _validate_attestation_chains(session: Session, account_ids: set[int]) -> None:
+    rows = tuple(
+        session.scalars(
+            select(CashFlowSourceAttestation).where(
+                CashFlowSourceAttestation.account_id.in_(account_ids)
+            )
+        )
+    )
+    by_id = {row.attestation_id: row for row in rows}
+    for row in rows:
+        seen: set[int] = set()
+        cursor = row
+        while cursor.superseded_by_attestation_id is not None:
+            if cursor.attestation_id in seen:
+                raise ReconciliationConflictError("source attestation cycle detected")
+            seen.add(cursor.attestation_id)
+            successor = by_id.get(cursor.superseded_by_attestation_id)
+            if successor is None or successor.account_id != row.account_id:
+                raise ReconciliationConflictError(
+                    "source attestation replacement crosses account boundary"
+                )
+            cursor = successor
+
+
 def _insert_or_approve_attestation(
     session: Session,
     manifest: _Manifest,
@@ -1215,6 +1833,16 @@ def _insert_or_approve_attestation(
             captured_at=manifest.captured_at,
             approved_at=approved_at,
             methodology_version=manifest.methodology_version,
+            account_identity_sha256=manifest.account_identity_sha256,
+            account_mapping_basis=manifest.account_mapping_basis,
+            account_mapping_confidence=manifest.account_mapping_confidence,
+            source_format=manifest.source_format,
+            parser_version=manifest.parser_version,
+            source_timezone=manifest.source_timezone,
+            source_row_count=manifest.source_row_count,
+            cashflow_candidate_count=manifest.cashflow_candidate_count,
+            source_event_set_sha256=manifest.source_event_set_sha256,
+            manifest_sha256=manifest.attestation_manifest_sha256,
             superseded_at=None,
             superseded_by_attestation_id=None,
         )
@@ -1240,9 +1868,246 @@ def _insert_or_approve_attestation(
         attestation.approved_at = approved_at
 
 
+def _persist_source_events_and_decisions(
+    session: Session,
+    plan: ReconciliationPlan,
+    approved_at: datetime,
+) -> tuple[int, tuple[_DecisionMembership, ...], tuple[_TransactionMutationReceipt, ...]]:
+    mutations = 0
+    memberships: list[_DecisionMembership] = []
+    transaction_mutations: list[_TransactionMutationReceipt] = []
+    manifest_by_event = {
+        event.source_event_id: manifest for manifest in plan.manifests for event in manifest.events
+    }
+    for entry in plan.entries:
+        manifest = manifest_by_event[entry.source_event_id]
+        attestation = session.scalar(
+            select(CashFlowSourceAttestation).where(
+                CashFlowSourceAttestation.attestation_key == manifest.attestation_key
+            )
+        )
+        if attestation is None:
+            raise ReconciliationConflictError("source attestation is unavailable")
+        source_values = _source_event_values(entry.event, attestation.attestation_id)
+        source_event = session.get(CashFlowSourceEvent, entry.source_event_id)
+        if source_event is None:
+            session.add(CashFlowSourceEvent(**source_values))
+            mutations += 1
+        elif not _source_event_matches(source_event, source_values):
+            raise ReconciliationConflictError("source event changed before commit")
+
+        decision_values = _decision_values(entry.event, entry.resolved_transaction_id)
+        decision_key = cast(str, decision_values["decision_key"])
+        _validate_decision_chain(session, entry.source_event_id)
+        current = session.scalar(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id == entry.source_event_id,
+                CashFlowReconciliationDecision.superseded_at.is_(None),
+            )
+        )
+        if current is not None and _decision_matches(current, decision_values):
+            memberships.append(_DecisionMembership(current.decision_key, "verified"))
+            continue
+        if current is not None:
+            if not (
+                entry.event.disposition == "provider_supersedes_supplement"
+                and current.resolution_kind == "statement_supplement"
+            ):
+                raise ReconciliationConflictError("reconciliation decision changed before commit")
+            old_target = current.target_transaction_id
+            current.superseded_at = approved_at
+            current.superseded_by_decision_key = decision_key
+            memberships.append(_DecisionMembership(current.decision_key, "superseded"))
+            mutations += 1
+            if old_target is not None:
+                old_override = session.get(TransactionOverride, old_target)
+                notes = "Provider transaction supersedes statement supplement"
+                if old_override is None:
+                    session.add(
+                        TransactionOverride(
+                            plaid_investment_transaction_id=old_target,
+                            classification="internal",
+                            notes=notes,
+                        )
+                    )
+                    mutation_kind = "override_insert"
+                    before_digest = None
+                else:
+                    before_digest = _override_payload_sha256(
+                        old_override.classification,
+                        old_override.notes or "",
+                    )
+                    old_override.classification = "internal"
+                    old_override.notes = notes
+                    mutation_kind = "override_update"
+                transaction_mutations.append(
+                    _TransactionMutationReceipt(
+                        old_target,
+                        mutation_kind,
+                        before_digest,
+                        _override_payload_sha256("internal", notes),
+                    )
+                )
+                mutations += 1
+        session.add(
+            CashFlowReconciliationDecision(
+                **decision_values,
+                approved_at=approved_at,
+                superseded_at=None,
+                superseded_by_decision_key=None,
+            )
+        )
+        memberships.append(_DecisionMembership(decision_key, "created"))
+        mutations += 1
+    return mutations, tuple(memberships), tuple(transaction_mutations)
+
+
+def _persist_run_receipt(
+    session: Session,
+    plan: ReconciliationPlan,
+    *,
+    approved_at: datetime,
+    software_revision: str,
+    backup_reference: str,
+    preview_reference: str,
+    applied_mutation_count: int,
+) -> tuple[int, str | None]:
+    if applied_mutation_count == 0:
+        return 0, None
+    manifest_set_sha256 = _digest(sorted(item.manifest_digest for item in plan.manifests))
+    run_id = _digest(
+        {
+            "plan_digest": plan.plan_digest,
+            "manifest_set_sha256": manifest_set_sha256,
+            "software_revision": software_revision,
+            "backup_reference": backup_reference,
+            "preview_reference": preview_reference,
+        }
+    )
+    existing = session.get(CashFlowReconciliationRun, run_id)
+    if existing is not None:
+        if existing.plan_digest != plan.plan_digest:
+            raise ReconciliationConflictError("run receipt identity conflict")
+        return 0, run_id
+    session.add(
+        CashFlowReconciliationRun(
+            run_id=run_id,
+            plan_digest=plan.plan_digest,
+            manifest_set_sha256=manifest_set_sha256,
+            software_revision=software_revision,
+            backup_reference=backup_reference,
+            preview_reference=preview_reference,
+            affected_start=min(item.coverage_start for item in plan.manifests),
+            affected_end=max(item.coverage_end for item in plan.manifests),
+            affected_account_count=len({item.account_id for item in plan.manifests}),
+            source_event_count=len(plan.entries),
+            planned_mutation_count=plan.planned_mutation_count,
+            applied_mutation_count=applied_mutation_count + 1,
+            status="applied",
+            approved_at=approved_at,
+            applied_at=approved_at,
+        )
+    )
+    return 1, run_id
+
+
+def _persist_run_memberships(
+    session: Session,
+    run_id: str,
+    decision_memberships: Sequence[_DecisionMembership],
+    transaction_mutations: Sequence[_TransactionMutationReceipt],
+) -> None:
+    decision_keys: set[str] = set()
+    for membership in decision_memberships:
+        if membership.decision_key in decision_keys:
+            raise ReconciliationConflictError("duplicate decision run membership")
+        decision_keys.add(membership.decision_key)
+        session.add(
+            CashFlowReconciliationRunDecision(
+                run_id=run_id,
+                decision_key=membership.decision_key,
+                membership_kind=membership.membership_kind,
+            )
+        )
+    mutation_keys: set[tuple[str, str]] = set()
+    for mutation in transaction_mutations:
+        key = (mutation.target_transaction_id, mutation.mutation_kind)
+        if key in mutation_keys:
+            raise ReconciliationConflictError("duplicate transaction mutation receipt")
+        mutation_keys.add(key)
+        session.add(
+            CashFlowReconciliationRunTransactionMutation(
+                run_id=run_id,
+                target_transaction_id=mutation.target_transaction_id,
+                mutation_kind=mutation.mutation_kind,
+                before_payload_sha256=mutation.before_payload_sha256,
+                after_payload_sha256=mutation.after_payload_sha256,
+            )
+        )
+
+
+def _verify_run_receipt(
+    session: Session,
+    plan: ReconciliationPlan,
+    run_id: str | None,
+    decision_memberships: Sequence[_DecisionMembership],
+    transaction_mutations: Sequence[_TransactionMutationReceipt],
+) -> None:
+    if run_id is None:
+        if decision_memberships or transaction_mutations:
+            raise ReconciliationConflictError("run membership exists without run receipt")
+        return
+    run = session.get(CashFlowReconciliationRun, run_id)
+    if (
+        run is None
+        or run.plan_digest != plan.plan_digest
+        or run.planned_mutation_count != plan.planned_mutation_count
+        or run.applied_mutation_count != plan.planned_mutation_count
+    ):
+        raise ReconciliationConflictError("run receipt verification failed")
+    persisted_decisions = tuple(
+        session.scalars(
+            select(CashFlowReconciliationRunDecision).where(
+                CashFlowReconciliationRunDecision.run_id == run_id
+            )
+        )
+    )
+    if {(row.decision_key, row.membership_kind) for row in persisted_decisions} != {
+        (item.decision_key, item.membership_kind) for item in decision_memberships
+    }:
+        raise ReconciliationConflictError("decision run membership verification failed")
+    persisted_mutations = tuple(
+        session.scalars(
+            select(CashFlowReconciliationRunTransactionMutation).where(
+                CashFlowReconciliationRunTransactionMutation.run_id == run_id
+            )
+        )
+    )
+    if {
+        (
+            row.target_transaction_id,
+            row.mutation_kind,
+            row.before_payload_sha256,
+            row.after_payload_sha256,
+        )
+        for row in persisted_mutations
+    } != {
+        (
+            item.target_transaction_id,
+            item.mutation_kind,
+            item.before_payload_sha256,
+            item.after_payload_sha256,
+        )
+        for item in transaction_mutations
+    }:
+        raise ReconciliationConflictError("transaction mutation receipt verification failed")
+
+
 def _verify_applied_state(session: Session, plan: ReconciliationPlan) -> None:
     """Verify all intended authorities before allowing the transaction to commit."""
     for entry in plan.entries:
+        if entry.resolved_transaction_id is None:
+            continue
         tx = session.get(InvestmentTransaction, entry.resolved_transaction_id)
         if tx is None:
             raise ReconciliationConflictError("transaction write verification failed")
@@ -1269,6 +2134,35 @@ def _verify_applied_state(session: Session, plan: ReconciliationPlan) -> None:
         current_payload, _ = _attestation_current_payload(session, attestation)
         if current_payload != manifest.attestation_payload():
             raise ReconciliationConflictError("attestation payload verification failed")
+        for event in manifest.events:
+            _validate_decision_chain(session, event.source_event_id)
+            source_event = session.get(CashFlowSourceEvent, event.source_event_id)
+            if source_event is None or not _source_event_matches(
+                source_event,
+                _source_event_values(event, attestation.attestation_id),
+            ):
+                raise ReconciliationConflictError("source event write verification failed")
+            current_decision = session.scalar(
+                select(CashFlowReconciliationDecision).where(
+                    CashFlowReconciliationDecision.source_event_id == event.source_event_id,
+                    CashFlowReconciliationDecision.superseded_at.is_(None),
+                )
+            )
+            target = next(
+                entry.resolved_transaction_id
+                for entry in plan.entries
+                if entry.source_event_id == event.source_event_id
+            )
+            expected_decision = _decision_values(event, target)
+            if (
+                current_decision is None
+                or current_decision.approved_at is None
+                or not _decision_matches(
+                    current_decision,
+                    expected_decision,
+                )
+            ):
+                raise ReconciliationConflictError("decision write verification failed")
 
     # The evidence is outside the database transaction.  Re-read it at the
     # final boundary so a source replacement during apply fails closed too.
@@ -1285,11 +2179,17 @@ def apply_reconciliation_plan(
     *,
     expected_plan_digest: str | None = None,
     approved_at: datetime,
+    software_revision: str,
+    backup_reference: str,
+    preview_reference: str,
 ) -> ReconciliationResult:
     """Atomically apply an exact, conflict-free plan after locked revalidation."""
     if expected_plan_digest is None or expected_plan_digest != plan.plan_digest:
         raise ReconciliationConflictError("exact plan digest approval is required")
     approved_at = _validate_approval_time(approved_at, plan.manifests)
+    software_revision = _expect_string(software_revision, "software_revision", maximum=64)
+    backup_reference = _expect_string(backup_reference, "backup_reference", maximum=512)
+    preview_reference = _expect_string(preview_reference, "preview_reference", maximum=512)
     if plan.conflict_count:
         raise ReconciliationConflictError("reconciliation plan contains conflicts")
 
@@ -1305,30 +2205,126 @@ def apply_reconciliation_plan(
         if locked_plan.conflict_count:
             raise ReconciliationConflictError("reconciliation plan contains conflicts")
 
+        applied_mutation_count = 0
+        transaction_mutations: list[_TransactionMutationReceipt] = []
+        economically_mutated_targets: set[str] = set()
         for entry in locked_plan.entries:
             if entry.status == "missing_insert":
+                assert entry.resolved_transaction_id is not None
+                if entry.resolved_transaction_id in economically_mutated_targets:
+                    continue
                 _insert_manual_transaction(session, entry)
+                notes = "Owner-approved cash-flow source reconciliation"
+                transaction_mutations.extend(
+                    (
+                        _TransactionMutationReceipt(
+                            entry.resolved_transaction_id,
+                            "transaction_insert",
+                            None,
+                            _manual_payload_sha256(entry.event, entry.account_id),
+                        ),
+                        _TransactionMutationReceipt(
+                            entry.resolved_transaction_id,
+                            "override_insert",
+                            None,
+                            _override_payload_sha256(cast(str, entry.event.classification), notes),
+                        ),
+                    )
+                )
+                economically_mutated_targets.add(entry.resolved_transaction_id)
+                applied_mutation_count += 2
             elif entry.status == "override_required":
+                assert entry.resolved_transaction_id is not None
+                if entry.event.classification is None:
+                    raise ReconciliationConflictError("override lacks classification")
+                if entry.resolved_transaction_id in economically_mutated_targets:
+                    continue
                 override = session.get(TransactionOverride, entry.resolved_transaction_id)
+                notes = "Owner-approved cash-flow source reconciliation"
                 if override is None:
                     session.add(
                         TransactionOverride(
                             plaid_investment_transaction_id=entry.resolved_transaction_id,
                             classification=entry.event.classification,
-                            notes="Owner-approved cash-flow source reconciliation",
+                            notes=notes,
                         )
                     )
+                    mutation_kind: Literal["override_insert", "override_update"] = "override_insert"
+                    before_digest = None
                 else:
+                    before_digest = _override_payload_sha256(
+                        override.classification,
+                        override.notes or "",
+                    )
                     override.classification = entry.event.classification
-                    override.notes = "Owner-approved cash-flow source reconciliation"
+                    override.notes = notes
+                    mutation_kind = "override_update"
+                transaction_mutations.append(
+                    _TransactionMutationReceipt(
+                        entry.resolved_transaction_id,
+                        mutation_kind,
+                        before_digest,
+                        _override_payload_sha256(cast(str, entry.event.classification), notes),
+                    )
+                )
+                economically_mutated_targets.add(entry.resolved_transaction_id)
+                applied_mutation_count += 1
+        _validate_attestation_chains(
+            session,
+            {manifest.account_id for manifest in locked_plan.manifests},
+        )
         for manifest, attestation_plan in zip(
             locked_plan.manifests, locked_plan.attestations, strict=True
         ):
             _insert_or_approve_attestation(session, manifest, attestation_plan, approved_at)
+            applied_mutation_count += attestation_plan.planned_mutation_count
         session.flush()
+        provenance_count, decision_memberships, provenance_transaction_mutations = (
+            _persist_source_events_and_decisions(
+                session,
+                locked_plan,
+                approved_at,
+            )
+        )
+        applied_mutation_count += provenance_count
+        transaction_mutations.extend(provenance_transaction_mutations)
+        if applied_mutation_count == 0:
+            decision_memberships = ()
+            transaction_mutations = []
+        _validate_attestation_chains(
+            session,
+            {manifest.account_id for manifest in locked_plan.manifests},
+        )
+        session.flush()
+        receipt_count, run_id = _persist_run_receipt(
+            session,
+            locked_plan,
+            approved_at=approved_at,
+            software_revision=software_revision,
+            backup_reference=backup_reference,
+            preview_reference=preview_reference,
+            applied_mutation_count=applied_mutation_count,
+        )
+        applied_mutation_count += receipt_count
+        session.flush()
+        if run_id is not None:
+            _persist_run_memberships(
+                session,
+                run_id,
+                decision_memberships,
+                transaction_mutations,
+            )
+            session.flush()
+        if applied_mutation_count != locked_plan.planned_mutation_count:
+            raise ReconciliationConflictError("applied mutation count changed")
         _verify_applied_state(session, locked_plan)
-
-        applied_mutation_count = locked_plan.planned_mutation_count
+        _verify_run_receipt(
+            session,
+            locked_plan,
+            run_id,
+            decision_memberships,
+            transaction_mutations,
+        )
         session.commit()
     except Exception:
         session.rollback()
@@ -1357,6 +2353,7 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
             entry.event.signed_external_amount
             for entry in plan.entries
             if entry.event.classification == "external_in"
+            and entry.event.signed_external_amount is not None
         ),
         Decimal(0),
     )
@@ -1365,6 +2362,7 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
             entry.event.signed_external_amount
             for entry in plan.entries
             if entry.event.classification == "external_out"
+            and entry.event.signed_external_amount is not None
         ),
         Decimal(0),
     )
@@ -1376,7 +2374,7 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
                     (
                         entry.event.signed_external_amount
                         for entry in plan.entries
-                        if entry.status == status
+                        if entry.status == status and entry.event.signed_external_amount is not None
                     ),
                     Decimal(0),
                 )
@@ -1397,13 +2395,45 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
             {
                 "source_event_id": entry.source_event_id,
                 "source_row_ordinal": entry.event.source_row_ordinal,
-                "date": entry.event.event_date.isoformat(),
-                "signed_external_amount": _decimal_text(entry.event.signed_external_amount),
+                "source_row_sha256": entry.event.source_row_sha256,
+                "activity_date": entry.event.activity_date.isoformat(),
+                "process_date": (
+                    entry.event.process_date.isoformat()
+                    if entry.event.process_date is not None
+                    else None
+                ),
+                "settlement_date": (
+                    entry.event.settlement_date.isoformat()
+                    if entry.event.settlement_date is not None
+                    else None
+                ),
+                "source_amount": _decimal_text(entry.event.source_amount),
+                "signed_external_amount": (
+                    _decimal_text(entry.event.signed_external_amount)
+                    if entry.event.signed_external_amount is not None
+                    else None
+                ),
                 "classification": entry.event.classification,
                 "source_code": entry.event.source_code,
+                "disposition": entry.event.disposition,
+                "ledger_effective_date": (
+                    entry.event.ledger_effective_date.isoformat()
+                    if entry.event.ledger_effective_date is not None
+                    else None
+                ),
+                "effective_date_basis": entry.event.effective_date_basis,
+                "effective_timezone": entry.event.effective_timezone,
+                "confidence": entry.event.confidence,
+                "assumption_code": entry.event.assumption_code,
+                "decision_authority": entry.event.decision_authority,
+                "target_transaction_id": entry.resolved_transaction_id,
                 "target_identity_sha256": (
                     entry.event.transaction_identity_sha256
-                    or _sha256_text(entry.resolved_transaction_id)
+                    or (
+                        _sha256_text(entry.resolved_transaction_id)
+                        if entry.resolved_transaction_id is not None
+                        else None
+                    )
                 ),
                 "status": entry.status,
                 "reason_code": entry.reason_code,
@@ -1462,6 +2492,8 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit", action="store_true", help="apply the exact approved plan")
     parser.add_argument("--expected-plan-digest")
     parser.add_argument("--approved-at", type=_parse_cli_datetime)
+    parser.add_argument("--software-revision")
+    parser.add_argument("--backup-reference")
     return parser
 
 
@@ -1469,8 +2501,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run a sanitized dry-run by default; commit only with explicit approval."""
     parser = _argument_parser()
     args = parser.parse_args(argv)
-    if args.commit and (args.expected_plan_digest is None or args.approved_at is None):
-        parser.error("--commit requires --expected-plan-digest and --approved-at")
+    if args.commit and any(
+        value is None
+        for value in (
+            args.expected_plan_digest,
+            args.approved_at,
+            args.software_revision,
+            args.backup_reference,
+            args.preview_path,
+        )
+    ):
+        parser.error(
+            "--commit requires --expected-plan-digest, --approved-at, "
+            "--software-revision, --backup-reference, and --preview-path"
+        )
     sources = tuple(
         ManifestSource(Path(manifest_path), Path(source_path))
         for manifest_path, source_path in args.source
@@ -1488,6 +2532,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     plan,
                     expected_plan_digest=args.expected_plan_digest,
                     approved_at=args.approved_at,
+                    software_revision=args.software_revision,
+                    backup_reference=args.backup_reference,
+                    preview_reference=str(args.preview_path),
                 )
                 summary = result.console_summary()
             else:

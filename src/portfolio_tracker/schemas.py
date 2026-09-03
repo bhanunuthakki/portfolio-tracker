@@ -8,9 +8,24 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+CashFlowTransactionOrigin: TypeAlias = Literal[
+    "aggregator_transaction", "statement_supplement", "derived_share_transfer"
+]
+CashFlowDecisionAuthorityOut: TypeAlias = Literal[
+    "provider", "brokerage_statement", "owner_approved"
+]
+CashFlowDecisionConfidenceOut: TypeAlias = Literal["exact", "high", "provisional"]
+CashFlowEffectiveDateBasisOut: TypeAlias = Literal[
+    "source_activity",
+    "source_process",
+    "source_settlement",
+    "provider_posting",
+    "owner_resolved",
+]
 
 
 class LinkTokenOut(BaseModel):
@@ -198,6 +213,17 @@ class CashFlowSourceAttestationOut(BaseModel):
     superseded_at: datetime | None
     superseded_by_attestation_key: str | None
     methodology_version: str
+    account_identity_sha256: str | None = None
+    account_mapping_basis: str | None = None
+    account_mapping_confidence: str | None = None
+    source_format: str | None = None
+    parser_version: str | None = None
+    source_timezone: str | None = None
+    source_row_count: int | None = None
+    cashflow_candidate_count: int | None = None
+    persisted_source_event_count: int = 0
+    source_event_set_sha256: str | None = None
+    manifest_sha256: str | None = None
     gaps: list[CashFlowSourceGapOut]
     validation_reason_codes: list[str]
 
@@ -226,6 +252,24 @@ class PerformanceDatedCashflow(BaseModel):
 
     date: date
     amount: Decimal
+    flow_ids: list[str] = Field(default_factory=list)
+
+
+class PerformanceOperativeCashflow(BaseModel):
+    """One operative ledger row and its immutable reconciliation lineage."""
+
+    flow_id: str
+    date: date
+    amount: Decimal
+    transaction_id: str | None
+    transaction_origin: CashFlowTransactionOrigin | Literal["calculation_adjustment"]
+    source_event_ids: list[str]
+    source_attestation_keys: list[str]
+    active_decision_keys: list[str]
+    decision_authorities: list[CashFlowDecisionAuthorityOut]
+    decision_confidences: list[CashFlowDecisionConfidenceOut]
+    assumption_codes: list[str]
+    effective_date_bases: list[CashFlowEffectiveDateBasisOut]
 
 
 class PerformanceBenchmarkPriceInput(BaseModel):
@@ -236,6 +280,7 @@ class PerformanceBenchmarkPriceInput(BaseModel):
     source_date: date
     close: Decimal
     resolution: Literal["same_day_close", "previous_market_close"]
+    return_basis: Literal["total_return_adjusted", "raw_price_fallback"] = "raw_price_fallback"
 
 
 class PerformanceBenchmarkEquation(BaseModel):
@@ -264,6 +309,7 @@ class PerformanceEquationReceipt(BaseModel):
     benchmark_price_resolution_policy: Literal["same_day_or_previous_us_market_close"]
     opening_value: Decimal
     dated_external_cashflows: list[PerformanceDatedCashflow]
+    operative_external_cashflows: list[PerformanceOperativeCashflow]
     net_external_cashflow_in: Decimal
     ending_value: Decimal
     investment_gain: Decimal
@@ -279,6 +325,31 @@ class PerformanceEquationReceipt(BaseModel):
         net_flow = sum((flow.amount for flow in self.dated_external_cashflows), Decimal(0))
         if net_flow != self.net_external_cashflow_in:
             raise ValueError("dated external cashflows do not reconcile to net flow")
+        operative_ids = [flow.flow_id for flow in self.operative_external_cashflows]
+        if len(operative_ids) != len(set(operative_ids)):
+            raise ValueError("operative external cashflow IDs must be unique")
+        dated_dates = [flow.date for flow in self.dated_external_cashflows]
+        if len(dated_dates) != len(set(dated_dates)):
+            raise ValueError("dated external cashflow dates must be unique")
+        operative_by_date: dict[date, Decimal] = {}
+        for flow in self.operative_external_cashflows:
+            operative_by_date[flow.date] = (
+                operative_by_date.get(flow.date, Decimal(0)) + flow.amount
+            )
+        nonzero_operative_dates = {
+            flow_date for flow_date, amount in operative_by_date.items() if amount != 0
+        }
+        if set(dated_dates) != nonzero_operative_dates:
+            raise ValueError("dated external cashflows must cover every nonzero operative date")
+        for dated_flow in self.dated_external_cashflows:
+            if operative_by_date.get(dated_flow.date, Decimal(0)) != dated_flow.amount:
+                raise ValueError("operative external cashflows do not reconcile by date")
+            if set(dated_flow.flow_ids) != {
+                flow.flow_id
+                for flow in self.operative_external_cashflows
+                if flow.date == dated_flow.date
+            }:
+                raise ValueError("dated external cashflow IDs do not match operative rows")
         if self.ending_value - self.opening_value - net_flow != self.investment_gain:
             raise ValueError("whole-portfolio value bridge does not reconcile")
         if self.portfolio_equation_residual != 0:
@@ -330,6 +401,9 @@ class PerformanceSeries(BaseModel):
     methodology: Literal["performance.modified_dietz"]
     methodology_version: Literal["2"]
     calculation_status: Literal["available", "unavailable"]
+    reconstruction_certification: Literal[
+        "observed_certified", "modeled_provisional", "unavailable"
+    ] = "unavailable"
     calculation_reason_codes: list[str]
     start_date: date
     end_date: date

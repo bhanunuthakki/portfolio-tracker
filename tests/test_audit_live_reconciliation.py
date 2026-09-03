@@ -324,9 +324,12 @@ def test_audit_resolves_every_event_and_reports_private_evidence(tmp_path: Path)
     coverage = cast("dict[str, object]", preview["source_coverage"])
     assert coverage["is_complete"] is False
     assert coverage["account_status_counts"] == {
-        "complete": 1,
+        # A legacy 0025 attestation without parsed Source events remains
+        # evidence, but it cannot certify source completeness under the
+        # provenance-backed reconciliation contract.
+        "complete": 0,
         "partial": 0,
-        "missing": 2,
+        "missing": 3,
     }
     serialized = json.dumps(preview, sort_keys=True)
     for secret in (

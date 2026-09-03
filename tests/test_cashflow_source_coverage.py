@@ -1,23 +1,74 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
     Benchmark,
+    CashFlowReconciliationDecision,
     CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     CashFlowSourceGap,
     HoldingSnapshot,
     Item,
     Security,
 )
-from portfolio_tracker.services.cashflow_source_coverage import assess_cashflow_source_coverage
+from portfolio_tracker.services.cashflow_source_coverage import (
+    assess_cashflow_source_coverage,
+    canonical_decision_payload_sha256,
+    canonical_source_event_set_sha256,
+)
 from portfolio_tracker.services.performance import compute_performance_series
-
 
 _CAPTURED_AT = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 _APPROVED_AT = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
+
+
+def test_decision_digest_matches_reconciler_canonical_payload() -> None:
+    decision = CashFlowReconciliationDecision(
+        decision_key="1" * 64,
+        source_event_id="2" * 64,
+        target_transaction_id="provider-transaction",
+        resolution_kind="provider_exact",
+        classification="external_in",
+        signed_external_amount=Decimal("100.00"),
+        effective_date=date(2026, 1, 5),
+        effective_date_basis="source_activity",
+        effective_timezone="America/New_York",
+        decision_authority="brokerage_statement",
+        confidence="exact",
+        assumption_code="statement_activity_date",
+        methodology_version="2",
+        decision_payload_sha256="3" * 64,
+        approved_at=_APPROVED_AT,
+    )
+    producer_payload = {
+        "source_event_id": "2" * 64,
+        "target_transaction_id": "provider-transaction",
+        "resolution_kind": "provider_exact",
+        "classification": "external_in",
+        "signed_external_amount": "100",
+        "effective_date": "2026-01-05",
+        "effective_date_basis": "source_activity",
+        "effective_timezone": "America/New_York",
+        "decision_authority": "brokerage_statement",
+        "confidence": "exact",
+        "assumption_code": "statement_activity_date",
+        "methodology_version": "2",
+    }
+    expected = hashlib.sha256(
+        json.dumps(
+            producer_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    assert canonical_decision_payload_sha256(decision) == expected
 
 
 def _valued_account(session, suffix: str) -> Account:
@@ -57,6 +108,7 @@ def _attestation(
     end: date,
     approved: bool = True,
     digest_char: str = "a",
+    enhanced: bool = True,
 ) -> CashFlowSourceAttestation:
     row = CashFlowSourceAttestation(
         attestation_key=key,
@@ -69,10 +121,147 @@ def _attestation(
         captured_at=_CAPTURED_AT,
         approved_at=_APPROVED_AT if approved else None,
         methodology_version="1",
+        account_identity_sha256=(digest_char * 64 if enhanced else None),
+        account_mapping_basis=("owner_confirmed" if enhanced else None),
+        account_mapping_confidence=("exact" if enhanced else None),
+        source_format=("synthetic" if enhanced else None),
+        parser_version=("test-v1" if enhanced else None),
+        source_timezone=("UTC" if enhanced else None),
+        source_row_count=(0 if enhanced else None),
+        cashflow_candidate_count=(0 if enhanced else None),
+        source_event_set_sha256=(canonical_source_event_set_sha256(()) if enhanced else None),
+        manifest_sha256=("f" * 64 if enhanced else None),
     )
     session.add(row)
     session.flush()
     return row
+
+
+def test_legacy_document_only_attestation_is_visible_but_non_certifying(session):
+    account = _valued_account(session, "legacy")
+    _attestation(
+        session,
+        account,
+        key="legacy-document-only",
+        start=date(2026, 1, 2),
+        end=date(2026, 1, 31),
+        enhanced=False,
+    )
+    session.commit()
+
+    result = assess_cashflow_source_coverage(
+        session,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        account_ids=frozenset({account.account_id}),
+    )
+
+    assert result.is_complete is False
+    assert result.attestations[0].validation_reason_codes == (
+        "source_attestation_event_provenance_missing",
+    )
+
+
+def test_declared_candidate_count_must_equal_persisted_source_events(session):
+    account = _valued_account(session, "count")
+    attestation = _attestation(
+        session,
+        account,
+        key="candidate-count-mismatch",
+        start=date(2026, 1, 2),
+        end=date(2026, 1, 31),
+    )
+    attestation.source_row_count = 1
+    attestation.cashflow_candidate_count = 1
+    session.add(
+        CashFlowSourceEvent(
+            source_event_id="1" * 64,
+            attestation_id=attestation.attestation_id,
+            source_locator_kind="row",
+            source_locator="row:1",
+            source_row_ordinal=1,
+            source_row_sha256="2" * 64,
+            activity_date=date(2026, 1, 10),
+            source_amount=Decimal(100),
+            source_amount_sign_basis="statement_printed",
+            currency="USD",
+        )
+    )
+    # Delete the event after declaring it: the persisted candidate set is
+    # incomplete even though the document-level attestation is approved.
+    session.flush()
+    session.query(CashFlowSourceEvent).delete()
+    session.commit()
+
+    result = assess_cashflow_source_coverage(
+        session,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        account_ids=frozenset({account.account_id}),
+    )
+
+    assert result.is_complete is False
+    assert "source_attestation_candidate_count_mismatch" in (
+        result.attestations[0].validation_reason_codes
+    )
+
+
+def test_source_date_basis_mismatch_prevents_attestation_certification(session):
+    account = _valued_account(session, "basis")
+    attestation = _attestation(
+        session,
+        account,
+        key="date-basis-mismatch",
+        start=date(2026, 1, 2),
+        end=date(2026, 1, 31),
+    )
+    event = CashFlowSourceEvent(
+        source_event_id="4" * 64,
+        attestation_id=attestation.attestation_id,
+        source_locator_kind="row",
+        source_locator="row:1",
+        source_row_ordinal=1,
+        source_row_sha256="5" * 64,
+        activity_date=date(2026, 1, 10),
+        source_amount=Decimal(100),
+        source_amount_sign_basis="statement_printed",
+        currency="USD",
+    )
+    decision = CashFlowReconciliationDecision(
+        decision_key="6" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id=None,
+        resolution_kind="internal",
+        classification="internal",
+        signed_external_amount=Decimal(0),
+        effective_date=date(2026, 1, 11),
+        effective_date_basis="source_activity",
+        effective_timezone="America/New_York",
+        decision_authority="brokerage_statement",
+        confidence="exact",
+        assumption_code="statement_activity_date",
+        methodology_version="2",
+        decision_payload_sha256="7" * 64,
+        approved_at=_APPROVED_AT,
+    )
+    decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+    attestation.source_row_count = 1
+    attestation.cashflow_candidate_count = 1
+    attestation.source_event_set_sha256 = canonical_source_event_set_sha256((event,))
+    session.add_all([event, decision])
+    session.commit()
+
+    result = assess_cashflow_source_coverage(
+        session,
+        date(2026, 1, 1),
+        date(2026, 1, 31),
+        account_ids=frozenset({account.account_id}),
+    )
+
+    assert result.is_complete is False
+    assert "source_attestation_event_effective_date_basis_mismatch" in (
+        result.attestations[0].validation_reason_codes
+    )
 
 
 def test_missing_attestation_is_not_inferred_complete(session):

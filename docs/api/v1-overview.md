@@ -35,7 +35,7 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/portfolio-snapshot` | Bulk consumer read model: accounts + consolidated positions + five-way tax-bucket totals + equity fraction, one consistent read |
 | `GET /api/v1/portfolio/positions` | Consolidated positions with per-lot tax treatment (see `positions-v1.md`) |
 | `GET /api/v1/transactions` | Cursor-paginated normalized transactions with override + effective TWR classification (default window 730 days) |
-| `GET /api/v1/cash-flows` | Canonical whole-portfolio flow ledger for `(start, end]`: owner override → name rule → subtype rule, plus priced unmatched share transfers; reports structural validity separately from approved source-history coverage (`cash_flow.twr_classification` v2) |
+| `GET /api/v1/cash-flows` | Canonical whole-portfolio flow ledger for `(start, end]`: approved provenance decisions first, then legacy aggregator-only owner override → name rule → subtype rule, plus priced unmatched share transfers; reports structural validity separately from approved source-history coverage (`cash_flow.twr_classification` v2) |
 | `GET /api/v1/position-snapshots` | Historical observed holdings rows with `origin` markers (`broker` vs `manual` gap-fill); default window 90 days |
 | `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
@@ -56,9 +56,27 @@ portfolio return, and SPY/QQQ/configured-policy counterfactual gains, returns,
 dollar alpha, and percentage-point alpha. Opaque SHA-256 identifiers bind the
 receipt to its flow-ledger, valuation, and resolved benchmark-price inputs.
 Each benchmark equation also exposes the target date, actual source close date,
-positive close value, and whether resolution used the same day or the immediately
-previous U.S. market close; a missing close on a market session fails closed.
-Unavailable results set the receipt and all derived point fields to null and
+positive close value, whether resolution used the same day or the immediately
+previous U.S. market close, and `return_basis` (`total_return_adjusted` or the
+explicit `raw_price_fallback` used for legacy benchmark rows); a missing close
+on a market session fails closed. The receipt retains the daily flow aggregate
+consumed identically by the portfolio, SPY, QQQ, and policy equations and every
+operative flow ID. Each operative row carries its source-event IDs, attestation
+keys, active decision keys, authority, confidence, assumption code, and
+effective-date basis. Date basis is one of `source_activity`, `source_process`,
+`source_settlement`, `provider_posting`, or `owner_resolved`; statement-backed
+decisions use the source activity date even when the linked provider row posts
+later. The modeled cash walkback consumes that same canonical date (including
+activity on the broker-observation anchor date), so the portfolio path and all
+matched benchmark books do not place one economic flow on different days.
+`reconstruction_certification` is independent of mathematical availability:
+`observed_certified` means the opening and ending boundaries are complete broker
+snapshots, `modeled_provisional` means the opening is a transaction walkback,
+and `unavailable` means the series did not pass the existing fail-closed gates.
+A modeled opening remains provisional until position activity, account
+lifecycle, broker cash/account-total closure, and eligible on-or-before-date
+historical prices are all proven; the current schema does not claim those
+additional closure proofs. Unavailable results set the receipt and all derived point fields to null and
 return stable reason codes such as `portfolio_start_value_unavailable`,
 `portfolio_end_value_unavailable`, `spy_benchmark_price_unavailable`,
 `qqq_benchmark_price_unavailable`, `policy_benchmark_price_unavailable`, and
@@ -107,8 +125,11 @@ cursor returns the structured `INVALID_CURSOR` error (below).
 
 For `cash-flows`, `net_external_cashflow_in` always describes the complete
 requested window, not the current page. The ledger uses the same valued-account
-universe as performance and exposes provider, rule, component transaction, and
-historical-price provenance. `structural_is_complete` says whether the stored
+universe as performance and exposes transaction origin, provider, rule,
+component transaction, source-event/attestation/decision lineage, and
+historical-price provenance. Statement supplementals are explicitly labeled
+`statement_supplement` with a brokerage-statement provider; they are never
+presented as aggregator-derived. `structural_is_complete` says whether the stored
 rows can be classified and valued. `source_coverage` separately reports whether
 every valued account has current, owner-approved evidence for every date in the
 end-of-day flow window `(start, end]`, including evidence reference/hash,
@@ -118,7 +139,22 @@ coverage. Draft, superseded, malformed, partial, or missing attestations do not
 count. When either check fails, the window total is null and performance returns
 unavailable with a stable reason such as
 `external_flow_source_coverage_incomplete` or
-`external_share_movement_price_unavailable`.
+`external_share_movement_price_unavailable`. A provenance-managed transaction is
+operative only through a current approved, non-provisional decision. An
+approved provider decision may supersede a statement supplemental without
+double-counting the old target. Multiple independent source events may
+corroborate one target only when account, currency, effective date,
+classification, and signed economics agree. Missing, conflicting, unresolved,
+unapproved, provisional, or digest-drifted current decisions fail structurally.
+Legacy aggregator transactions with no provenance records continue through the
+deterministic classification rules.
+
+Only an enhanced attestation can certify coverage: its declared candidate count
+must equal the persisted source-event count, its canonical source-event-set hash
+must match, and every event must have exactly one approved current resolved,
+non-provisional decision whose payload digest recomputes exactly. Legacy
+document-only attestations remain visible but are non-certifying. Stable
+`validation_reason_codes` identify the failed gate.
 
 Migration `0025` creates empty attestation tables deliberately. It does not
 infer historical coverage from the rows already stored. Recording or replacing

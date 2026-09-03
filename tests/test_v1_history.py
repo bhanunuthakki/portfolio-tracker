@@ -21,6 +21,7 @@ from portfolio_tracker.models import (
     Security,
     TransactionOverride,
 )
+from portfolio_tracker.services.cashflow_source_coverage import canonical_source_event_set_sha256
 
 _TODAY = date.today()
 _FRESH = _TODAY - timedelta(days=1)
@@ -107,6 +108,16 @@ def _seed(session):
             captured_at=datetime(2026, 1, 1, tzinfo=UTC),
             approved_at=datetime(2026, 1, 2, tzinfo=UTC),
             methodology_version="1",
+            account_identity_sha256="c" * 64,
+            account_mapping_basis="owner_confirmed",
+            account_mapping_confidence="exact",
+            source_format="synthetic",
+            parser_version="test-v1",
+            source_timezone="UTC",
+            source_row_count=0,
+            cashflow_candidate_count=0,
+            source_event_set_sha256=canonical_source_event_set_sha256(()),
+            manifest_sha256="e" * 64,
         )
     )
     session.commit()

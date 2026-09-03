@@ -14,10 +14,10 @@ import tempfile
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -38,16 +38,17 @@ from portfolio_tracker.jobs.reconcile_cashflow_manifest import (  # noqa: E402
 )
 from portfolio_tracker.models import (  # noqa: E402
     Account,
+    CashFlowReconciliationDecision,
     InvestmentTransaction,
     Item,
     TransactionOverride,
 )
 from portfolio_tracker.services.active_items import valued_account_ids  # noqa: E402
-from portfolio_tracker.services.external_flow_ledger import (  # noqa: E402
-    classify_transaction_cashflow,
-)
 
-EXPECTED_ALEMBIC_REVISION = "0025"
+EXPECTED_ALEMBIC_REVISION = "0026"
+PARSER_VERSION = "robinhood_activity_csv.v2"
+SOURCE_TIMEZONE = "America/New_York"
+_DATE_SHIFT_DAYS = 14
 _HEADERS: tuple[str, ...] = (
     "Activity Date",
     "Process Date",
@@ -59,7 +60,14 @@ _HEADERS: tuple[str, ...] = (
     "Price",
     "Amount",
 )
-_STATUS_ORDER = ("existing_exact", "override_required", "manual_transaction")
+_STATUS_ORDER = (
+    "provider_exact",
+    "statement_supplement",
+    "internal",
+    "excluded",
+    "unresolved",
+)
+_NON_CASH_CODES = frozenset({"Buy", "Sell", "CDIV", "INT", "SPL", "REC"})
 
 
 class BuildError(RuntimeError):
@@ -75,16 +83,54 @@ class EvidenceEvent(BaseModel):
 
     source_row_ordinal: int | None = Field(default=None, gt=0)
     date: date
-    signed_external_amount: Decimal
-    classification: Literal["external_in", "external_out"]
+    source_amount: Decimal | None = None
+    signed_external_amount: Decimal | None = None
+    classification: Literal["external_in", "external_out", "internal", "excluded"] | None = None
     source_code: str | None = None
+    disposition: (
+        Literal[
+            "provider_exact",
+            "statement_supplement",
+            "internal",
+            "excluded",
+            "unresolved",
+        ]
+        | None
+    ) = None
+    ledger_effective_date: date | None = None
+    effective_date_basis: Literal[
+        "source_activity",
+        "source_process",
+        "source_settlement",
+        "provider_posting",
+        "owner_resolved",
+    ] = "source_activity"
+    effective_timezone: str = SOURCE_TIMEZONE
+    confidence: Literal["exact", "high", "provisional"] = "high"
+    assumption_code: str = "statement_activity_date_used"
+    decision_authority: Literal["provider", "brokerage_statement", "owner_approved"] = (
+        "owner_approved"
+    )
 
     @model_validator(mode="after")
     def validate_direction(self) -> EvidenceEvent:
-        if not self.signed_external_amount.is_finite() or self.signed_external_amount == 0:
-            raise ValueError("amount must be finite and nonzero")
-        if (self.classification == "external_in") != (self.signed_external_amount > 0):
-            raise ValueError("classification conflicts with amount sign")
+        source_amount = self.source_amount
+        signed = self.signed_external_amount
+        if source_amount is not None and not source_amount.is_finite():
+            raise ValueError("source amount must be finite")
+        if self.disposition == "unresolved":
+            if self.classification is not None or signed is not None:
+                raise ValueError("unresolved events cannot assert an economic classification")
+        elif self.classification in {"internal", "excluded"}:
+            if signed != 0:
+                raise ValueError("internal and excluded events require zero external amount")
+        else:
+            if self.classification not in {"external_in", "external_out"}:
+                raise ValueError("resolved external events require a classification")
+            if signed is None or not signed.is_finite() or signed == 0:
+                raise ValueError("external amount must be finite and nonzero")
+            if (self.classification == "external_in") != (signed > 0):
+                raise ValueError("classification conflicts with amount sign")
         if self.source_code is not None and (
             not self.source_code.strip()
             or self.source_code != self.source_code.strip()
@@ -127,7 +173,7 @@ class EvidenceInventory(BaseModel):
     captured_at: datetime | None = None
     methodology_version: str = "1"
     gaps: list[EvidenceGap] = Field(default_factory=list[EvidenceGap])
-    events: list[EvidenceEvent] = Field(min_length=1)
+    events: list[EvidenceEvent] = Field(default_factory=list[EvidenceEvent])
 
     @field_validator("account_identity_sha256", "source_document_sha256")
     @classmethod
@@ -168,8 +214,12 @@ class EvidenceInventory(BaseModel):
 class SourceRow:
     ordinal: int
     activity_date: date
+    process_date: date | None
+    settlement_date: date | None
     source_code: str
     signed_amount: Decimal
+    source_row_sha256: str
+    is_cashflow_candidate: bool
 
 
 @dataclass(frozen=True)
@@ -251,6 +301,20 @@ def _parse_amount(value: str) -> Decimal:
     return -result if negative else result
 
 
+def _parse_optional_date(value: str) -> date | None:
+    normalized = value.strip()
+    if not normalized:
+        return None
+    try:
+        return datetime.strptime(normalized, "%m/%d/%Y").date()
+    except ValueError:
+        raise BuildError("csv_date_invalid") from None
+
+
+def _source_row_sha256(record: Sequence[str]) -> str:
+    return _digest({header: value.strip() for header, value in zip(_HEADERS, record, strict=True)})
+
+
 def _parse_csv(path: Path) -> tuple[str, tuple[SourceRow, ...]]:
     try:
         raw = path.read_bytes()
@@ -268,19 +332,25 @@ def _parse_csv(path: Path) -> tuple[str, tuple[SourceRow, ...]]:
             continue
         if reached_trailer or len(record) != len(_HEADERS):
             raise BuildError("csv_row_shape_unsupported")
-        try:
-            activity_date = datetime.strptime(record[0].strip(), "%m/%d/%Y").date()
-        except ValueError:
-            raise BuildError("csv_date_invalid") from None
+        activity_date = _parse_optional_date(record[0])
+        if activity_date is None:
+            raise BuildError("csv_date_invalid")
+        process_date = _parse_optional_date(record[1])
+        settlement_date = _parse_optional_date(record[2])
         source_code = record[5].strip()
         if not source_code or len(source_code) > 32:
             raise BuildError("csv_source_code_invalid")
+        signed_amount = _parse_amount(record[8])
         rows.append(
             SourceRow(
                 ordinal=len(rows) + 1,
                 activity_date=activity_date,
+                process_date=process_date,
+                settlement_date=settlement_date,
                 source_code=source_code,
-                signed_amount=_parse_amount(record[8]),
+                signed_amount=signed_amount,
+                source_row_sha256=_source_row_sha256(record),
+                is_cashflow_candidate=(signed_amount != 0 and source_code not in _NON_CASH_CODES),
             )
         )
     return _sha256(raw), tuple(rows)
@@ -299,11 +369,16 @@ def _match_source_rows(
     matched: list[tuple[EvidenceEvent, SourceRow]] = []
     used: set[int] = set()
     for event in inventory.events:
+        source_amount = (
+            event.source_amount if event.source_amount is not None else event.signed_external_amount
+        )
+        if source_amount is None:
+            raise BuildError("source_amount_required")
         candidates = [
             row
             for row in rows
             if row.activity_date == event.date
-            and row.signed_amount == event.signed_external_amount
+            and row.signed_amount == source_amount
             and (event.source_code is None or row.source_code == event.source_code)
             and (event.source_row_ordinal is None or row.ordinal == event.source_row_ordinal)
         ]
@@ -314,19 +389,37 @@ def _match_source_rows(
         selected = candidates[0]
         if selected.ordinal in used:
             raise BuildError("source_row_reused")
+        if not selected.is_cashflow_candidate:
+            raise BuildError("source_event_not_cashflow_candidate")
         used.add(selected.ordinal)
         matched.append((event, selected))
+    candidate_ordinals = {row.ordinal for row in rows if row.is_cashflow_candidate}
+    if candidate_ordinals - used:
+        raise BuildError("cashflow_candidate_omitted")
+    if used - candidate_ordinals:
+        raise BuildError("source_event_not_cashflow_candidate")
     return tuple(matched)
 
 
 def _candidate_transactions(
-    session: Session, inventory: EvidenceInventory, event: EvidenceEvent
+    session: Session,
+    inventory: EvidenceInventory,
+    event: EvidenceEvent,
+    source_row: SourceRow,
 ) -> tuple[InvestmentTransaction, ...]:
+    match_amount = event.signed_external_amount
+    if match_amount is None:
+        match_amount = event.source_amount
+    if match_amount is None:
+        raise BuildError("source_amount_required")
     candidates = tuple(
         session.scalars(
             select(InvestmentTransaction).where(
                 InvestmentTransaction.account_id == inventory.account_id,
-                InvestmentTransaction.date == event.date,
+                InvestmentTransaction.date
+                >= source_row.activity_date - timedelta(days=_DATE_SHIFT_DAYS),
+                InvestmentTransaction.date
+                <= source_row.activity_date + timedelta(days=_DATE_SHIFT_DAYS),
                 InvestmentTransaction.currency == "USD",
                 InvestmentTransaction.security_id.is_(None),
                 InvestmentTransaction.quantity == 0,
@@ -337,7 +430,7 @@ def _candidate_transactions(
     return tuple(
         transaction
         for transaction in candidates
-        if abs(Decimal(transaction.amount)) == abs(event.signed_external_amount)
+        if abs(Decimal(transaction.amount)) == abs(match_amount)
     )
 
 
@@ -345,37 +438,74 @@ def _resolve_event(
     session: Session,
     inventory: EvidenceInventory,
     event: EvidenceEvent,
-) -> tuple[str, dict[str, object]]:
-    candidates = _candidate_transactions(session, inventory, event)
+    source_row: SourceRow,
+    source_event_id: str,
+) -> tuple[str, dict[str, object], date | None, str | None, str | None]:
+    if event.disposition in {"internal", "excluded", "unresolved"}:
+        effective_date = _inventory_effective_date(event, source_row)
+        if event.disposition == "unresolved":
+            effective_date = None
+        return (
+            event.disposition,
+            {"kind": "no_transaction"},
+            effective_date,
+            None if effective_date is None else "source_activity",
+            event.assumption_code,
+        )
+
+    candidates = _candidate_transactions(session, inventory, event, source_row)
     if len(candidates) > 1:
         raise BuildError("transaction_match_ambiguous")
     if not candidates:
-        return "manual_transaction", {"kind": "manual_transaction"}
+        if event.disposition == "provider_exact":
+            raise BuildError("expected_provider_transaction_missing")
+        return (
+            "statement_supplement",
+            {"kind": "manual_transaction"},
+            _inventory_effective_date(event, source_row),
+            "source_activity",
+            event.assumption_code,
+        )
     transaction = candidates[0]
+    current_decision = session.scalar(
+        select(CashFlowReconciliationDecision).where(
+            CashFlowReconciliationDecision.source_event_id == source_event_id,
+            CashFlowReconciliationDecision.superseded_at.is_(None),
+        )
+    )
+    disposition = "provider_exact"
+    if current_decision is not None and current_decision.resolution_kind == "statement_supplement":
+        disposition = "provider_supersedes_supplement"
+    elif event.disposition == "statement_supplement":
+        raise BuildError("supplement_duplicates_provider_transaction")
     override = session.get(TransactionOverride, transaction.plaid_investment_transaction_id)
     current_override = override.classification if override is not None else None
-    decision = classify_transaction_cashflow(
-        transaction.type,
-        transaction.subtype,
-        Decimal(transaction.amount),
-        override=current_override,
-        name=transaction.name,
+    assumption = event.assumption_code
+    if transaction.date != source_row.activity_date:
+        assumption = "provider_posting_date_shift"
+    return (
+        disposition,
+        {
+            "kind": "existing_transaction",
+            "transaction_identity_sha256": transaction_identity_sha256(
+                transaction.plaid_investment_transaction_id
+            ),
+            "expected_transaction_payload_sha256": transaction_payload_sha256(transaction),
+            "expected_current_override": current_override,
+        },
+        source_row.activity_date,
+        "source_activity",
+        assumption,
     )
-    status = (
-        "existing_exact"
-        if decision is not None
-        and decision.classification == event.classification
-        and decision.signed_external_amount == event.signed_external_amount
-        else "override_required"
-    )
-    return status, {
-        "kind": "existing_transaction",
-        "transaction_identity_sha256": transaction_identity_sha256(
-            transaction.plaid_investment_transaction_id
-        ),
-        "expected_transaction_payload_sha256": transaction_payload_sha256(transaction),
-        "expected_current_override": current_override,
-    }
+
+
+def _inventory_effective_date(event: EvidenceEvent, source_row: SourceRow) -> date:
+    if (
+        event.ledger_effective_date is not None
+        and event.ledger_effective_date != source_row.activity_date
+    ):
+        raise BuildError("statement_effective_date_must_use_activity_date")
+    return source_row.activity_date
 
 
 def _verify_account(session: Session, inventory: EvidenceInventory) -> str:
@@ -420,22 +550,100 @@ def _build_document(
     counts: Counter[str] = Counter()
     events: list[dict[str, object]] = []
     for event, source_row in matched:
-        status, resolution = _resolve_event(session, inventory, event)
-        counts[status] += 1
+        source_event_id = _digest(
+            {
+                "identity_version": "cashflow_source_row.v2",
+                "source_document_sha256": inventory.source_document_sha256,
+                "account_identity_sha256": account_identity_sha256,
+                "source_row_ordinal": source_row.ordinal,
+                "source_row_sha256": source_row.source_row_sha256,
+            }
+        )
+        disposition, resolution, effective_date, date_basis, assumption_code = _resolve_event(
+            session,
+            inventory,
+            event,
+            source_row,
+            source_event_id,
+        )
+        counts[
+            "provider_exact" if disposition == "provider_supersedes_supplement" else disposition
+        ] += 1
+        classification = event.classification
+        signed_external_amount = event.signed_external_amount
         events.append(
             {
                 "source_row_ordinal": source_row.ordinal,
-                "date": event.date.isoformat(),
-                "signed_external_amount": _decimal_text(event.signed_external_amount),
-                "classification": event.classification,
+                "source_row_sha256": source_row.source_row_sha256,
+                "activity_date": source_row.activity_date.isoformat(),
+                "process_date": (
+                    source_row.process_date.isoformat()
+                    if source_row.process_date is not None
+                    else None
+                ),
+                "settlement_date": (
+                    source_row.settlement_date.isoformat()
+                    if source_row.settlement_date is not None
+                    else None
+                ),
+                "source_amount": _decimal_text(source_row.signed_amount),
+                "source_amount_sign_basis": "statement_printed",
+                "date": source_row.activity_date.isoformat(),
+                "signed_external_amount": (
+                    _decimal_text(signed_external_amount)
+                    if signed_external_amount is not None
+                    else None
+                ),
+                "classification": classification,
                 "source_code": source_row.source_code,
+                "currency": "USD",
+                "disposition": disposition,
+                "ledger_effective_date": (
+                    effective_date.isoformat() if effective_date is not None else None
+                ),
+                "effective_date_basis": date_basis,
+                "effective_timezone": (
+                    None if disposition == "unresolved" else event.effective_timezone
+                ),
+                "confidence": event.confidence,
+                "assumption_code": assumption_code,
+                "decision_authority": event.decision_authority,
                 "resolution": resolution,
             }
         )
+    unresolved_dates: set[str] = {
+        cast(str, event["activity_date"])
+        for event in events
+        if event["disposition"] == "unresolved"
+    }
+    gaps = [
+        {
+            "gap_start": gap.gap_start.isoformat(),
+            "gap_end": gap.gap_end.isoformat(),
+            "reason_code": gap.reason_code,
+        }
+        for gap in inventory.gaps
+    ]
+    gaps.extend(
+        {
+            "gap_start": event_date,
+            "gap_end": event_date,
+            "reason_code": "unresolved_classification",
+        }
+        for event_date in sorted(unresolved_dates)
+        if not any(
+            gap["gap_start"] <= event_date <= gap["gap_end"]
+            and gap["reason_code"] == "unresolved_classification"
+            for gap in gaps
+        )
+    )
+    candidate_hashes = sorted(row.source_row_sha256 for row in rows if row.is_cashflow_candidate)
     document: dict[str, object] = {
-        "schema_version": "1",
+        "schema_version": "2",
         "account_id": inventory.account_id,
         "account_identity_sha256": account_identity_sha256,
+        "account_mapping_basis": "provider_account_id",
+        "account_mapping_confidence": "exact",
         "coverage_start": inventory.coverage_start.isoformat(),
         "coverage_end": inventory.coverage_end.isoformat(),
         "source_type": inventory.source_type,
@@ -443,14 +651,13 @@ def _build_document(
         "source_document_sha256": inventory.source_document_sha256,
         "captured_at": _captured_at(inventory, csv_path),
         "methodology_version": inventory.methodology_version,
-        "gaps": [
-            {
-                "gap_start": gap.gap_start.isoformat(),
-                "gap_end": gap.gap_end.isoformat(),
-                "reason_code": gap.reason_code,
-            }
-            for gap in inventory.gaps
-        ],
+        "source_format": "robinhood_activity_csv",
+        "parser_version": PARSER_VERSION,
+        "source_timezone": SOURCE_TIMEZONE,
+        "source_row_count": len(rows),
+        "cashflow_candidate_count": len(candidate_hashes),
+        "source_event_set_sha256": _digest(candidate_hashes),
+        "gaps": gaps,
         "events": events,
     }
     return document, counts

@@ -17,11 +17,14 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Literal, cast
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
     Account,
+    CashFlowReconciliationDecision,
+    CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     InvestmentTransaction,
     InvestmentTransactionType,
     Item,
@@ -30,12 +33,53 @@ from portfolio_tracker.models import (
     TransactionOverride,
 )
 from portfolio_tracker.services.active_items import valued_account_ids
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_decision_payload_sha256,
+    canonical_source_event_set_sha256,
+    decision_date_basis_matches_source,
+)
 from portfolio_tracker.services.splits import load_split_factors
 
 FlowClassification = Literal["external_in", "external_out", "internal"]
-ClassificationSource = Literal["override", "heuristic", "derived_share_transfer_net"]
+ClassificationSource = Literal[
+    "override",
+    "heuristic",
+    "derived_share_transfer_net",
+    "reconciliation_decision",
+]
 FlowSourceKind = Literal["transaction", "share_transfer_valuation"]
 ValuationPriceSource = Literal["historical_close"]
+TransactionOrigin = Literal[
+    "aggregator_transaction",
+    "statement_supplement",
+    "derived_share_transfer",
+]
+DecisionAuthority = Literal["provider", "brokerage_statement", "owner_approved"]
+DecisionConfidence = Literal["exact", "high", "provisional"]
+EffectiveDateBasis = Literal[
+    "source_activity",
+    "source_process",
+    "source_settlement",
+    "provider_posting",
+    "owner_resolved",
+]
+ExternalFlowIssueCode = Literal[
+    "share_transfer_missing_security",
+    "share_transfer_missing_ticker",
+    "share_transfer_price_unavailable",
+    "provenance_current_decision_missing",
+    "provenance_current_decision_conflict",
+    "provenance_current_decision_unapproved",
+    "provenance_current_decision_unresolved",
+    "provenance_current_decision_provisional",
+    "provenance_target_transaction_missing",
+    "provenance_target_transaction_account_mismatch",
+    "provenance_target_transaction_economics_mismatch",
+    "provenance_transaction_target_conflict",
+    "provenance_decision_payload_digest_mismatch",
+    "provenance_source_event_set_digest_mismatch",
+    "provenance_effective_date_basis_mismatch",
+]
 
 _INTERNAL_TRANSFER_SUBTYPES: frozenset[str] = frozenset(
     {"assignment", "exercise", "merger", "spin off", "split", "stock distribution"}
@@ -86,15 +130,19 @@ class ExternalFlowEntry:
     valuation_price: Decimal | None = None
     valuation_price_date: date | None = None
     valuation_price_source: ValuationPriceSource | None = None
+    transaction_origin: TransactionOrigin = "aggregator_transaction"
+    source_event_ids: tuple[str, ...] = ()
+    source_attestation_keys: tuple[str, ...] = ()
+    active_decision_keys: tuple[str, ...] = ()
+    decision_authorities: tuple[DecisionAuthority, ...] = ()
+    decision_confidences: tuple[DecisionConfidence, ...] = ()
+    assumption_codes: tuple[str, ...] = ()
+    effective_date_bases: tuple[EffectiveDateBasis, ...] = ()
 
 
 @dataclass(frozen=True)
 class ExternalFlowIssue:
-    code: Literal[
-        "share_transfer_missing_security",
-        "share_transfer_missing_ticker",
-        "share_transfer_price_unavailable",
-    ]
+    code: ExternalFlowIssueCode
     date: date
     security_key: str
     component_transaction_ids: tuple[str, ...]
@@ -320,6 +368,181 @@ class _ShareTransferComponent:
     type: str
 
 
+@dataclass(frozen=True)
+class _ManagedDecision:
+    event: CashFlowSourceEvent
+    attestation: CashFlowSourceAttestation
+    decision: CashFlowReconciliationDecision
+
+
+def _source_event_date(event: CashFlowSourceEvent) -> date:
+    """Best available source date for a structured issue."""
+    return event.activity_date or event.settlement_date or event.process_date or date.min
+
+
+def _provenance_state(
+    session: Session,
+    accounts: frozenset[int],
+    start_date: date,
+    end_date: date,
+) -> tuple[
+    dict[str, tuple[_ManagedDecision, ...]],
+    frozenset[str],
+    tuple[ExternalFlowIssue, ...],
+]:
+    """Resolve append-only source events to exactly one operative decision.
+
+    Every transaction ever targeted by a provenance decision is removed from
+    the legacy heuristic path. Only a current, approved, non-provisional,
+    resolved decision can put its target back into the effective ledger.
+    """
+    source_rows = session.execute(
+        select(CashFlowSourceEvent, CashFlowSourceAttestation)
+        .join(
+            CashFlowSourceAttestation,
+            CashFlowSourceAttestation.attestation_id == CashFlowSourceEvent.attestation_id,
+        )
+        .where(CashFlowSourceAttestation.account_id.in_(accounts))
+    ).all()
+    if not source_rows:
+        return {}, frozenset(), ()
+
+    events = {event.source_event_id: (event, attestation) for event, attestation in source_rows}
+    events_by_attestation: dict[int, list[CashFlowSourceEvent]] = defaultdict(list)
+    attestations: dict[int, CashFlowSourceAttestation] = {}
+    for event, attestation in source_rows:
+        events_by_attestation[attestation.attestation_id].append(event)
+        attestations[attestation.attestation_id] = attestation
+    decisions = (
+        session.execute(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id.in_(events)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    all_target_ids = frozenset(
+        decision.target_transaction_id
+        for decision in decisions
+        if decision.target_transaction_id is not None
+    )
+    current_by_event: dict[str, list[CashFlowReconciliationDecision]] = defaultdict(list)
+    for decision in decisions:
+        if decision.superseded_at is None:
+            current_by_event[decision.source_event_id].append(decision)
+
+    managed_groups: dict[str, list[_ManagedDecision]] = defaultdict(list)
+    issues: list[ExternalFlowIssue] = []
+    invalid_attestation_ids: set[int] = set()
+    for attestation_id, attestation_events in events_by_attestation.items():
+        attestation = attestations[attestation_id]
+        if (
+            attestation.source_event_set_sha256 is not None
+            and attestation.source_event_set_sha256
+            != canonical_source_event_set_sha256(tuple(attestation_events))
+        ):
+            invalid_attestation_ids.add(attestation_id)
+            if attestation.coverage_end > start_date and attestation.coverage_start <= end_date:
+                issues.append(
+                    ExternalFlowIssue(
+                        "provenance_source_event_set_digest_mismatch",
+                        max(start_date + timedelta(days=1), attestation.coverage_start),
+                        attestation.attestation_key,
+                        (),
+                    )
+                )
+    target_owners: dict[str, list[str]] = defaultdict(list)
+    for source_event_id, (event, attestation) in events.items():
+        if (
+            attestation.superseded_at is not None
+            or attestation.superseded_by_attestation_id is not None
+        ):
+            continue
+        if attestation.attestation_id in invalid_attestation_ids:
+            continue
+        current = current_by_event[source_event_id]
+        issue_date = _source_event_date(event)
+        if len(current) != 1:
+            code = (
+                "provenance_current_decision_missing"
+                if not current
+                else "provenance_current_decision_conflict"
+            )
+            # Only fail the requested window for source events whose evidence
+            # date can affect it. Targeted rows are still withheld globally.
+            if start_date < issue_date <= end_date:
+                issues.append(ExternalFlowIssue(code, issue_date, source_event_id, ()))
+            continue
+        decision = current[0]
+        effective_date = decision.effective_date or issue_date
+        if not (start_date < effective_date <= end_date):
+            continue
+        code: ExternalFlowIssueCode | None = None
+        if decision.approved_at is None:
+            code = "provenance_current_decision_unapproved"
+        elif decision.decision_payload_sha256 != canonical_decision_payload_sha256(decision):
+            code = "provenance_decision_payload_digest_mismatch"
+        elif not decision_date_basis_matches_source(decision, event):
+            code = "provenance_effective_date_basis_mismatch"
+        elif decision.resolution_kind == "unresolved":
+            code = "provenance_current_decision_unresolved"
+        elif decision.confidence == "provisional":
+            code = "provenance_current_decision_provisional"
+        if code is not None:
+            issues.append(
+                ExternalFlowIssue(
+                    code,
+                    effective_date,
+                    source_event_id,
+                    (),
+                )
+            )
+            continue
+        target_id = decision.target_transaction_id
+        if target_id is None:
+            # Internal/excluded source events can close without a transaction;
+            # they deliberately contribute no cash flow.
+            continue
+        target_owners[target_id].append(source_event_id)
+        managed_groups[target_id].append(_ManagedDecision(event, attestation, decision))
+
+    for target_id, source_event_ids in target_owners.items():
+        if len(source_event_ids) <= 1:
+            continue
+        decisions_for_target = [row.decision for row in managed_groups[target_id]]
+        economic_keys = {
+            (
+                row.attestation.account_id,
+                row.event.currency,
+                decision.effective_date,
+                decision.classification,
+                decision.signed_external_amount,
+            )
+            for row, decision in zip(managed_groups[target_id], decisions_for_target, strict=True)
+        }
+        if len(economic_keys) == 1:
+            continue
+        managed_groups.pop(target_id, None)
+        decision = decisions_for_target[0]
+        issues.append(
+            ExternalFlowIssue(
+                "provenance_transaction_target_conflict",
+                decision.effective_date or _source_event_date(events[source_event_ids[0]][0]),
+                target_id,
+                (target_id,),
+            )
+        )
+    return (
+        {
+            target_id: tuple(sorted(rows, key=lambda row: row.decision.decision_key))
+            for target_id, rows in managed_groups.items()
+        },
+        all_target_ids,
+        tuple(issues),
+    )
+
+
 def _is_share_transfer_candidate(transaction: InvestmentTransaction) -> bool:
     subtype = (transaction.subtype or "").lower().strip()
     if (
@@ -346,6 +569,10 @@ def build_external_flow_ledger(
     if not accounts:
         return ExternalFlowLedger(start_date, end_date, frozenset(), ())
 
+    managed_by_target, provenance_target_ids, provenance_issues = _provenance_state(
+        session, frozenset(accounts), start_date, end_date
+    )
+
     rows = session.execute(
         select(InvestmentTransaction, Account, Item, Security)
         .join(Account, Account.account_id == InvestmentTransaction.account_id)
@@ -354,17 +581,155 @@ def build_external_flow_ledger(
         # Portfolio values are end-of-day observations. A flow on the opening
         # date is already inside V_start, so the canonical return window is
         # (start_date, end_date], not [start_date, end_date].
-        .where(InvestmentTransaction.date > start_date)
-        .where(InvestmentTransaction.date <= end_date)
+        .where(
+            or_(
+                (
+                    (InvestmentTransaction.date > start_date)
+                    & (InvestmentTransaction.date <= end_date)
+                ),
+                InvestmentTransaction.plaid_investment_transaction_id.in_(managed_by_target),
+            )
+        )
         .where(InvestmentTransaction.account_id.in_(accounts))
     ).all()
     overrides = load_transaction_overrides(session)
     entries: list[ExternalFlowEntry] = []
     transfer_components: list[_ShareTransferComponent] = []
-    issues: list[ExternalFlowIssue] = []
+    issues: list[ExternalFlowIssue] = list(provenance_issues)
+    seen_managed_targets: set[str] = set()
 
     for transaction, account, item, security in rows:
         transaction_id = transaction.plaid_investment_transaction_id
+        managed_group = managed_by_target.get(transaction_id)
+        if transaction_id in provenance_target_ids and managed_group is None:
+            # Superseded targets and structurally invalid current decisions are
+            # never allowed to leak back through legacy heuristic rules.
+            continue
+        if managed_group is not None:
+            seen_managed_targets.add(transaction_id)
+            managed = managed_group[0]
+            decision = managed.decision
+            if any(transaction.account_id != row.attestation.account_id for row in managed_group):
+                issues.append(
+                    ExternalFlowIssue(
+                        "provenance_target_transaction_account_mismatch",
+                        decision.effective_date or transaction.date,
+                        managed.event.source_event_id,
+                        (transaction_id,),
+                    )
+                )
+                continue
+            if any(transaction.currency != row.event.currency for row in managed_group):
+                issues.append(
+                    ExternalFlowIssue(
+                        "provenance_target_transaction_economics_mismatch",
+                        decision.effective_date or transaction.date,
+                        managed.event.source_event_id,
+                        (transaction_id,),
+                    )
+                )
+                continue
+            if any(
+                row.decision.effective_date_basis == "provider_posting"
+                and row.decision.effective_date != transaction.date
+                for row in managed_group
+            ):
+                issues.append(
+                    ExternalFlowIssue(
+                        "provenance_effective_date_basis_mismatch",
+                        decision.effective_date or transaction.date,
+                        managed.event.source_event_id,
+                        (transaction_id,),
+                    )
+                )
+                continue
+            if decision.classification == "excluded":
+                continue
+            classification = cast(FlowClassification, decision.classification)
+            signed_amount = Decimal(decision.signed_external_amount or 0)
+            origin: TransactionOrigin = (
+                "statement_supplement"
+                if all(
+                    row.decision.resolution_kind == "statement_supplement" for row in managed_group
+                )
+                else "aggregator_transaction"
+            )
+            entries.append(
+                ExternalFlowEntry(
+                    flow_id=f"decision:{decision.decision_key}",
+                    date=decision.effective_date or transaction.date,
+                    source_kind="transaction",
+                    source_provider=(
+                        managed.attestation.source_type
+                        if origin == "statement_supplement"
+                        else item.source
+                    ),
+                    signed_external_amount=signed_amount,
+                    classification=classification,
+                    classification_source="reconciliation_decision",
+                    classification_rule=(
+                        f"reconciliation.{decision.resolution_kind}"
+                        if len(managed_group) == 1
+                        else "reconciliation.corroborated_source_events"
+                    ),
+                    currency=transaction.currency,
+                    transaction_id=transaction_id,
+                    account_id=account.account_id,
+                    account_ids=(account.account_id,),
+                    account_name=account.name,
+                    security_id=security.security_id if security is not None else None,
+                    ticker=security.ticker if security is not None else None,
+                    name=transaction.name,
+                    type=transaction.type,
+                    subtype=transaction.subtype,
+                    amount=Decimal(transaction.amount or 0),
+                    transaction_origin=origin,
+                    source_event_ids=tuple(
+                        sorted(row.event.source_event_id for row in managed_group)
+                    ),
+                    source_attestation_keys=tuple(
+                        sorted({row.attestation.attestation_key for row in managed_group})
+                    ),
+                    active_decision_keys=tuple(
+                        sorted(row.decision.decision_key for row in managed_group)
+                    ),
+                    decision_authorities=tuple(
+                        sorted(
+                            {
+                                cast(DecisionAuthority, row.decision.decision_authority)
+                                for row in managed_group
+                            }
+                        )
+                    ),
+                    decision_confidences=tuple(
+                        sorted(
+                            {
+                                cast(DecisionConfidence, row.decision.confidence)
+                                for row in managed_group
+                            }
+                        )
+                    ),
+                    assumption_codes=tuple(
+                        sorted(
+                            {
+                                row.decision.assumption_code
+                                for row in managed_group
+                                if row.decision.assumption_code
+                            }
+                        )
+                    ),
+                    effective_date_bases=tuple(
+                        sorted(
+                            {
+                                cast(EffectiveDateBasis, row.decision.effective_date_basis)
+                                for row in managed_group
+                                if row.decision.effective_date_basis
+                            }
+                        )
+                    ),
+                )
+            )
+            continue
         subtype = (transaction.subtype or "").lower().strip()
         override = overrides.get(transaction_id)
         if _is_share_transfer_candidate(transaction):
@@ -446,6 +811,20 @@ def build_external_flow_ledger(
                 type=transaction.type,
                 subtype=transaction.subtype,
                 amount=amount,
+                transaction_origin="aggregator_transaction",
+            )
+        )
+
+    for target_id, managed_group in managed_by_target.items():
+        if target_id in seen_managed_targets:
+            continue
+        managed = managed_group[0]
+        issues.append(
+            ExternalFlowIssue(
+                "provenance_target_transaction_missing",
+                managed.decision.effective_date or _source_event_date(managed.event),
+                managed.event.source_event_id,
+                (target_id,),
             )
         )
 
@@ -595,6 +974,7 @@ def _synthesized_share_transfer_entries(
                 valuation_price=valuation_price,
                 valuation_price_date=valuation_date,
                 valuation_price_source=valuation_source,
+                transaction_origin="derived_share_transfer",
             )
         )
     return out, issues

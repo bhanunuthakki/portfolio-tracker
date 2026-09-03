@@ -57,6 +57,9 @@ from portfolio_tracker.models import (
     PriceSource,
     Security,
 )
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_source_event_set_sha256,
+)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "docs" / "api" / "fixtures" / "v1"
 
@@ -144,7 +147,17 @@ def _seed(
                 source_sha256=str(index) * 64,
                 captured_at=_SYNC_AT,
                 approved_at=_SYNC_AT,
-                methodology_version="1",
+                methodology_version="2",
+                account_identity_sha256=str(index + 3) * 64,
+                account_mapping_basis="provider_account_id",
+                account_mapping_confidence="exact",
+                source_format="synthetic_provider_export",
+                parser_version="fixture-v2",
+                source_timezone="UTC",
+                source_row_count=0,
+                cashflow_candidate_count=0,
+                source_event_set_sha256=canonical_source_event_set_sha256(()),
+                manifest_sha256=str(index + 6) * 64,
             )
         )
 
