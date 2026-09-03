@@ -99,12 +99,57 @@ def reassign(cur: sqlite3.Cursor, dup_sid: int, canonical: int) -> dict[str, int
     )
     counts["transactions_repointed"] = cur.rowcount
 
-    # prices: PK is (security_id, date). Insert dup's rows that don't
-    # already exist on canonical, then delete dup's rows.
+    # prices: PK is (security_id, date). On a collision, deterministically
+    # preserve the eligible price/trade row (positive yfinance split-adjusted
+    # Close) regardless of which security_id was selected as canonical.
+    # Otherwise retain the canonical row. Then merge non-colliding dates.
     cur.execute(
         """
-        INSERT OR IGNORE INTO prices (security_id, date, close)
-        SELECT ?, date, close FROM prices WHERE security_id = ?
+        UPDATE prices
+        SET close = (
+                SELECT duplicate.close
+                FROM prices AS duplicate
+                WHERE duplicate.security_id = ?
+                  AND duplicate.date = prices.date
+            ),
+            source = (
+                SELECT duplicate.source
+                FROM prices AS duplicate
+                WHERE duplicate.security_id = ?
+                  AND duplicate.date = prices.date
+            ),
+            adjustment_basis = (
+                SELECT duplicate.adjustment_basis
+                FROM prices AS duplicate
+                WHERE duplicate.security_id = ?
+                  AND duplicate.date = prices.date
+            )
+        WHERE security_id = ?
+          AND NOT (
+              close > 0
+              AND source = 'yfinance'
+              AND adjustment_basis = 'split_adjusted'
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM prices AS duplicate
+              WHERE duplicate.security_id = ?
+                AND duplicate.date = prices.date
+                AND duplicate.close > 0
+                AND duplicate.source = 'yfinance'
+                AND duplicate.adjustment_basis = 'split_adjusted'
+          )
+        """,
+        (dup_sid, dup_sid, dup_sid, canonical, dup_sid),
+    )
+    counts["price_collisions_upgraded"] = cur.rowcount
+    cur.execute(
+        """
+        INSERT OR IGNORE INTO prices
+            (security_id, date, close, source, adjustment_basis)
+        SELECT ?, date, close, source, adjustment_basis
+        FROM prices
+        WHERE security_id = ?
         """,
         (canonical, dup_sid),
     )

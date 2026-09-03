@@ -13,7 +13,7 @@ with a contribution-weighted denominator:
     return_pct(d) = (V(d) − V_start − Σ_{i: d_i≤d} C_i)
                     / (V_start + Σ_{i: d_i≤d} C_i · (d − d_i)/(d − d_0))
 
-(see `_modified_dietz_series`). `C_i` is an *external* cashflow on day `d_i`
+(see `modified_dietz_series`). `C_i` is an *external* cashflow on day `d_i`
 — deposits, withdrawals, ACATS transfers; trades, dividends, fees, and
 interest are internal events that move V but not the cashflow term. The
 contribution-weighted denominator makes the % sensitive to cashflow timing
@@ -39,6 +39,7 @@ underlying dollar series alongside the rebased index if it wants.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -64,6 +65,19 @@ from portfolio_tracker.services.splits import load_split_factors
 # stock, etc.) rather than real market moves. Surfaced via the data-quality
 # report so the user can investigate the underlying transactions.
 _ABNORMAL_DAILY_RETURN: Decimal = Decimal("0.30")
+
+_NO_PORTFOLIO_VALUES = "no_portfolio_values"
+_EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY = "external_share_movement_missing_security"
+_EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER = "external_share_movement_missing_ticker"
+_EXTERNAL_SHARE_MOVEMENT_PRICE_UNAVAILABLE = "external_share_movement_price_unavailable"
+_NONPOSITIVE_DIETZ_DENOMINATOR = "nonpositive_dietz_denominator"
+
+
+@dataclass(frozen=True)
+class _CashflowAssessment:
+    cashflows: dict[date, Decimal]
+    calculation_reason_codes: tuple[str, ...]
+
 
 # `transfer` is Plaid's catch-all for asset movements. EXTERNAL transfers
 # (ACATS in/out, ACH deposits, wires) are TWR cashflow. INTERNAL transfers
@@ -193,13 +207,20 @@ def compute_performance_series(
     daily_value = _daily_portfolio_value(session, start_date, end_date)
     if not daily_value:
         return PerformanceSeries(
+            methodology="performance.modified_dietz",
+            methodology_version="2",
+            calculation_status="unavailable",
+            calculation_reason_codes=[_NO_PORTFOLIO_VALUES],
             start_date=start_date,
             end_date=end_date,
             base_value=Decimal(0),
+            net_external_cashflow_in=None,
+            backfill_start_unreliable=False,
             points=[],
         )
 
-    daily_cashflow = _daily_external_cashflows(session, start_date, end_date)
+    cashflow_assessment = _daily_external_cashflow_assessment(session, start_date, end_date)
+    daily_cashflow = cashflow_assessment.cashflows
     benchmark_series = _benchmark_series(session, start_date, end_date)
 
     sorted_dates = sorted(daily_value.keys())
@@ -249,21 +270,55 @@ def compute_performance_series(
         else {}
     )
 
-    portfolio_returns = _modified_dietz_series(
+    calculation_reason_codes = set(cashflow_assessment.calculation_reason_codes)
+    if not calculation_reason_codes and not modified_dietz_denominators_are_positive(
+        sorted_dates, daily_cashflow, base_value_adj
+    ):
+        calculation_reason_codes.add(_NONPOSITIVE_DIETZ_DENOMINATOR)
+    if calculation_reason_codes:
+        points = [
+            PerformancePoint(
+                date=current_date,
+                portfolio_value=daily_value_adj[current_date],
+                portfolio_return_pct=None,
+                spy_return_pct=None,
+                qqq_return_pct=None,
+                policy_return_pct=None,
+                spy_equivalent_value=None,
+                qqq_equivalent_value=None,
+                policy_equivalent_value=None,
+            )
+            for current_date in sorted_dates
+        ]
+        return PerformanceSeries(
+            methodology="performance.modified_dietz",
+            methodology_version="2",
+            calculation_status="unavailable",
+            calculation_reason_codes=sorted(calculation_reason_codes),
+            start_date=start_date,
+            end_date=end_date,
+            base_value=base_value_adj,
+            points=points,
+            earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
+            net_external_cashflow_in=None,
+            backfill_start_unreliable=_is_start_value_unreliable(base_value, end_value),
+        )
+
+    portfolio_returns = modified_dietz_series(
         sorted_dates, daily_value_adj, daily_cashflow, base_value_adj
     )
     spy_returns = (
-        _modified_dietz_series(sorted_dates, spy_equivalent, daily_cashflow, base_value_adj)
+        modified_dietz_series(sorted_dates, spy_equivalent, daily_cashflow, base_value_adj)
         if spy_equivalent
         else {}
     )
     qqq_returns = (
-        _modified_dietz_series(sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj)
+        modified_dietz_series(sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj)
         if qqq_equivalent
         else {}
     )
     policy_returns = (
-        _modified_dietz_series(sorted_dates, policy_equivalent, daily_cashflow, base_value_adj)
+        modified_dietz_series(sorted_dates, policy_equivalent, daily_cashflow, base_value_adj)
         if policy_equivalent
         else {}
     )
@@ -285,6 +340,10 @@ def compute_performance_series(
         )
 
     return PerformanceSeries(
+        methodology="performance.modified_dietz",
+        methodology_version="2",
+        calculation_status="available",
+        calculation_reason_codes=[],
         start_date=start_date,
         end_date=end_date,
         base_value=base_value_adj,
@@ -575,7 +634,13 @@ def _policy_matched_value(
 
     out: dict[date, Decimal] = {}
     for current_date in sorted_dates:
-        cf = daily_cashflow.get(current_date, Decimal(0))
+        # base_value is an end-of-day opening value, so a start-date flow is
+        # already embedded in it. Only later flows create benchmark lots.
+        cf = (
+            daily_cashflow.get(current_date, Decimal(0))
+            if current_date > start_date
+            else Decimal(0)
+        )
         if cf != 0:
             cf_lot = _build_lot_renormalized(cf, weights, benchmark_series, current_date)
             if cf_lot:
@@ -585,7 +650,9 @@ def _policy_matched_value(
         total = Decimal(0)
         for lot in lots:
             for ticker, qty in lot.items():
-                price_today = _last_known_price(benchmark_series.get(ticker, {}), current_date)
+                price_today = _last_known_price_within(
+                    benchmark_series.get(ticker, {}), current_date, days=14
+                )
                 if price_today is None:
                     continue
                 total += qty * price_today
@@ -610,8 +677,8 @@ def _build_lot_renormalized(
     surviving_weight = Decimal(0)
     for ticker, weight in weights.items():
         closes = benchmark_series.get(ticker, {})
-        price = _last_known_price(closes, on_date)
-        if price is None or price == 0:
+        price = _last_known_price_within(closes, on_date, days=14)
+        if price is None:
             continue
         priceable.append((ticker, weight, price))
         surviving_weight += weight
@@ -641,8 +708,13 @@ def _money_flow_matched_value(
     if not sorted_dates:
         return {}
     start_date = sorted_dates[0]
-    base_price = _last_known_price(benchmark_closes, start_date)
-    if base_price is None or base_price == 0:
+    if any(
+        _last_known_price_within(benchmark_closes, current_date, days=14) is None
+        for current_date in sorted_dates
+    ):
+        return {}
+    base_price = _last_known_price_within(benchmark_closes, start_date, days=14)
+    if base_price is None:
         return {}
 
     # Each "lot" in the synthetic portfolio: a quantity of benchmark shares
@@ -652,12 +724,18 @@ def _money_flow_matched_value(
 
     out: dict[date, Decimal] = {}
     for current_date in sorted_dates:
-        cf = daily_cashflow.get(current_date, Decimal(0))
+        # base_value is an end-of-day opening value, so a start-date flow is
+        # already embedded in it. Only later flows create benchmark lots.
+        cf = (
+            daily_cashflow.get(current_date, Decimal(0))
+            if current_date > start_date
+            else Decimal(0)
+        )
         if cf != 0:
-            cf_price = _last_known_price(benchmark_closes, current_date)
-            if cf_price is not None and cf_price != 0:
+            cf_price = _last_known_price_within(benchmark_closes, current_date, days=14)
+            if cf_price is not None:
                 lots.append((current_date, cf / cf_price))
-        price_today = _last_known_price(benchmark_closes, current_date)
+        price_today = _last_known_price_within(benchmark_closes, current_date, days=14)
         if price_today is None:
             continue
         total_shares = sum((qty for _, qty in lots), Decimal(0))
@@ -665,7 +743,7 @@ def _money_flow_matched_value(
     return out
 
 
-def _modified_dietz_series(
+def modified_dietz_series(
     sorted_dates: list[date],
     daily_value: dict[date, Decimal],
     daily_cashflow: dict[date, Decimal],
@@ -718,6 +796,41 @@ def _modified_dietz_series(
     return out
 
 
+def modified_dietz_denominators_are_positive(
+    sorted_dates: list[date],
+    daily_cashflow: dict[date, Decimal],
+    base_value: Decimal,
+) -> bool:
+    """Whether every cumulative Modified-Dietz denominator is defined."""
+    if not sorted_dates or base_value <= 0:
+        return False
+    start_date = sorted_dates[0]
+    cashflows = sorted(
+        ((d, c) for d, c in daily_cashflow.items() if c != 0 and d > start_date),
+        key=lambda item: item[0],
+    )
+    for current_date in sorted_dates[1:]:
+        period_days = (current_date - start_date).days
+        if period_days <= 0:
+            return False
+        weighted_cashflow = sum(
+            (
+                amount * (Decimal((current_date - flow_date).days) / Decimal(period_days))
+                for flow_date, amount in cashflows
+                if flow_date <= current_date
+            ),
+            Decimal(0),
+        )
+        if base_value + weighted_cashflow <= 0:
+            return False
+    return True
+
+
+# Backward-compatible private name for older internal callers and focused unit
+# tests. New cross-service consumers use the public pure-math helper above.
+_modified_dietz_series = modified_dietz_series
+
+
 def _earliest_observed_date(session: Session, start_date: date, end_date: date) -> date | None:
     """First date in the window with an actual `holdings_snapshots` row.
 
@@ -745,9 +858,9 @@ def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
     return (base_value / end_value) < Decimal("0.25")
 
 
-def _daily_external_cashflows(
+def _daily_external_cashflow_assessment(
     session: Session, start_date: date, end_date: date
-) -> dict[date, Decimal]:
+) -> _CashflowAssessment:
     """Sum signed external cashflows per day (positive = INTO portfolio).
 
     Direction handling:
@@ -761,7 +874,7 @@ def _daily_external_cashflows(
     """
     accts = active_account_ids(session)
     if not accts:
-        return {}
+        return _CashflowAssessment(cashflows={}, calculation_reason_codes=())
     rows = session.execute(
         select(
             InvestmentTransaction.plaid_investment_transaction_id,
@@ -803,66 +916,135 @@ def _daily_external_cashflows(
     # netted to zero means an internal move between two of the user's
     # linked accounts; we skip those. Anything left over is a true
     # external flow.
-    transfer_flows = _share_transfer_external_cashflows(session, start_date, end_date, accts)
-    for d, c in transfer_flows.items():
+    transfer_assessment = _assess_share_transfer_external_cashflows(
+        session, start_date, end_date, accts
+    )
+    for d, c in transfer_assessment.cashflows.items():
         totals[d] = totals.get(d, Decimal(0)) + c
 
-    return dict(totals)
+    return _CashflowAssessment(
+        cashflows=dict(totals),
+        calculation_reason_codes=transfer_assessment.calculation_reason_codes,
+    )
 
 
-def _share_transfer_external_cashflows(
+def _daily_external_cashflows(  # pyright: ignore[reportUnusedFunction]
+    session: Session, start_date: date, end_date: date
+) -> dict[date, Decimal]:
+    """Compatibility/raw-fact view of all deterministically known cashflows."""
+    return _daily_external_cashflow_assessment(session, start_date, end_date).cashflows
+
+
+def _share_transfer_external_cashflows(  # pyright: ignore[reportUnusedFunction]
     session: Session,
     start_date: date,
     end_date: date,
     accts: frozenset[int],
 ) -> dict[date, Decimal]:
+    """Compatibility view of deterministically valued in-kind cashflows."""
+    return _assess_share_transfer_external_cashflows(session, start_date, end_date, accts).cashflows
+
+
+def _assess_share_transfer_external_cashflows(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    accts: frozenset[int],
+) -> _CashflowAssessment:
     """Net dollar-valued cashflow from unmatched share-side ACATS events.
 
-    For each (date, security_id), sum signed share quantities across
-    `cash/external_asset_transfer_*` events. Net != 0 means the user
-    moved shares to/from an account our DB doesn't see, which from the
-    portfolio's frame is an external dollar inflow (in) or outflow (out).
+    For each (date, normalized ticker), sum split-normalized quantities for
+    zero-dollar plain TRANSFER rows and `cash/external_asset_transfer_*`
+    events. Net != 0 means shares crossed the tracked portfolio boundary.
 
     We value at close price on the transfer date and contribute the
     signed dollar to the cashflow series:
       net_qty > 0 (more in than out) → inflow → cf += +value
       net_qty < 0 (more out than in) → outflow → cf += -value
     """
-    rows = session.execute(
-        select(
-            InvestmentTransaction.date,
-            InvestmentTransaction.security_id,
-            InvestmentTransaction.quantity,
+    transactions = list(
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.date >= start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(InvestmentTransaction.account_id.in_(accts))
         )
-        .where(InvestmentTransaction.date >= start_date)
-        .where(InvestmentTransaction.date <= end_date)
-        .where(InvestmentTransaction.account_id.in_(accts))
-        .where(InvestmentTransaction.type == InvestmentTransactionType.CASH.value)
-        .where(
-            InvestmentTransaction.subtype.in_(
-                ["external_asset_transfer_in", "external_asset_transfer_out"]
-            )
-        )
-    ).all()
-    if not rows:
-        return {}
-
-    # Net signed qty per (date, sid)
-    net_by: dict[tuple[date, int], Decimal] = defaultdict(lambda: Decimal(0))
-    for tx_date, sid, qty in rows:
-        if sid is None:
+        .scalars()
+        .all()
+    )
+    overrides = _load_transaction_overrides(session)
+    candidates: list[tuple[InvestmentTransaction, Decimal]] = []
+    reasons: set[str] = set()
+    for tx in transactions:
+        quantity = Decimal(tx.quantity or 0)
+        if quantity == 0:
             continue
-        net_by[(tx_date, sid)] += Decimal(qty or 0)
+        subtype = (tx.subtype or "").lower().strip()
+        is_external_cash_transfer = tx.type == InvestmentTransactionType.CASH.value and subtype in {
+            "external_asset_transfer_in",
+            "external_asset_transfer_out",
+        }
+        is_zero_amount_plain_transfer = (
+            tx.type == InvestmentTransactionType.TRANSFER.value
+            and Decimal(tx.amount or 0) == 0
+            and subtype not in _INTERNAL_TRANSFER_SUBTYPES
+        )
+        if not is_external_cash_transfer and not is_zero_amount_plain_transfer:
+            continue
 
-    sids_needed = frozenset(sid for (_, sid) in net_by)
-    if not sids_needed:
-        return {}
+        override = overrides.get(tx.plaid_investment_transaction_id)
+        name_hint = _classify_by_name(tx.name)
+        if override == "internal" or name_hint == "internal":
+            continue
+        if override == "external_in" or name_hint == "external_in":
+            quantity = abs(quantity)
+        elif override == "external_out" or name_hint == "external_out":
+            quantity = -abs(quantity)
+        elif subtype == "external_asset_transfer_in":
+            quantity = abs(quantity)
+        elif subtype == "external_asset_transfer_out":
+            quantity = -abs(quantity)
+        candidates.append((tx, quantity))
+
+    if not candidates:
+        return _CashflowAssessment(cashflows={}, calculation_reason_codes=())
+
+    sids = frozenset(tx.security_id for tx, _ in candidates if tx.security_id is not None)
+    security_by_id = {
+        sid: ticker
+        for sid, ticker in session.execute(
+            select(Security.security_id, Security.ticker).where(Security.security_id.in_(sids))
+        ).all()
+    }
+    split_factors = load_split_factors(session, sids)
+
+    # Net split-normalized quantity per (date, ticker), so provider-specific
+    # security IDs for the same asset can cancel as an internal transfer.
+    net_by: dict[tuple[date, str], Decimal] = defaultdict(lambda: Decimal(0))
+    sids_by_ticker: dict[str, set[int]] = defaultdict(set)
+    for tx, quantity in candidates:
+        sid = tx.security_id
+        if sid is None or sid not in security_by_id:
+            reasons.add(_EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY)
+            continue
+        ticker = security_by_id[sid]
+        if ticker is None or not ticker.strip():
+            reasons.add(_EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER)
+            continue
+        ticker_norm = ticker.strip().upper()
+        net_by[(tx.date, ticker_norm)] += quantity * split_factors.factor_after(sid, tx.date)
+        sids_by_ticker[ticker_norm].add(sid)
+
+    sids_needed = frozenset(sid for ticker_sids in sids_by_ticker.values() for sid in ticker_sids)
+    if not net_by or not sids_needed:
+        return _CashflowAssessment(cashflows={}, calculation_reason_codes=tuple(sorted(reasons)))
     # Pull a window of prices around the transfer dates so we can
     # forward-fill if the exact date is a non-trading day.
     earliest_d = min(d for (d, _) in net_by) - timedelta(days=14)
     price_rows = session.execute(
         select(Price.security_id, Price.date, Price.close)
         .where(Price.security_id.in_(sids_needed))
+        .where(Price.position_price_trade_eligibility_clause())
         .where(Price.date >= earliest_d)
         .where(Price.date <= end_date)
     ).all()
@@ -871,25 +1053,32 @@ def _share_transfer_external_cashflows(
         price_lookup[sid][d] = Decimal(c)
 
     out: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for (tx_date, sid), net_qty in net_by.items():
+    for (tx_date, ticker), net_qty in net_by.items():
         if net_qty == 0:
             continue
-        close = _last_known_price(price_lookup.get(sid, {}), tx_date)
-        if close is None:
-            # Last-resort fallback to today's institution_price. Better
-            # than skipping — that would leave a phantom V step.
-            sp_row = session.execute(
-                select(HoldingSnapshot.institution_price)
-                .where(HoldingSnapshot.security_id == sid)
-                .where(HoldingSnapshot.institution_price.is_not(None))
-                .order_by(HoldingSnapshot.snapshot_date.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-            if sp_row is None:
+        freshest: tuple[date, int, Decimal] | None = None
+        earliest = tx_date - timedelta(days=14)
+        for sid in sorted(sids_by_ticker[ticker]):
+            series = price_lookup.get(sid, {})
+            price_dates = [
+                d for d, price in series.items() if earliest <= d <= tx_date and price > 0
+            ]
+            if not price_dates:
                 continue
-            close = Decimal(sp_row)
+            price_date = max(price_dates)
+            candidate = (price_date, sid, series[price_date])
+            if (
+                freshest is None
+                or price_date > freshest[0]
+                or (price_date == freshest[0] and sid < freshest[1])
+            ):
+                freshest = candidate
+        close = freshest[2] if freshest is not None else None
+        if close is None:
+            reasons.add(_EXTERNAL_SHARE_MOVEMENT_PRICE_UNAVAILABLE)
+            continue
         out[tx_date] += net_qty * close
-    return dict(out)
+    return _CashflowAssessment(cashflows=dict(out), calculation_reason_codes=tuple(sorted(reasons)))
 
 
 def _classify_by_name(name: str | None) -> str | None:
@@ -1306,8 +1495,8 @@ def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]
     return dict(positions)
 
 
-def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
-    """Return the share-count delta needed to undo `tx` from current positions.
+def transaction_quantity_delta(tx: InvestmentTransaction) -> Decimal | None:
+    """Return the forward share-count change caused by ``tx``.
 
     Sign conventions vary across data sources:
       * Plaid signs the quantity by direction (sell = negative, buy = positive).
@@ -1317,17 +1506,7 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
 
     We use the TRANSACTION TYPE — not the sign of `quantity` — to determine
     direction for BUY/SELL, treating `quantity` as an unsigned magnitude.
-    For SnapTrade's `cash`-typed share-moving events (see
-    `_SHARE_MOVING_CASH_SUBTYPES`), the quantity is already signed, so we
-    just negate it as TRANSFER does:
-      * BUY                    → reverse subtracts |quantity|
-      * SELL                   → reverse adds |quantity|
-      * TRANSFER               → reverse subtracts signed(quantity)
-      * cash/external_asset_transfer_in   (qty +) → reverse subtracts +qty
-      * cash/external_asset_transfer_out  (qty −) → reverse subtracts −qty (= adds)
-      * cash/optionassignment             (qty +) → reverse subtracts +qty
-      * cash/optionexpiration             (qty +) → reverse subtracts +qty
-      * cash/rei                          (qty +) → reverse subtracts +qty
+    Transfer-flavored quantities are already signed.
 
     Returns None for events with no position effect (qty=0, plain
     cash/dividend/withdrawal/contribution, fees on USD).
@@ -1338,16 +1517,22 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
     if magnitude == 0:
         return None
     if tx_type == InvestmentTransactionType.BUY.value:
-        return -magnitude
-    if tx_type == InvestmentTransactionType.SELL.value:
         return magnitude
+    if tx_type == InvestmentTransactionType.SELL.value:
+        return -magnitude
     if tx_type == InvestmentTransactionType.TRANSFER.value:
-        return -quantity
+        return quantity
     if tx_type == InvestmentTransactionType.CASH.value:
         subtype = (tx.subtype or "").lower().strip()
         if subtype in _SHARE_MOVING_CASH_SUBTYPES:
-            return -quantity
+            return quantity
     return None
+
+
+def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
+    """Return the share-count delta needed to undo ``tx``."""
+    delta = transaction_quantity_delta(tx)
+    return -delta if delta is not None else None
 
 
 def _reverse_transaction_cash_delta(
@@ -1528,6 +1713,17 @@ def _value_quantities_with_prices(
 def _last_known_price(series: dict[date, Decimal], target_date: date) -> Decimal | None:
     """Forward-fill: most recent price on or before `target_date`."""
     candidates = [d for d in series if d <= target_date]
+    if not candidates:
+        return None
+    return series[max(candidates)]
+
+
+def _last_known_price_within(
+    series: dict[date, Decimal], target_date: date, *, days: int
+) -> Decimal | None:
+    """Last close on/before target, bounded so stale marks cannot value flows."""
+    earliest = target_date - timedelta(days=days)
+    candidates = [d for d, price in series.items() if earliest <= d <= target_date and price > 0]
     if not candidates:
         return None
     return series[max(candidates)]

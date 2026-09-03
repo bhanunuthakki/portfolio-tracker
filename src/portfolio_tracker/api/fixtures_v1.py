@@ -47,9 +47,13 @@ from sqlalchemy.pool import StaticPool
 from portfolio_tracker.models import (
     Account,
     Base,
+    Benchmark,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
+    Price,
+    PriceAdjustmentBasis,
+    PriceSource,
     Security,
 )
 
@@ -168,6 +172,8 @@ def _seed(
         name: str | None,
         security: Security | None = None,
         qty: str = "0",
+        price: str | None = None,
+        fees: str | None = None,
     ) -> None:
         session.add(
             InvestmentTransaction(
@@ -178,6 +184,8 @@ def _seed(
                 name=name,
                 quantity=Decimal(qty),
                 amount=Decimal(amount),
+                price=Decimal(price) if price is not None else None,
+                fees=Decimal(fees) if fees is not None else None,
                 type=type_,
                 subtype=subtype,
                 currency="USD",
@@ -203,6 +211,51 @@ def _seed(
         "Buy Beta Corp",
         security=stock_b,
         qty="5",
+        price="116",
+        fees="0",
+    )
+
+    # Canonical analytics fixture: a complete, synthetic split-normalized
+    # price/trade basis. Position calculations accept only named yfinance
+    # split-adjusted closes; legacy/unknown rows intentionally fail closed.
+    analytics_start = FIXTURE_TODAY - timedelta(days=365)
+    trade_date = holdings_date - timedelta(days=7)
+
+    def position_price(sec: Security, d: date, close: str) -> Price:
+        return Price(
+            security_id=sec.security_id,
+            date=d,
+            close=Decimal(close),
+            source=PriceSource.YFINANCE.value,
+            adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+        )
+
+    benchmark_dates = {analytics_start + timedelta(days=offset) for offset in range(0, 366, 7)} | {
+        trade_date,
+        FIXTURE_TODAY,
+    }
+
+    def stepped_benchmark(symbol: str, d: date) -> Benchmark:
+        if symbol == "SPY":
+            close = "110" if d == FIXTURE_TODAY else "108" if d >= trade_date else "100"
+        else:
+            close = "112" if d == FIXTURE_TODAY else "110" if d >= trade_date else "100"
+        return Benchmark(symbol=symbol, date=d, close=Decimal(close))
+
+    def stepped_position(sec: Security, d: date) -> Price:
+        if sec is stock_a:
+            close = "120" if d == FIXTURE_TODAY else "100"
+        else:
+            close = "116" if d >= trade_date else "100"
+        return position_price(sec, d, close)
+
+    session.add_all(
+        [
+            *(stepped_position(stock_a, d) for d in sorted(benchmark_dates)),
+            *(stepped_position(stock_b, d) for d in sorted(benchmark_dates)),
+            *(stepped_benchmark("SPY", d) for d in sorted(benchmark_dates)),
+            *(stepped_benchmark("QQQ", d) for d in sorted(benchmark_dates)),
+        ]
     )
     session.commit()
 
@@ -301,11 +354,10 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         """The remaining focused resources + the enveloped analytics endpoints.
 
         Positions / position-snapshots / data-quality are populated from the
-        holdings+transaction seed. The four analytics fixtures exercise the
-        shared envelope + methodology contract; their inner series are sparse
-        because the seed carries no price/benchmark history (the documented
-        "insufficient history" degradation path), so a consumer's contract
-        test validates deserialization + envelope, not populated return rows.
+        holdings+transaction seed. The analytics fixtures include synthetic,
+        provenance-eligible position prices and price-return benchmarks so the
+        canonical position-performance sample exercises the available path;
+        focused tests separately pin every unavailable reason.
         """
         _seed(session, holdings_date=_FRESH)
         window_start = FIXTURE_TODAY - timedelta(days=365)

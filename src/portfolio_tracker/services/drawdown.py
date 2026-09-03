@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -31,6 +32,10 @@ class UnderwaterPoint(BaseModel):
 
 
 class DrawdownResult(BaseModel):
+    methodology: Literal["risk.beta_drawdown"]
+    methodology_version: Literal["2"]
+    calculation_status: Literal["available", "unavailable"]
+    calculation_reason_codes: list[str]
     start_date: date
     end_date: date
     max_drawdown_pct: Decimal | None  # most negative point on the curve
@@ -44,8 +49,17 @@ class DrawdownResult(BaseModel):
     underwater: list[UnderwaterPoint] = []
 
 
-def _empty(start_date: date, end_date: date) -> DrawdownResult:
+def _empty(
+    start_date: date,
+    end_date: date,
+    *,
+    reason_codes: list[str],
+) -> DrawdownResult:
     return DrawdownResult(
+        methodology="risk.beta_drawdown",
+        methodology_version="2",
+        calculation_status="unavailable",
+        calculation_reason_codes=sorted(set(reason_codes)),
         start_date=start_date,
         end_date=end_date,
         max_drawdown_pct=None,
@@ -70,7 +84,17 @@ def compute_drawdown(
     series = compute_performance_series(
         session, start_date, end_date, reserve_amount, exclude_index_etfs
     )
-    points = [(p.date, Decimal(1) + p.portfolio_return_pct / Decimal(100)) for p in series.points]
+    if series.calculation_status == "unavailable":
+        return _empty(
+            start_date,
+            end_date,
+            reason_codes=series.calculation_reason_codes,
+        )
+    points = [
+        (p.date, Decimal(1) + p.portfolio_return_pct / Decimal(100))
+        for p in series.points
+        if p.portfolio_return_pct is not None
+    ]
     return drawdown_from_index(start_date, end_date, points)
 
 
@@ -84,7 +108,11 @@ def drawdown_from_index(
     directly testable on a hand-built curve.
     """
     if len(points) < 2:
-        return _empty(start_date, end_date)
+        return _empty(
+            start_date,
+            end_date,
+            reason_codes=["insufficient_return_observations"],
+        )
 
     underwater: list[UnderwaterPoint] = []
     peak_value = points[0][1]
@@ -141,6 +169,10 @@ def drawdown_from_index(
         calmar = (annualized / (abs(max_dd) * Decimal(100))).quantize(Decimal("0.0001"))
 
     return DrawdownResult(
+        methodology="risk.beta_drawdown",
+        methodology_version="2",
+        calculation_status="available",
+        calculation_reason_codes=[],
         start_date=start_date,
         end_date=end_date,
         max_drawdown_pct=(max_dd * Decimal(100)).quantize(Decimal("0.01")),

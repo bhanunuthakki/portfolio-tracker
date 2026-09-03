@@ -327,7 +327,7 @@ def position_alpha(
         ),
     ),
 ) -> position_alpha_service.PositionAlphaResult:
-    """Per-ticker dollar alpha vs SPY/QQQ/POLICY for the chosen window.
+    """Split-normalized price/trade alpha vs SPY/QQQ/POLICY.
 
     Methodology — start of window is a fresh balance sheet. Each ticker's
     starting capital is `qty_at_start × price_at_start`. Each benchmark
@@ -339,7 +339,9 @@ def position_alpha(
     cash). Set `exclude_broad_index=true` to also drop broad-market ETFs.
 
     Returns both the per-ticker breakdown AND a daily time series across
-    SPY, QQQ, and POLICY counterfactuals.
+    SPY, QQQ, and POLICY counterfactuals. Derived metrics fail closed when a
+    non-trade share movement cannot be exactly paired by date and normalized
+    ticker; whole-account Modified Dietz remains the fallback.
     """
     if end_date is None:
         end_date = date.today()

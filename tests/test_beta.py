@@ -9,12 +9,15 @@ from __future__ import annotations
 import math
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from portfolio_tracker.models import Benchmark
+from portfolio_tracker.services import beta as beta_service
 from portfolio_tracker.services.beta import (
     _alpha_significance,
+    _benchmark_price_daily_returns_for,
     _daily_returns,
     _information_ratio,
     _ols,
@@ -82,6 +85,103 @@ def test_window_risk_free_averages_tbill_yield(session):
 
 def test_window_risk_free_none_when_no_data(session):
     assert _window_risk_free(session, date(2025, 1, 1), date(2025, 1, 31)) is None
+
+
+def test_benchmark_returns_use_price_close_not_total_return_close(session):
+    d0, d1 = date(2025, 1, 2), date(2025, 1, 3)
+    session.add_all(
+        [
+            Benchmark(
+                symbol="SPY",
+                date=d0,
+                close=Decimal(100),
+                total_return_close=Decimal(100),
+            ),
+            Benchmark(
+                symbol="SPY",
+                date=d1,
+                close=Decimal(105),
+                total_return_close=Decimal(110),
+            ),
+        ]
+    )
+    session.commit()
+
+    returns = _benchmark_price_daily_returns_for(session, "SPY", d0, d1)
+    assert returns[d1] == Decimal("0.05")
+
+
+def test_beta_propagates_position_calculation_unavailable(session, monkeypatch):
+    start, end = date(2025, 1, 2), date(2025, 1, 31)
+    unavailable = SimpleNamespace(
+        calculation_status="unavailable",
+        calculation_reason_codes=["share_movement_unmatched"],
+        series=[],
+    )
+    monkeypatch.setattr(
+        beta_service, "compute_position_alpha", lambda *_args, **_kwargs: unavailable
+    )
+
+    result = beta_service.compute_beta(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert result.calculation_reason_codes == ["share_movement_unmatched"]
+    assert result.beta is None
+    assert result.alpha_annualized_pct is None
+
+
+def test_beta_fails_closed_with_only_one_paired_observation(session, monkeypatch):
+    d0, d1 = date(2025, 1, 2), date(2025, 1, 3)
+    available = SimpleNamespace(
+        calculation_status="available",
+        calculation_reason_codes=[],
+        series=[
+            SimpleNamespace(date=d0, portfolio_value=Decimal(100), position_cashflow=Decimal(0)),
+            SimpleNamespace(date=d1, portfolio_value=Decimal(101), position_cashflow=Decimal(0)),
+        ],
+    )
+    monkeypatch.setattr(beta_service, "compute_position_alpha", lambda *_args, **_kwargs: available)
+    monkeypatch.setattr(
+        beta_service,
+        "_benchmark_price_daily_returns_for",
+        lambda *_args, **_kwargs: {d1: Decimal("0.01")},
+    )
+
+    result = beta_service.compute_beta(session, d0, d1, risk_free_annual=0.0)
+
+    assert result.calculation_status == "unavailable"
+    assert result.calculation_reason_codes == ["insufficient_return_observations"]
+    assert result.beta is None
+    assert result.r_squared is None
+    assert result.correlation is None
+
+
+def test_beta_fails_closed_when_benchmark_variance_is_zero(session, monkeypatch):
+    d0, d1, d2 = date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 4)
+    available = SimpleNamespace(
+        calculation_status="available",
+        calculation_reason_codes=[],
+        series=[
+            SimpleNamespace(date=d0, portfolio_value=Decimal(100), position_cashflow=Decimal(0)),
+            SimpleNamespace(date=d1, portfolio_value=Decimal(101), position_cashflow=Decimal(0)),
+            SimpleNamespace(date=d2, portfolio_value=Decimal(103), position_cashflow=Decimal(0)),
+        ],
+    )
+    monkeypatch.setattr(beta_service, "compute_position_alpha", lambda *_args, **_kwargs: available)
+    monkeypatch.setattr(
+        beta_service,
+        "_benchmark_price_daily_returns_for",
+        lambda *_args, **_kwargs: {d1: Decimal("0.01"), d2: Decimal("0.01")},
+    )
+
+    result = beta_service.compute_beta(session, d0, d2, risk_free_annual=0.0)
+
+    assert result.calculation_status == "unavailable"
+    assert result.calculation_reason_codes == ["insufficient_return_observations"]
+    assert result.sample_size == 2
+    assert result.beta is None
+    assert result.r_squared is None
+    assert result.correlation is None
 
 
 def test_alpha_significance_perfect_fit_is_undefined():

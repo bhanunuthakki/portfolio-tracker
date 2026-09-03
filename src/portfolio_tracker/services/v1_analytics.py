@@ -31,6 +31,7 @@ def _analytics_meta(
     session: Session,
     *,
     methodology: str,
+    methodology_version: str = "1",
     links: dict[str, str],
     today: date | None = None,
     generated_at: datetime | None = None,
@@ -44,7 +45,7 @@ def _analytics_meta(
         warnings=[],
         links=links,
         methodology=methodology,
-        methodology_version="1",
+        methodology_version=methodology_version,
         today=today,
         generated_at=generated_at,
     )
@@ -58,7 +59,7 @@ class PerformanceV1Result(BaseModel):
 
 
 class PositionPerformanceV1Result(BaseModel):
-    """Per-ticker dollar alpha vs dollar-matched benchmark counterfactuals."""
+    """Fail-closed invested-position price/trade comparison."""
 
     meta: V1Meta
     result: PositionAlphaResult
@@ -102,6 +103,7 @@ def performance_meta(
     return _analytics_meta(
         session,
         methodology="performance.modified_dietz",
+        methodology_version="2",
         links={
             "position_performance": "/api/v1/analytics/position-performance",
             "risk": "/api/v1/analytics/risk",
@@ -117,7 +119,8 @@ def position_performance_meta(
 ) -> V1Meta:
     return _analytics_meta(
         session,
-        methodology="position_alpha.dollar_matched_counterfactual",
+        methodology="position_alpha.split_normalized_price_trade_modified_dietz",
+        methodology_version="3",
         links={"performance": "/api/v1/analytics/performance"},
         today=today,
         generated_at=generated_at,
@@ -130,6 +133,7 @@ def risk_meta(
     return _analytics_meta(
         session,
         methodology="risk.beta_drawdown",
+        methodology_version="2",
         links={
             "performance": "/api/v1/analytics/performance",
             "positioning": "/api/v1/analytics/positioning",

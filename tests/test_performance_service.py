@@ -10,22 +10,30 @@ Three documented bug-prone areas:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
+    Benchmark,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
     Price,
+    PriceAdjustmentBasis,
+    PriceSource,
     Security,
+    StockSplit,
 )
 from portfolio_tracker.services.performance import (
     _backfill_values_from_transactions,
     _modified_dietz_series,
+    _money_flow_matched_value,
+    _policy_matched_value,
     _reverse_transaction_cash_delta,
     _reverse_transaction_quantity,
+    _share_transfer_external_cashflows,
+    compute_performance_series,
 )
 
 
@@ -88,6 +96,48 @@ def test_modified_dietz_nonpositive_denominator_is_zero():
         Decimal(0),  # base 0, no cashflow → denom 0
     )
     assert out[d10] == Decimal(0)
+
+
+def test_money_flow_match_does_not_double_count_start_date_cashflow():
+    d0, d10 = date(2025, 1, 1), date(2025, 1, 11)
+    out = _money_flow_matched_value(
+        [d0, d10],
+        Decimal(1000),
+        {d0: Decimal(1000)},
+        {d0: Decimal(100), d10: Decimal(110)},
+    )
+    # V_start is an end-of-day opening value. A start-day flow is already in
+    # that value and must not create a second benchmark lot.
+    assert out[d0] == Decimal(1000)
+    assert out[d10] == Decimal(1100)
+
+
+def test_money_flow_match_rejects_stale_benchmark_endpoint():
+    start = date(2025, 1, 1)
+    end = date(2025, 6, 1)
+
+    assert (
+        _money_flow_matched_value(
+            [start, end],
+            Decimal(1000),
+            {},
+            {start: Decimal(100)},
+        )
+        == {}
+    )
+
+
+def test_policy_match_does_not_double_count_start_date_cashflow():
+    d0, d10 = date(2025, 1, 1), date(2025, 1, 11)
+    out = _policy_matched_value(
+        [d0, d10],
+        Decimal(1000),
+        {d0: Decimal(1000)},
+        {"SPY": {d0: Decimal(100), d10: Decimal(110)}},
+        {"SPY": Decimal(1)},
+    )
+    assert out[d0] == Decimal(1000)
+    assert out[d10] == Decimal(1100)
 
 
 # ---------------------------------------------------------------------------
@@ -226,3 +276,350 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
     assert result[date(2025, 1, 4)] == Decimal(1000)
     # Post-deployment day: positions 10 × 100, cash adj 0.
     assert result[date(2025, 1, 9)] == Decimal(1000)
+
+
+def test_share_transfer_cashflow_nets_provider_ids_after_split_normalization(session):
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    session.add(item)
+    session.flush()
+    first = Account(item_id=item.item_id, plaid_account_id="a-1", name="Taxable", type="investment")
+    second = Account(item_id=item.item_id, plaid_account_id="a-2", name="IRA", type="investment")
+    old_sid = Security(plaid_security_id="plaid:aapl", ticker="aapl", type="cs")
+    new_sid = Security(plaid_security_id="snaptrade:aapl", ticker="AAPL", type="cs")
+    session.add_all([first, second, old_sid, new_sid])
+    session.flush()
+    movement_date = date(2025, 5, 15)
+    session.add_all(
+        [
+            StockSplit(
+                security_id=old_sid.security_id,
+                split_date=date(2025, 5, 20),
+                ratio=Decimal(2),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-out",
+                account_id=first.account_id,
+                security_id=old_sid.security_id,
+                date=movement_date,
+                type="cash",
+                subtype="external_asset_transfer_out",
+                quantity=Decimal(-10),
+                amount=Decimal(0),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-in",
+                account_id=second.account_id,
+                security_id=new_sid.security_id,
+                date=movement_date,
+                type="cash",
+                subtype="external_asset_transfer_in",
+                quantity=Decimal(20),
+                amount=Decimal(0),
+            ),
+        ]
+    )
+    session.commit()
+
+    assert (
+        _share_transfer_external_cashflows(
+            session,
+            date(2025, 5, 1),
+            date(2025, 6, 1),
+            frozenset({first.account_id, second.account_id}),
+        )
+        == {}
+    )
+
+
+def test_share_transfer_cashflow_requires_eligible_split_adjusted_price(session):
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    account = Account(item=item, plaid_account_id="a-1", name="Taxable", type="investment")
+    security = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add_all([item, account, security])
+    session.flush()
+    movement_date = date(2025, 5, 15)
+    session.add_all(
+        [
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-in",
+                account_id=account.account_id,
+                security_id=security.security_id,
+                date=movement_date,
+                type="cash",
+                subtype="external_asset_transfer_in",
+                quantity=Decimal(10),
+                amount=Decimal(0),
+            ),
+            Price(
+                security_id=security.security_id,
+                date=movement_date,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+        ]
+    )
+    session.commit()
+
+    assert _share_transfer_external_cashflows(
+        session,
+        date(2025, 5, 1),
+        date(2025, 6, 1),
+        frozenset({account.account_id}),
+    ) == {movement_date: Decimal(1000)}
+
+
+def test_share_transfer_cashflow_uses_freshest_eligible_ticker_price(session):
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    account = Account(item=item, plaid_account_id="a-1", name="Taxable", type="investment")
+    older = Security(plaid_security_id="plaid:nu", ticker="NU", type="cs")
+    fresher = Security(plaid_security_id="snaptrade:nu", ticker="NU", type="cs")
+    session.add_all([item, account, older, fresher])
+    session.flush()
+    movement_date = date(2025, 5, 15)
+    session.add_all(
+        [
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-in-old-id",
+                account_id=account.account_id,
+                security_id=older.security_id,
+                date=movement_date,
+                type="cash",
+                subtype="external_asset_transfer_in",
+                quantity=Decimal(10),
+                amount=Decimal(0),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-in-new-id",
+                account_id=account.account_id,
+                security_id=fresher.security_id,
+                date=movement_date,
+                type="cash",
+                subtype="external_asset_transfer_in",
+                quantity=Decimal(1),
+                amount=Decimal(0),
+            ),
+            Price(
+                security_id=older.security_id,
+                date=movement_date - timedelta(days=8),
+                close=Decimal(90),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+            Price(
+                security_id=fresher.security_id,
+                date=movement_date,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+        ]
+    )
+    session.commit()
+
+    assert _share_transfer_external_cashflows(
+        session,
+        date(2025, 5, 1),
+        date(2025, 6, 1),
+        frozenset({account.account_id}),
+    ) == {movement_date: Decimal(1100)}
+
+
+def test_plain_zero_amount_share_transfer_is_valued_as_external_cashflow(session):
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    account = Account(item=item, plaid_account_id="a-1", name="Taxable", type="investment")
+    security = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add_all([item, account, security])
+    session.flush()
+    movement_date = date(2025, 5, 15)
+    session.add_all(
+        [
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-plain-transfer-in",
+                account_id=account.account_id,
+                security_id=security.security_id,
+                date=movement_date,
+                type="transfer",
+                subtype="transfer",
+                quantity=Decimal(10),
+                amount=Decimal(0),
+            ),
+            Price(
+                security_id=security.security_id,
+                date=movement_date,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+        ]
+    )
+    session.commit()
+
+    assert _share_transfer_external_cashflows(
+        session,
+        date(2025, 5, 1),
+        date(2025, 6, 1),
+        frozenset({account.account_id}),
+    ) == {movement_date: Decimal(1000)}
+
+
+def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(session):
+    start = date(2025, 5, 1)
+    movement_date = date(2025, 5, 20)
+    end = date(2025, 6, 1)
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    account = Account(item=item, plaid_account_id="a-1", name="Taxable", type="investment")
+    security = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add_all([item, account, security])
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(1),
+                institution_value=Decimal(100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(11),
+                institution_value=Decimal(1100),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-unpriceable-transfer",
+                account_id=account.account_id,
+                security_id=security.security_id,
+                date=movement_date,
+                type="transfer",
+                subtype="transfer",
+                quantity=Decimal(10),
+                amount=Decimal(0),
+            ),
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+        ]
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert result.calculation_reason_codes == ["external_share_movement_price_unavailable"]
+    assert result.net_external_cashflow_in is None
+    assert all(point.portfolio_return_pct is None for point in result.points)
+    assert all(point.spy_return_pct is None for point in result.points)
+    assert all(point.spy_equivalent_value is None for point in result.points)
+
+
+def test_whole_account_performance_uses_priceable_share_transfer_cashflow(session):
+    start = date(2025, 5, 1)
+    movement_date = date(2025, 5, 20)
+    end = date(2025, 6, 1)
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    account = Account(item=item, plaid_account_id="a-1", name="Taxable", type="investment")
+    security = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    session.add_all([item, account, security])
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(1),
+                institution_value=Decimal(100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=movement_date,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(11),
+                institution_value=Decimal(1100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(11),
+                institution_value=Decimal(1100),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-priceable-transfer",
+                account_id=account.account_id,
+                security_id=security.security_id,
+                date=movement_date,
+                type="transfer",
+                subtype="transfer",
+                quantity=Decimal(10),
+                amount=Decimal(0),
+            ),
+            Price(
+                security_id=security.security_id,
+                date=movement_date,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=movement_date, close=Decimal(105)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+        ]
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "available"
+    assert result.calculation_reason_codes == []
+    assert result.net_external_cashflow_in == Decimal(1000)
+    assert result.points[-1].portfolio_return_pct == 0
+    assert result.points[-1].spy_return_pct is not None
+
+
+def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session):
+    start = date(2025, 5, 1)
+    end = date(2025, 5, 11)
+    item = Item(source="plaid", plaid_item_id="itm-1", institution_name="RH", is_data_active=True)
+    account = Account(item=item, plaid_account_id="a-1", name="Taxable", type="investment")
+    cash = Security(plaid_security_id="cash", ticker="CUR:USD", type="cash")
+    session.add_all([item, account, cash])
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                quantity=Decimal(0),
+                institution_value=Decimal(0),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                quantity=Decimal(1100),
+                institution_value=Decimal(1100),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="deposit-at-end",
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                date=end,
+                type="cash",
+                subtype="deposit",
+                quantity=Decimal(1000),
+                amount=Decimal(1000),
+            ),
+        ]
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert result.calculation_reason_codes == ["nonpositive_dietz_denominator"]
+    assert result.net_external_cashflow_in is None
+    assert all(point.portfolio_return_pct is None for point in result.points)

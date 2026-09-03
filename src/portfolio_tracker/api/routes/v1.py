@@ -16,7 +16,7 @@ Resources:
   * ``GET /api/v1/data-quality``         — machine-readable data-quality findings
   * ``GET /api/v1/analytics/positioning``— Positioning cuts + equity fraction
   * ``GET /api/v1/analytics/performance``— Modified-Dietz TWR vs benchmarks
-  * ``GET /api/v1/analytics/position-performance`` — per-ticker dollar alpha
+  * ``GET /api/v1/analytics/position-performance`` — fail-closed position comparison
   * ``GET /api/v1/analytics/risk``       — beta/volatility + drawdown together
   * ``GET /api/v1/analytics/beta``       — the regression half alone
   * ``GET /api/v1/analytics/drawdown``   — the loss-shaped half alone
@@ -323,7 +323,7 @@ def analytics_position_performance(
     end_date: date | None = Query(default=None),
     exclude_broad_index: bool = Query(default=False),
 ) -> PositionPerformanceV1Result:
-    """Per-ticker dollar alpha vs dollar-matched SPY/QQQ/policy counterfactuals."""
+    """Split-normalized price/trade alpha; unavailable on unresolved share movement."""
     if end_date is None:
         end_date = date.today()
     if start_date is None:

@@ -23,9 +23,11 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.sql.elements import ColumnElement
 
 
 class Base(DeclarativeBase):
@@ -230,20 +232,81 @@ class InvestmentTransaction(Base):
     )
 
 
+class PriceSource(StrEnum):
+    """Provider that supplied a persisted daily security price."""
+
+    UNKNOWN = "unknown"
+    YFINANCE = "yfinance"
+    STOOQ = "stooq"
+
+
+class PriceAdjustmentBasis(StrEnum):
+    """Corporate-action and distribution adjustment applied to a price."""
+
+    UNKNOWN = "unknown"
+    RAW_UNADJUSTED = "raw_unadjusted"
+    SPLIT_ADJUSTED = "split_adjusted"
+    TOTAL_RETURN_ADJUSTED = "total_return_adjusted"
+
+
 class Price(Base):
-    """Daily close price for a security (yfinance backfill).
+    """Daily close price for a security with durable provenance.
 
     Used to value past positions when reconstructing portfolio history from
-    transactions. Composite PK on (security_id, date).
+    transactions. `source` names the provider and `adjustment_basis` records
+    the price-series semantics. Legacy/unverified rows use `unknown`; consumers
+    must not infer provenance from the mere presence of a row. Composite PK on
+    (security_id, date).
     """
 
     __tablename__ = "prices"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('unknown', 'yfinance', 'stooq')",
+            name="ck_prices_source",
+        ),
+        CheckConstraint(
+            "adjustment_basis IN "
+            "('unknown', 'raw_unadjusted', 'split_adjusted', 'total_return_adjusted')",
+            name="ck_prices_adjustment_basis",
+        ),
+    )
 
     security_id: Mapped[int] = mapped_column(
         ForeignKey("securities.security_id", ondelete="CASCADE"), primary_key=True
     )
     date: Mapped[date] = mapped_column(Date, primary_key=True)
     close: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=PriceSource.UNKNOWN.value,
+        server_default=PriceSource.UNKNOWN.value,
+    )
+    adjustment_basis: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=PriceAdjustmentBasis.UNKNOWN.value,
+        server_default=PriceAdjustmentBasis.UNKNOWN.value,
+    )
+
+    @property
+    def is_position_price_trade_eligible(self) -> bool:
+        """Whether this row can compare a position close with as-traded prices."""
+        return (
+            self.source == PriceSource.YFINANCE.value
+            and self.adjustment_basis == PriceAdjustmentBasis.SPLIT_ADJUSTED.value
+            and self.close > 0
+        )
+
+    @classmethod
+    def position_price_trade_eligibility_clause(cls) -> ColumnElement[bool]:
+        """SQL predicate matching rows eligible for price/trade comparisons."""
+        return and_(
+            cls.source == PriceSource.YFINANCE.value,
+            cls.adjustment_basis == PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            cls.close > 0,
+        )
 
 
 class StockSplit(Base):
@@ -251,11 +314,11 @@ class StockSplit(Base):
 
     `ratio` is the yfinance convention: shares-after / shares-before for one
     pre-split share — 4.0 for a 4:1 forward split, 0.125 for a 1:8 reverse.
-    `prices` stores split-adjusted (back-adjusted) closes, so historical
-    transaction/snapshot QUANTITIES (recorded in as-traded units) must be
-    scaled to today's split-adjusted units before being valued against those
-    prices in the walk-back — see `services/splits.py`. Refreshed by
-    `jobs.splits` from yfinance `.splits`. Composite PK so a re-fetch upserts.
+    Historical transaction/snapshot QUANTITIES are recorded in as-traded
+    units. Position-return consumers use these events to normalize quantities
+    into current split units before comparing them with yfinance's
+    split-adjusted Close — see `services/splits.py`. Refreshed by `jobs.splits`
+    from yfinance `.splits`. Composite PK so a re-fetch upserts.
     """
 
     __tablename__ = "stock_splits"

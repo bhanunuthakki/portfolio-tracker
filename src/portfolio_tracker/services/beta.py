@@ -29,15 +29,13 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import Benchmark, PolicyWeight
-from portfolio_tracker.services.performance import (
-    _benchmark_series,  # pyright: ignore[reportPrivateUsage]
-)
 from portfolio_tracker.services.position_alpha import compute_position_alpha
 
 # The 13-week US T-bill yield is stored under this symbol (percent units) by
@@ -64,6 +62,10 @@ _DEFAULT_RISK_FREE_ANNUAL = 0.04
 
 
 class BetaResult(BaseModel):
+    methodology: Literal["risk.beta_drawdown"]
+    methodology_version: Literal["2"]
+    calculation_status: Literal["available", "unavailable"]
+    calculation_reason_codes: list[str]
     benchmark: str
     start_date: date
     end_date: date
@@ -156,6 +158,20 @@ def compute_beta(
         end_date,
         exclude_broad_index=exclude_index_etfs,
     )
+    if pa_result.calculation_status == "unavailable":
+        notes.append(
+            "Position price/trade risk metrics are unavailable because the "
+            "underlying position calculation failed closed. Use whole-account "
+            "Modified Dietz performance as the fallback."
+        )
+        return _empty_result(
+            benchmark_symbol,
+            start_date,
+            end_date,
+            risk_free_annual,
+            notes,
+            reason_codes=pa_result.calculation_reason_codes,
+        )
     daily_value: dict[date, Decimal] = {
         p.date: Decimal(p.portfolio_value) for p in pa_result.series
     }
@@ -168,7 +184,7 @@ def compute_beta(
     }
 
     portfolio_returns = _daily_returns(daily_value, daily_cashflow)
-    benchmark_returns = _benchmark_daily_returns_for(
+    benchmark_returns = _benchmark_price_daily_returns_for(
         session, benchmark_symbol, start_date, end_date
     )
 
@@ -185,17 +201,39 @@ def compute_beta(
             f"retained so volatility and Sharpe/Sortino reflect real tail risk."
         )
 
-    if not paired_p:
+    if len(paired_p) < 2:
         notes.append(
-            "No overlapping return days. Need at least 2 paired (portfolio, "
+            "Insufficient overlapping return days. Need at least 2 paired (portfolio, "
             "benchmark) observations."
         )
-        return _empty_result(benchmark_symbol, start_date, end_date, risk_free_annual, notes)
+        return _empty_result(
+            benchmark_symbol,
+            start_date,
+            end_date,
+            risk_free_annual,
+            notes,
+            reason_codes=["insufficient_return_observations"],
+            sample_size=len(paired_p),
+        )
 
     # Daily risk-free rate (simple, not compounded — fine for daily return scale).
     rf_daily = risk_free_annual / _TRADING_DAYS_PER_YEAR
 
     beta, alpha, r_squared, correlation = _ols(paired_p, paired_m)
+    if beta is None or r_squared is None or correlation is None:
+        notes.append(
+            "Regression is undefined for these observations. The benchmark "
+            "must vary and beta, R-squared, and correlation must all be defined."
+        )
+        return _empty_result(
+            benchmark_symbol,
+            start_date,
+            end_date,
+            risk_free_annual,
+            notes,
+            reason_codes=["insufficient_return_observations"],
+            sample_size=len(paired_p),
+        )
     sharpe = _sharpe(paired_p, rf_daily)
     sortino = _sortino(paired_p, rf_daily)
     info_ratio, tracking_error = _information_ratio(paired_p, paired_m)
@@ -224,7 +262,7 @@ def compute_beta(
             f"these metrics increases with more daily observations — "
             f"accumulate forward snapshots for a more reliable estimate."
         )
-    if r_squared is not None and r_squared < 0.3:
+    if r_squared < 0.3:
         notes.append(
             f"R² is low ({r_squared:.2f}) — beta poorly summarizes this "
             f"portfolio's relationship to {benchmark_symbol}. Consider a "
@@ -232,6 +270,10 @@ def compute_beta(
         )
 
     return BetaResult(
+        methodology="risk.beta_drawdown",
+        methodology_version="2",
+        calculation_status="available",
+        calculation_reason_codes=[],
         benchmark=benchmark_symbol,
         start_date=start_date,
         end_date=end_date,
@@ -260,12 +302,19 @@ def _empty_result(
     end_date: date,
     risk_free_annual: float,
     notes: list[str],
+    *,
+    reason_codes: list[str],
+    sample_size: int = 0,
 ) -> BetaResult:
     return BetaResult(
+        methodology="risk.beta_drawdown",
+        methodology_version="2",
+        calculation_status="unavailable",
+        calculation_reason_codes=sorted(set(reason_codes)),
         benchmark=benchmark,
         start_date=start_date,
         end_date=end_date,
-        sample_size=0,
+        sample_size=sample_size,
         risk_free_annual=risk_free_annual,
         beta=None,
         alpha_annualized_pct=None,
@@ -307,14 +356,27 @@ def _window_risk_free(session: Session, start_date: date, end_date: date) -> flo
     return (sum(yields) / len(yields)) / 100.0
 
 
-def _benchmark_daily_returns_for(
+def _benchmark_price_daily_returns_for(
     session: Session, symbol: str, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    """Daily return series for either a single ticker or the policy mix."""
-    benchmark_series = _benchmark_series(session, start_date, end_date)
+    """Raw-price daily returns matching the position price/trade basis."""
+    rows = session.execute(
+        select(Benchmark.symbol, Benchmark.date, Benchmark.close)
+        .where(Benchmark.date >= start_date)
+        .where(Benchmark.date <= end_date)
+    ).all()
+    benchmark_series: dict[str, dict[date, Decimal]] = {}
+    for benchmark_symbol, benchmark_date, close in rows:
+        benchmark_series.setdefault(benchmark_symbol, {})[benchmark_date] = Decimal(close)
     if symbol.upper() == _POLICY_PSEUDO_SYMBOL:
         return _policy_daily_returns(session, benchmark_series)
     return _benchmark_daily_returns(benchmark_series.get(symbol, {}))
+
+
+# Compatibility name used by the positioning service. The underlying behavior
+# is deliberately raw-price return so every position-derived risk/correlation
+# consumer shares the same price/trade basis.
+_benchmark_daily_returns_for = _benchmark_price_daily_returns_for
 
 
 def _policy_daily_returns(

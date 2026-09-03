@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from portfolio_tracker.api.fixtures_v1 import FIXTURES_DIR, build_fixture_payloads, render
 from portfolio_tracker.api.openapi_v1 import ARTIFACT_PATH, render_v1_openapi
 from portfolio_tracker.api.routes.v1 import DataQualityV1Result
@@ -110,6 +113,18 @@ def test_fixtures_parse_into_response_models():
     ExitQualityV1Result.model_validate(
         json.loads((FIXTURES_DIR / "exit-quality.json").read_text(encoding="utf-8"))
     )
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["net_external_cashflow_in", "backfill_start_unreliable"],
+)
+def test_performance_contract_requires_financial_provenance_fields(field: str):
+    payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    payload["series"].pop(field)
+
+    with pytest.raises(ValidationError):
+        PerformanceV1Result.model_validate(payload)
 
 
 def test_fixture_scenarios_express_their_states():

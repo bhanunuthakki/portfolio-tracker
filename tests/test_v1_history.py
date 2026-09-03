@@ -217,15 +217,27 @@ def test_analytics_wrappers_enveloped(client, session):
     _seed(session)
     perf = client.get("/api/v1/analytics/performance").json()
     assert perf["meta"]["methodology"] == "performance.modified_dietz"
+    assert perf["meta"]["methodology_version"] == "2"
+    assert perf["series"]["methodology"] == perf["meta"]["methodology"]
+    assert perf["series"]["methodology_version"] == perf["meta"]["methodology_version"]
     assert perf["meta"]["as_of"] == _FRESH.isoformat()  # holdings date, not query end
     assert "points" in perf["series"]
 
     alpha = client.get("/api/v1/analytics/position-performance").json()
-    assert alpha["meta"]["methodology"] == "position_alpha.dollar_matched_counterfactual"
+    assert (
+        alpha["meta"]["methodology"] == "position_alpha.split_normalized_price_trade_modified_dietz"
+    )
+    assert alpha["meta"]["methodology_version"] == "3"
+    assert alpha["result"]["methodology"] == alpha["meta"]["methodology"]
+    assert alpha["result"]["methodology_version"] == alpha["meta"]["methodology_version"]
 
     risk = client.get("/api/v1/analytics/risk").json()
     assert risk["meta"]["methodology"] == "risk.beta_drawdown"
+    assert risk["meta"]["methodology_version"] == "2"
     assert "beta" in risk and "drawdown" in risk
+    for raw_result in (risk["beta"], risk["drawdown"]):
+        assert raw_result["methodology"] == risk["meta"]["methodology"]
+        assert raw_result["methodology_version"] == risk["meta"]["methodology_version"]
 
     exits = client.get("/api/v1/analytics/exit-quality").json()
     assert exits["meta"]["methodology"] == "exit_quality.repricing"
@@ -246,9 +258,34 @@ def test_risk_split_resources_match_the_combined_read(client, session):
     for payload in (beta_only, drawdown_only):
         assert payload["meta"]["schema_version"] == "1.0.0"
         assert payload["meta"]["methodology"] == "risk.beta_drawdown"
+        assert payload["meta"]["methodology_version"] == "2"
     # Each half returns only its own half — that is the point of the split.
     assert "drawdown" not in beta_only
     assert "beta" not in drawdown_only
+
+
+def test_legacy_analytics_results_embed_methodology_markers(client, session):
+    _seed(session)
+    params = {
+        "start_date": (_FRESH - timedelta(days=365)).isoformat(),
+        "end_date": _FRESH.isoformat(),
+    }
+    expected = {
+        "/api/portfolio/performance": ("performance.modified_dietz", "2"),
+        "/api/portfolio/position-alpha": (
+            "position_alpha.split_normalized_price_trade_modified_dietz",
+            "3",
+        ),
+        "/api/portfolio/beta": ("risk.beta_drawdown", "2"),
+        "/api/portfolio/drawdown": ("risk.beta_drawdown", "2"),
+    }
+
+    for path, (methodology, version) in expected.items():
+        response = client.get(path, params=params)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["methodology"] == methodology
+        assert payload["methodology_version"] == version
 
 
 def test_deprecation_headers_on_legacy_endpoints(client, session):

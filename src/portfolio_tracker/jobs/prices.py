@@ -4,10 +4,14 @@ Source order (try the next one only when the previous returns empty):
 
   1. **yfinance** — Yahoo Finance via the `yfinance` package. Best coverage
      for US equities and ETFs, but flaky on delisted issues, foreign
-     listings, and during Yahoo rate-limit hiccups.
+     listings, and during Yahoo rate-limit hiccups. The job requests
+     `auto_adjust=False` to preserve Close separately from Adj Close. Yahoo's
+     Close remains split-adjusted but does not include dividend reinvestment,
+     so it is persisted as `split_adjusted`.
   2. **Stooq** — `stooq.com` public CSV endpoint. Free, no auth, surprisingly
      reliable for US-listed equities/ETFs. Tries both the bare symbol and
-     the `.US` suffix some tickers need.
+     the `.US` suffix some tickers need. Its adjustment basis is persisted as
+     `unknown` until that contract is independently established.
 
 Tickers without coverage in either source are reported via the data-quality
 endpoint as `no_historical_prices` so the user can investigate.
@@ -29,7 +33,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import SessionLocal
-from portfolio_tracker.models import Price, Security, TickerOverride
+from portfolio_tracker.models import (
+    Price,
+    PriceAdjustmentBasis,
+    PriceSource,
+    Security,
+    TickerOverride,
+)
 
 _STOOQ_URL = "https://stooq.com/q/d/l/"
 
@@ -54,26 +64,36 @@ def run(start_date: date, end_date: date) -> tuple[int, dict[str, int]]:
             ticker = override_map.get(security.security_id) or security.ticker
             if ticker is None:
                 continue
-            history, source = _fetch_history(ticker, start_date, end_date)
+            history, source, adjustment_basis = _fetch_history(ticker, start_date, end_date)
             by_source[source] = by_source.get(source, 0) + 1
             if not history:
                 continue
-            rows_written += _write_history(session, security, history)
+            rows_written += _write_history(
+                session,
+                security,
+                history,
+                source=source,
+                adjustment_basis=adjustment_basis,
+            )
         session.commit()
     return rows_written, by_source
 
 
 def _fetch_history(
     ticker: str, start_date: date, end_date: date
-) -> tuple[dict[date, Decimal], str]:
-    """Try sources in order. Returns (history, source_name). Empty if all fail."""
+) -> tuple[dict[date, Decimal], str, str]:
+    """Return history plus explicit provider and adjustment-basis provenance."""
     history = _yfinance_history(ticker, start_date, end_date)
     if history:
-        return history, "yfinance"
+        return (
+            history,
+            PriceSource.YFINANCE.value,
+            PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+        )
     history = _stooq_history(ticker, start_date, end_date)
     if history:
-        return history, "stooq"
-    return {}, "none"
+        return history, PriceSource.STOOQ.value, PriceAdjustmentBasis.UNKNOWN.value
+    return {}, "none", PriceAdjustmentBasis.UNKNOWN.value
 
 
 def _yfinance_history(ticker: str, start_date: date, end_date: date) -> dict[date, Decimal]:
@@ -140,14 +160,32 @@ def _stooq_one(symbol: str, start_date: date, end_date: date) -> dict[date, Deci
     return out
 
 
-def _write_history(session: Session, security: Security, history: dict[date, Decimal]) -> int:
+def _write_history(
+    session: Session,
+    security: Security,
+    history: dict[date, Decimal],
+    *,
+    source: str,
+    adjustment_basis: str,
+) -> int:
+    """Upsert price values and provenance; return the count of newly added rows."""
     rows_written = 0
     for bar_date, close in history.items():
         existing = session.get(Price, (security.security_id, bar_date))
         if existing is not None:
             existing.close = close
+            existing.source = source
+            existing.adjustment_basis = adjustment_basis
             continue
-        session.add(Price(security_id=security.security_id, date=bar_date, close=close))
+        session.add(
+            Price(
+                security_id=security.security_id,
+                date=bar_date,
+                close=close,
+                source=source,
+                adjustment_basis=adjustment_basis,
+            )
+        )
         rows_written += 1
     return rows_written
 

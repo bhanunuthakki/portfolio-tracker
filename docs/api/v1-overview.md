@@ -40,11 +40,11 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
-| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals (`performance.modified_dietz` v1) |
-| `GET /api/v1/analytics/position-performance` | Per-ticker dollar alpha vs dollar-matched counterfactuals (`position_alpha.dollar_matched_counterfactual` v1) |
-| `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v1) |
+| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields when an in-kind external flow cannot be identified or valued |
+| `GET /api/v1/analytics/position-performance` | Split-normalized invested-position price/trade return and per-ticker dollar alpha vs cash-flow-matched price-return counterfactuals (`position_alpha.split_normalized_price_trade_modified_dietz` v3); derived fields are null with stable reason codes when share movements or price provenance cannot be reconciled |
+| `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v2); drawdown fails closed with the performance reason codes when its return index is unavailable |
 | `GET /api/v1/analytics/beta` | The regression half of `risk` alone — for consumers that don't need drawdown |
-| `GET /api/v1/analytics/drawdown` | The loss-shaped half of `risk` alone — max drawdown, underwater curve, recovery, Calmar |
+| `GET /api/v1/analytics/drawdown` | The loss-shaped half of `risk` alone — max drawdown, underwater curve, recovery, Calmar, and structural availability |
 | `GET /api/v1/analytics/exit-quality` | Sell-side quality: regret vs holding, exit alpha vs SPY (`exit_quality.repricing` v1) |
 
 Wealthplan normally needs exactly one `portfolio-snapshot` read per refresh.
@@ -68,6 +68,11 @@ For `analytics/*` responses, `meta.as_of` is the underlying **holdings
 observation date**, not the query window end — a calculation run today over a
 week-old book reads as stale (PRD §9.3). The calculation's own window travels
 in the payload (`series.start_date`/`end_date` etc.).
+
+The raw performance, position-performance, beta, and drawdown result objects
+also carry required `methodology` and `methodology_version` literals. This lets
+legacy endpoint consumers prove the calculation contract without depending on
+the v1 envelope; v1 consumers must require the embedded markers to match meta.
 
 ### Pagination
 

@@ -162,7 +162,7 @@ class PerformancePoint(BaseModel):
     # Start at 0 on `start_date`, rise/fall thereafter.
     # Same denominator structure for all four so the gap between lines
     # = pure relative performance, V_start-independent in spirit.
-    portfolio_return_pct: Decimal
+    portfolio_return_pct: Decimal | None
     spy_return_pct: Decimal | None
     qqq_return_pct: Decimal | None
     policy_return_pct: Decimal | None
@@ -174,6 +174,10 @@ class PerformancePoint(BaseModel):
 
 
 class PerformanceSeries(BaseModel):
+    methodology: Literal["performance.modified_dietz"]
+    methodology_version: Literal["2"]
+    calculation_status: Literal["available", "unavailable"]
+    calculation_reason_codes: list[str]
     start_date: date
     end_date: date
     base_value: Decimal
@@ -184,11 +188,11 @@ class PerformanceSeries(BaseModel):
     earliest_observed_date: date | None = None
     # Net external cashflow into the portfolio over the window (positive = in).
     # Surfaced so the UI can show contributions alongside total return.
-    net_external_cashflow_in: Decimal = Decimal(0)
+    net_external_cashflow_in: Decimal | None
     # Whether the start value is suspiciously low vs the end value (suggests
     # the backfill is missing pre-existing positions). Frontend renders a
     # warning when true.
-    backfill_start_unreliable: bool = False
+    backfill_start_unreliable: bool
 
 
 class CashflowGroupOut(BaseModel):

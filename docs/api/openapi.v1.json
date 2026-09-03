@@ -278,6 +278,21 @@
             ],
             "title": "Beta"
           },
+          "calculation_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Calculation Reason Codes",
+            "type": "array"
+          },
+          "calculation_status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Calculation Status",
+            "type": "string"
+          },
           "correlation": {
             "anyOf": [
               {
@@ -304,6 +319,16 @@
               }
             ],
             "title": "Information Ratio"
+          },
+          "methodology": {
+            "const": "risk.beta_drawdown",
+            "title": "Methodology",
+            "type": "string"
+          },
+          "methodology_version": {
+            "const": "2",
+            "title": "Methodology Version",
+            "type": "string"
           },
           "notes": {
             "items": {
@@ -382,6 +407,10 @@
           }
         },
         "required": [
+          "methodology",
+          "methodology_version",
+          "calculation_status",
+          "calculation_reason_codes",
           "benchmark",
           "start_date",
           "end_date",
@@ -748,6 +777,21 @@
             ],
             "title": "Annualized Return Pct"
           },
+          "calculation_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Calculation Reason Codes",
+            "type": "array"
+          },
+          "calculation_status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Calculation Status",
+            "type": "string"
+          },
           "calmar": {
             "anyOf": [
               {
@@ -800,6 +844,16 @@
             ],
             "title": "Max Drawdown Pct"
           },
+          "methodology": {
+            "const": "risk.beta_drawdown",
+            "title": "Methodology",
+            "type": "string"
+          },
+          "methodology_version": {
+            "const": "2",
+            "title": "Methodology Version",
+            "type": "string"
+          },
           "peak_date": {
             "anyOf": [
               {
@@ -851,6 +905,10 @@
           }
         },
         "required": [
+          "methodology",
+          "methodology_version",
+          "calculation_status",
+          "calculation_reason_codes",
           "start_date",
           "end_date",
           "max_drawdown_pct",
@@ -1275,9 +1333,16 @@
             "title": "Policy Return Pct"
           },
           "portfolio_return_pct": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Portfolio Return Pct",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Return Pct"
           },
           "portfolio_value": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -1350,13 +1415,27 @@
       "PerformanceSeries": {
         "properties": {
           "backfill_start_unreliable": {
-            "default": false,
             "title": "Backfill Start Unreliable",
             "type": "boolean"
           },
           "base_value": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Base Value",
+            "type": "string"
+          },
+          "calculation_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Calculation Reason Codes",
+            "type": "array"
+          },
+          "calculation_status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Calculation Status",
             "type": "string"
           },
           "earliest_observed_date": {
@@ -1376,11 +1455,27 @@
             "title": "End Date",
             "type": "string"
           },
-          "net_external_cashflow_in": {
-            "default": "0",
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Net External Cashflow In",
+          "methodology": {
+            "const": "performance.modified_dietz",
+            "title": "Methodology",
             "type": "string"
+          },
+          "methodology_version": {
+            "const": "2",
+            "title": "Methodology Version",
+            "type": "string"
+          },
+          "net_external_cashflow_in": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net External Cashflow In"
           },
           "points": {
             "items": {
@@ -1396,10 +1491,16 @@
           }
         },
         "required": [
+          "methodology",
+          "methodology_version",
+          "calculation_status",
+          "calculation_reason_codes",
           "start_date",
           "end_date",
           "base_value",
-          "points"
+          "points",
+          "net_external_cashflow_in",
+          "backfill_start_unreliable"
         ],
         "title": "PerformanceSeries",
         "type": "object"
@@ -1471,6 +1572,21 @@
       },
       "PositionAlphaResult": {
         "properties": {
+          "calculation_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Calculation Reason Codes",
+            "type": "array"
+          },
+          "calculation_status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Calculation Status",
+            "type": "string"
+          },
           "end_date": {
             "format": "date",
             "title": "End Date",
@@ -1480,6 +1596,19 @@
             "default": false,
             "title": "Has Policy",
             "type": "boolean"
+          },
+          "matched_returns": {
+            "$ref": "#/components/schemas/PositionMatchedReturns"
+          },
+          "methodology": {
+            "const": "position_alpha.split_normalized_price_trade_modified_dietz",
+            "title": "Methodology",
+            "type": "string"
+          },
+          "methodology_version": {
+            "const": "3",
+            "title": "Methodology Version",
+            "type": "string"
           },
           "rows": {
             "items": {
@@ -1502,39 +1631,88 @@
             "type": "string"
           },
           "total_actual_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Actual Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Actual Pl"
           },
           "total_alpha": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Alpha",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Alpha"
           },
           "total_alpha_vs_policy": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Alpha Vs Policy",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Alpha Vs Policy"
           },
           "total_alpha_vs_qqq": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Alpha Vs Qqq",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Alpha Vs Qqq"
           },
           "total_policy_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Policy Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Policy Pl"
           },
           "total_qqq_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Qqq Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Qqq Pl"
           },
           "total_spy_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Total Spy Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Spy Pl"
           },
           "v_end": {
             "default": "0",
@@ -1550,8 +1728,12 @@
           }
         },
         "required": [
+          "methodology",
+          "methodology_version",
           "start_date",
           "end_date",
+          "calculation_status",
+          "calculation_reason_codes",
           "rows",
           "total_actual_pl",
           "total_spy_pl",
@@ -1567,24 +1749,52 @@
       "PositionAlphaRow": {
         "properties": {
           "actual_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Actual Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Pl"
           },
           "alpha": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Alpha",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha"
           },
           "alpha_vs_policy": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Alpha Vs Policy",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Vs Policy"
           },
           "alpha_vs_qqq": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Alpha Vs Qqq",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Vs Qqq"
           },
           "bought_in_window": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -1607,14 +1817,28 @@
             "title": "Name"
           },
           "policy_counterfactual_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Policy Counterfactual Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Counterfactual Pl"
           },
           "qqq_counterfactual_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Qqq Counterfactual Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qqq Counterfactual Pl"
           },
           "sold_in_window": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -1622,9 +1846,16 @@
             "type": "string"
           },
           "spy_counterfactual_pl": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Spy Counterfactual Pl",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Counterfactual Pl"
           },
           "ticker": {
             "title": "Ticker",
@@ -1669,9 +1900,40 @@
             "type": "string"
           },
           "policy_counterfactual_value": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Policy Counterfactual Value",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Counterfactual Value"
+          },
+          "policy_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Return Pct"
+          },
+          "portfolio_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Return Pct"
           },
           "portfolio_value": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -1685,14 +1947,52 @@
             "type": "string"
           },
           "qqq_counterfactual_value": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Qqq Counterfactual Value",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qqq Counterfactual Value"
+          },
+          "qqq_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qqq Return Pct"
           },
           "spy_counterfactual_value": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Spy Counterfactual Value",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Counterfactual Value"
+          },
+          "spy_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Return Pct"
           }
         },
         "required": [
@@ -1900,8 +2200,111 @@
         "title": "PositionLotV1",
         "type": "object"
       },
+      "PositionMatchedReturns": {
+        "description": "Invested-position price/trade returns on the position-alpha basis.\n\nThese figures exclude cash-equivalent positions and do not add cash\ndividends, interest, or account fees. Position prices and quantities share\na split-normalized basis; benchmark legs use non-dividend-adjusted closes.\nCallers must not present this as whole-account total return.",
+        "properties": {
+          "alpha_vs_policy_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Vs Policy Pct"
+          },
+          "alpha_vs_qqq_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Vs Qqq Pct"
+          },
+          "alpha_vs_spy_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alpha Vs Spy Pct"
+          },
+          "dietz_denominator": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dietz Denominator"
+          },
+          "policy_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Policy Return Pct"
+          },
+          "portfolio_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Return Pct"
+          },
+          "qqq_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qqq Return Pct"
+          },
+          "spy_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Return Pct"
+          }
+        },
+        "title": "PositionMatchedReturns",
+        "type": "object"
+      },
       "PositionPerformanceV1Result": {
-        "description": "Per-ticker dollar alpha vs dollar-matched benchmark counterfactuals.",
+        "description": "Fail-closed invested-position price/trade comparison.",
         "properties": {
           "meta": {
             "$ref": "#/components/schemas/V1Meta"
@@ -3406,7 +3809,7 @@
     },
     "/api/v1/analytics/position-performance": {
       "get": {
-        "description": "Per-ticker dollar alpha vs dollar-matched SPY/QQQ/policy counterfactuals.",
+        "description": "Split-normalized price/trade alpha; unavailable on unresolved share movement.",
         "operationId": "analytics_position_performance_api_v1_analytics_position_performance_get",
         "parameters": [
           {
