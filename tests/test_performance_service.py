@@ -121,7 +121,7 @@ def test_modified_dietz_nonpositive_denominator_is_zero():
 
 
 def test_money_flow_match_does_not_double_count_start_date_cashflow():
-    d0, d10 = date(2025, 1, 1), date(2025, 1, 11)
+    d0, d10 = date(2025, 1, 2), date(2025, 1, 10)
     out = _money_flow_matched_value(
         [d0, d10],
         Decimal(1000),
@@ -150,7 +150,7 @@ def test_money_flow_match_rejects_stale_benchmark_endpoint():
 
 
 def test_policy_match_does_not_double_count_start_date_cashflow():
-    d0, d10 = date(2025, 1, 1), date(2025, 1, 11)
+    d0, d10 = date(2025, 1, 2), date(2025, 1, 10)
     out = _policy_matched_value(
         [d0, d10],
         Decimal(1000),
@@ -168,9 +168,9 @@ def test_policy_match_does_not_double_count_start_date_cashflow():
 
 
 def test_money_flow_matched_value_invests_flow_between_observation_dates():
-    start = date(2025, 1, 1)
-    flow_date = date(2025, 1, 2)
-    end = date(2025, 1, 3)
+    start = date(2025, 1, 2)
+    flow_date = date(2025, 1, 6)
+    end = date(2025, 1, 10)
 
     out = _money_flow_matched_value(
         [start, end],
@@ -188,9 +188,9 @@ def test_money_flow_matched_value_invests_flow_between_observation_dates():
 
 
 def test_policy_matched_value_invests_flow_between_observation_dates():
-    start = date(2025, 1, 1)
-    flow_date = date(2025, 1, 2)
-    end = date(2025, 1, 3)
+    start = date(2025, 1, 2)
+    flow_date = date(2025, 1, 6)
+    end = date(2025, 1, 10)
 
     out = _policy_matched_value(
         [start, end],
@@ -210,7 +210,7 @@ def test_policy_matched_value_invests_flow_between_observation_dates():
 
 
 def test_money_flow_matched_value_excludes_start_flow_and_includes_end_flow():
-    start = date(2025, 1, 1)
+    start = date(2025, 1, 2)
     end = date(2025, 1, 3)
 
     out = _money_flow_matched_value(
@@ -233,7 +233,7 @@ def test_money_flow_matched_value_excludes_start_flow_and_includes_end_flow():
 
 
 def test_policy_matched_value_excludes_start_flow_and_includes_end_flow():
-    start = date(2025, 1, 1)
+    start = date(2025, 1, 2)
     end = date(2025, 1, 3)
 
     out = _policy_matched_value(
@@ -252,10 +252,10 @@ def test_policy_matched_value_excludes_start_flow_and_includes_end_flow():
 
 
 def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
-    start = date(2025, 1, 1)
-    flow_date = date(2025, 1, 2)
-    end = date(2025, 1, 3)
-    after_end = date(2025, 1, 4)
+    start = date(2025, 1, 2)
+    flow_date = date(2025, 1, 4)
+    end = date(2025, 1, 6)
+    after_end = date(2025, 1, 7)
 
     monkeypatch.setattr(
         performance_service,
@@ -285,7 +285,7 @@ def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
     )
     closes = {
         start: Decimal(100),
-        flow_date: Decimal(100),
+        date(2025, 1, 3): Decimal(100),
         end: Decimal(100),
     }
     monkeypatch.setattr(
@@ -466,7 +466,7 @@ def test_performance_series_fails_closed_when_required_benchmark_marks_are_missi
 
 
 def test_performance_series_requires_every_configured_policy_component(monkeypatch, session):
-    start = date(2025, 1, 1)
+    start = date(2025, 1, 2)
     end = date(2025, 1, 3)
     monkeypatch.setattr(
         performance_service,
@@ -608,6 +608,21 @@ def test_benchmark_resolution_uses_prior_close_for_known_market_holiday():
     )
 
     assert resolved == {mlk_day: (prior_close, Decimal(100))}
+
+
+def test_benchmark_resolution_ignores_erroneous_non_session_row():
+    prior_close = date(2025, 1, 3)
+    saturday = date(2025, 1, 4)
+
+    resolved = performance_service._resolved_price_inputs(
+        {
+            prior_close: Decimal(100),
+            saturday: Decimal(123),
+        },
+        [saturday],
+    )
+
+    assert resolved == {saturday: (prior_close, Decimal(100))}
 
 
 def test_boundary_failure_also_reports_independent_flow_and_benchmark_gaps(
@@ -1085,8 +1100,10 @@ def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(cl
                 amount=Decimal(0),
             ),
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=date(2025, 5, 30), close=Decimal(110)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
             Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2025, 5, 30), close=Decimal(110)),
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
@@ -1163,9 +1180,11 @@ def test_whole_account_performance_uses_priceable_share_transfer_cashflow(sessio
                 adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
             ),
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=date(2025, 5, 30), close=Decimal(110)),
             Benchmark(symbol="SPY", date=movement_date, close=Decimal(105)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
             Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2025, 5, 30), close=Decimal(110)),
             Benchmark(symbol="QQQ", date=movement_date, close=Decimal(105)),
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
@@ -1217,8 +1236,10 @@ def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session
                 amount=Decimal(1000),
             ),
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=date(2025, 5, 9), close=Decimal(100)),
             Benchmark(symbol="SPY", date=end, close=Decimal(100)),
             Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2025, 5, 9), close=Decimal(100)),
             Benchmark(symbol="QQQ", date=end, close=Decimal(100)),
         ]
     )
@@ -1231,6 +1252,66 @@ def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session
     assert result.calculation_reason_codes == ["nonpositive_dietz_denominator"]
     assert result.net_external_cashflow_in is None
     assert all(point.portfolio_return_pct is None for point in result.points)
+
+
+def test_nonpositive_denominator_is_reported_with_missing_source_coverage(session):
+    start = date(2025, 1, 2)
+    flow_date = date(2025, 1, 3)
+    end = date(2025, 1, 6)
+    item = Item(source="plaid", plaid_item_id="denominator-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="denominator-account",
+        name="Denominator",
+        type="investment",
+    )
+    cash = Security(plaid_security_id="denominator-cash", ticker="CUR:USD", type="cash")
+    session.add_all([item, account, cash])
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                quantity=Decimal(100),
+                institution_value=Decimal(100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                quantity=Decimal(100),
+                institution_value=Decimal(100),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="large-withdrawal",
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                date=flow_date,
+                type="cash",
+                subtype="withdrawal",
+                quantity=Decimal(1000),
+                amount=Decimal(1000),
+            ),
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=flow_date, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=flow_date, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(100)),
+        ]
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert result.calculation_reason_codes == [
+        "external_flow_source_coverage_incomplete",
+        "nonpositive_dietz_denominator",
+    ]
+    assert result.equation_receipt is None
 
 
 def test_performance_rejects_partial_requested_end_boundary(session):
@@ -1439,9 +1520,11 @@ def test_performance_reports_supported_modeled_opening_provenance(session):
     _approve_source_coverage(session, account, start, end)
     session.add_all(
         [
+            Benchmark(symbol="SPY", date=date(2025, 12, 31), close=Decimal(100)),
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
             Benchmark(symbol="SPY", date=date(2026, 1, 2), close=Decimal(105)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=date(2025, 12, 31), close=Decimal(100)),
             Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
             Benchmark(symbol="QQQ", date=date(2026, 1, 2), close=Decimal(105)),
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),

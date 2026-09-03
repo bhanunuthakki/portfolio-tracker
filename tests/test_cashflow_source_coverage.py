@@ -283,9 +283,13 @@ def test_performance_fails_closed_until_source_window_is_attested(session):
                 quantity=Decimal(1),
                 institution_value=Decimal(110),
             ),
+            Benchmark(symbol="SPY", date=date(2025, 12, 31), close=Decimal(100)),
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=date(2026, 1, 30), close=Decimal(110)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=date(2025, 12, 31), close=Decimal(100)),
             Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2026, 1, 30), close=Decimal(110)),
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )

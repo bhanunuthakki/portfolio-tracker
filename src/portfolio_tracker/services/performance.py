@@ -300,7 +300,6 @@ def compute_performance_series(
         or end_date not in daily_value
         or ending_provenance != _OBSERVED_VALUE
         or bool(value_assessment.calculation_reason_codes)
-        or not source_coverage.is_complete
     )
     if has_valuation_boundary_failure:
         return PerformanceSeries(
@@ -393,8 +392,11 @@ def compute_performance_series(
         calculation_reason_codes.add(_POLICY_BENCHMARK_PRICE_UNAVAILABLE)
     if not source_coverage.is_complete:
         calculation_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
-    if not calculation_reason_codes and not modified_dietz_denominators_are_positive(
-        sorted_dates, daily_cashflow, base_value_adj
+    if (
+        not cashflow_assessment.calculation_reason_codes
+        and not modified_dietz_denominators_are_positive(
+            sorted_dates, daily_cashflow, base_value_adj
+        )
     ):
         calculation_reason_codes.add(_NONPOSITIVE_DIETZ_DENOMINATOR)
 
@@ -2307,11 +2309,11 @@ def _benchmark_price_point(
     series: dict[date, Decimal], target_date: date
 ) -> tuple[date, Decimal] | None:
     """Resolve only the exact or immediately preceding US market close."""
-    exact_price = series.get(target_date)
-    if exact_price is not None and exact_price > 0:
-        return target_date, exact_price
     if _is_us_market_session(target_date):
-        return None
+        exact_price = series.get(target_date)
+        if exact_price is None or exact_price <= 0:
+            return None
+        return target_date, exact_price
     source_date = _expected_benchmark_source_date(target_date)
     price = series.get(source_date)
     if price is None or price <= 0:

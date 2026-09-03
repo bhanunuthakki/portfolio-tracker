@@ -103,9 +103,13 @@ def test_drawdown_propagates_unpriceable_external_share_transfer(session):
                 quantity=Decimal(10),
                 amount=Decimal(0),
             ),
+            Benchmark(symbol="SPY", date=date(2024, 12, 31), close=Decimal(100)),
             Benchmark(symbol="SPY", date=_START, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=date(2025, 1, 3), close=Decimal(100)),
             Benchmark(symbol="SPY", date=_END, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2024, 12, 31), close=Decimal(100)),
             Benchmark(symbol="QQQ", date=_START, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=date(2025, 1, 3), close=Decimal(100)),
             Benchmark(symbol="QQQ", date=_END, close=Decimal(100)),
             CashFlowSourceAttestation(
                 attestation_key="synthetic-drawdown-source",
