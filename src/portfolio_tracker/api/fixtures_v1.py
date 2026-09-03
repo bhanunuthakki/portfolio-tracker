@@ -386,6 +386,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         """
         _seed(session, holdings_date=_FRESH)
         window_start = FIXTURE_TODAY - timedelta(days=365)
+        analytics_end = _FRESH
 
         rows = _latest_holding_rows(session)
         if rows:
@@ -426,7 +427,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         )
 
         performance_series = compute_performance_series(
-            session, window_start, _FRESH, Decimal(0), False
+            session, window_start, analytics_end, Decimal(0), False
         )
         performance = PerformanceV1Result(
             meta=performance_meta(
@@ -441,12 +442,12 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             meta=position_performance_meta(
                 session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
             ),
-            result=compute_position_alpha(session, window_start, FIXTURE_TODAY),
+            result=compute_position_alpha(session, window_start, analytics_end),
         )
         beta_result = compute_beta(
-            session, window_start, FIXTURE_TODAY, "SPY", None, False, Decimal(0)
+            session, window_start, analytics_end, "SPY", None, False, Decimal(0)
         )
-        drawdown_result = compute_drawdown(session, window_start, _FRESH, Decimal(0), False)
+        drawdown_result = compute_drawdown(session, window_start, analytics_end, Decimal(0), False)
         risk = RiskV1Result(
             meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
             beta=beta_result,
@@ -462,7 +463,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         )
         exit_quality = ExitQualityV1Result(
             meta=exit_quality_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
-            result=compute_exit_quality(session, window_start, FIXTURE_TODAY),
+            result=compute_exit_quality(session, window_start, analytics_end),
         )
 
         return {
