@@ -54,8 +54,8 @@ from portfolio_tracker.models import (
     Security,
 )
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
+from portfolio_tracker.services import external_flow_ledger
 from portfolio_tracker.services.active_items import valued_account_ids
-from portfolio_tracker.services.external_flow_ledger import build_external_flow_ledger
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -896,7 +896,7 @@ def _daily_external_cashflow_assessment(
     session: Session, start_date: date, end_date: date
 ) -> _CashflowAssessment:
     """Project the canonical ledger into the performance calculation contract."""
-    ledger = build_external_flow_ledger(session, start_date, end_date)
+    ledger = external_flow_ledger.build_external_flow_ledger(session, start_date, end_date)
     reason_codes = tuple(
         sorted(
             {
@@ -1163,37 +1163,7 @@ def _classify_by_name(name: str | None) -> str | None:
     Returning None means "no name-based opinion; fall through to the
     subtype heuristic."
     """
-    if not name:
-        return None
-    n = name.lower()
-    # Income earned inside the portfolio (NOT external cashflow), even if
-    # the subtype mis-tags them as withdrawal.
-    if "reinvestment" in n or "drip" in n:
-        return "internal"
-    if "dividend" in n or "interest payment" in n or "credit interest" in n:
-        return "internal"
-    # Direction markers — used when type/subtype is ambiguous
-    # (typically `transfer/transfer`). "deposit" and "withdrawal" are
-    # cross-aggregator-safe because they make the direction explicit
-    # regardless of which sign convention the source uses.
-    if "outgoing" in n or "withdrawal" in n:
-        return "external_out"
-    if "incoming" in n or "deposit" in n:
-        return "external_in"
-    return None
-
-
-def _is_cashflow_eligible_type(tx_type: str) -> bool:
-    """Only `cash` and `transfer` rows can be external cashflow events.
-    Buys/sells/fees/dividends-as-CASH-subtype are never cashflow regardless
-    of what their `name` field happens to contain (e.g. a sell of a fund
-    named "Vanguard Dividend Appreciation ETF" should NOT trigger the
-    'dividend' name-hint — name hints only apply to cash/transfer rows
-    where the subtype is the actually-ambiguous one)."""
-    return tx_type in (
-        InvestmentTransactionType.CASH.value,
-        InvestmentTransactionType.TRANSFER.value,
-    )
+    return external_flow_ledger.classify_by_name(name)
 
 
 def _signed_cashflow(
@@ -1214,80 +1184,14 @@ def _signed_cashflow(
          for cash/transfer types, never for buy/sell/fee
       3. (type, subtype) heuristic with aggregator sign convention
     """
-    if override == "internal":
-        return Decimal(0)
-    if override == "external_in":
-        return abs(amount)
-    if override == "external_out":
-        return -abs(amount)
-
-    if _is_cashflow_eligible_type(tx_type):
-        name_hint = _classify_by_name(name)
-        if name_hint == "internal":
-            return Decimal(0)
-        if name_hint == "external_in":
-            return abs(amount)
-        if name_hint == "external_out":
-            return -abs(amount)
-
-    subtype_norm = (tx_subtype or "").lower().strip()
-
-    if tx_type == InvestmentTransactionType.TRANSFER.value:
-        if subtype_norm in _INTERNAL_TRANSFER_SUBTYPES:
-            return Decimal(0)
-        return -amount  # Plaid sign convention
-
-    if tx_type == InvestmentTransactionType.CASH.value:
-        if subtype_norm in _INFLOW_CASH_SUBTYPES:
-            return abs(amount)
-        if subtype_norm in _OUTFLOW_CASH_SUBTYPES:
-            return -abs(amount)
-        if subtype_norm in _AMBIGUOUS_CASH_SUBTYPES:
-            return -amount
-
-    return Decimal(0)
-
-
-def _is_external_cashflow(
-    tx_type: str,
-    tx_subtype: str | None,
-    override: str | None = None,
-    name: str | None = None,
-) -> bool:
-    """Boolean version of `_signed_cashflow` used by the audit endpoint."""
-    if override == "internal":
-        return False
-    if override in ("external_in", "external_out"):
-        return True
-    if _is_cashflow_eligible_type(tx_type):
-        name_hint = _classify_by_name(name)
-        if name_hint == "internal":
-            return False
-        if name_hint in ("external_in", "external_out"):
-            return True
-    subtype_norm = (tx_subtype or "").lower().strip()
-    if tx_type == InvestmentTransactionType.TRANSFER.value:
-        return subtype_norm not in _INTERNAL_TRANSFER_SUBTYPES
-    if tx_type == InvestmentTransactionType.CASH.value:
-        return (
-            subtype_norm in _INFLOW_CASH_SUBTYPES
-            or subtype_norm in _OUTFLOW_CASH_SUBTYPES
-            or subtype_norm in _AMBIGUOUS_CASH_SUBTYPES
-        )
-    return False
+    return external_flow_ledger.signed_cashflow(
+        tx_type, tx_subtype, amount, override=override, name=name
+    )
 
 
 def _load_transaction_overrides(session: Session) -> dict[str, str]:
     """Map tx_id -> classification for every row in transaction_overrides."""
-    from portfolio_tracker.models import TransactionOverride
-
-    rows = session.execute(
-        select(
-            TransactionOverride.plaid_investment_transaction_id,
-            TransactionOverride.classification,
-        )
-    ).all()
-    return {tx_id: cls for tx_id, cls in rows}
+    return external_flow_ledger.load_transaction_overrides(session)
 
 
 def effective_classification(
@@ -1315,36 +1219,9 @@ def effective_classification(
 
     `override` short-circuits the heuristic when supplied.
     """
-    if override is not None:
-        return override
-    # Name hints apply ONLY to cash/transfer rows where the subtype is
-    # ambiguous. Buys/sells of a security whose name happens to contain
-    # "dividend" or "reinvestment" should NOT be reclassified.
-    if _is_cashflow_eligible_type(tx_type):
-        name_hint = _classify_by_name(name)
-        if name_hint is not None:
-            return name_hint
-    if not _is_external_cashflow(tx_type, tx_subtype):
-        # Distinguish "internal transfer/cash event" (still cashflow-related,
-        # just zeroed) from "completely unrelated to cashflow."
-        subtype_norm = (tx_subtype or "").lower().strip()
-        is_transfer_or_cash = tx_type in (
-            InvestmentTransactionType.TRANSFER.value,
-            InvestmentTransactionType.CASH.value,
-        )
-        if is_transfer_or_cash and subtype_norm in _INTERNAL_TRANSFER_SUBTYPES:
-            return "internal"
-        return None
-    # Use the actual tx amount when available so ambiguous subtypes (where
-    # direction depends on Plaid's sign) resolve correctly. Falling back to
-    # Decimal("1") gives the heuristic's "default direction" for the subtype.
-    probe = amount if amount is not None else Decimal("1")
-    cf = _signed_cashflow(tx_type, tx_subtype, probe, name=name)
-    if cf > 0:
-        return "external_in"
-    if cf < 0:
-        return "external_out"
-    return "internal"
+    return external_flow_ledger.effective_classification(
+        tx_type, tx_subtype, override, amount=amount, name=name
+    )
 
 
 def _daily_portfolio_value(
@@ -1466,7 +1343,7 @@ def _backfill_values_from_transactions(
         .scalars()
         .all()
     )
-    tx_overrides = _load_transaction_overrides(session)
+    tx_overrides = external_flow_ledger.load_transaction_overrides(session)
     # Walk EVERY transaction in window — pure-cash ones (no security_id)
     # are needed for the cash-adjustment series even though they don't
     # affect positions.
@@ -1643,8 +1520,15 @@ def _reverse_transaction_cash_delta(
     ):
         return Decimal(0)
 
-    if _is_external_cashflow(tx.type, tx.subtype, override=override, name=tx.name):
-        return -_signed_cashflow(tx.type, tx.subtype, amount, override=override, name=tx.name)
+    flow_decision = external_flow_ledger.classify_transaction_cashflow(
+        tx.type,
+        tx.subtype,
+        amount,
+        override=override,
+        name=tx.name,
+    )
+    if flow_decision is not None and flow_decision.classification != "internal":
+        return -flow_decision.signed_external_amount
 
     if tx.type == InvestmentTransactionType.BUY.value:
         return magnitude

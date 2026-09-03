@@ -26,6 +26,7 @@ from portfolio_tracker.models import (
     StockSplit,
 )
 from portfolio_tracker.services import performance as performance_service
+from portfolio_tracker.services.external_flow_ledger import classify_transaction_cashflow
 from portfolio_tracker.services.performance import (
     _backfill_values_from_transactions,
     _modified_dietz_series,
@@ -364,6 +365,22 @@ def test_reverse_cash_delta_external_flows():
     assert _reverse_transaction_cash_delta(
         _tx("cash", amount=Decimal(200), subtype="withdrawal"), frozenset()
     ) == Decimal(200)
+
+
+def test_reverse_cash_delta_uses_owner_approved_flow_direction():
+    for name in ("ACAT Reimbursement", "Account Promo Reward"):
+        tx = _tx("cash", amount=Decimal(100), subtype="withdrawal", name=name)
+        decision = classify_transaction_cashflow(
+            tx.type,
+            tx.subtype,
+            Decimal(tx.amount),
+            name=tx.name,
+        )
+
+        assert decision is not None
+        assert decision.classification == "external_in"
+        assert decision.signed_external_amount == Decimal(100)
+        assert _reverse_transaction_cash_delta(tx, frozenset()) == Decimal(-100)
 
 
 # ---------------------------------------------------------------------------
