@@ -368,6 +368,15 @@ def build_external_flow_ledger(
         subtype = (transaction.subtype or "").lower().strip()
         override = overrides.get(transaction_id)
         if _is_share_transfer_candidate(transaction):
+            component_decision = classify_transaction_cashflow(
+                transaction.type,
+                transaction.subtype,
+                Decimal(0),
+                override=override,
+                name=transaction.name,
+            )
+            if component_decision is not None and component_decision.classification == "internal":
+                continue
             if transaction.security_id is None:
                 issues.append(
                     ExternalFlowIssue(

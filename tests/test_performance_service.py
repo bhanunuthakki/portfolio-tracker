@@ -609,7 +609,7 @@ def test_plain_zero_amount_share_transfer_is_valued_as_external_cashflow(session
     ) == {movement_date: Decimal(1000)}
 
 
-def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(session):
+def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(client, session):
     start = date(2025, 5, 1)
     movement_date = date(2025, 5, 20)
     end = date(2025, 6, 1)
@@ -658,6 +658,16 @@ def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(se
     assert all(point.portfolio_return_pct is None for point in result.points)
     assert all(point.spy_return_pct is None for point in result.points)
     assert all(point.spy_equivalent_value is None for point in result.points)
+
+    response = client.get(
+        "/api/v1/analytics/performance",
+        params={"start_date": start.isoformat(), "end_date": end.isoformat()},
+    )
+    assert response.status_code == 200
+    wire_series = response.json()["series"]
+    assert wire_series["calculation_status"] == "unavailable"
+    assert wire_series["calculation_reason_codes"] == ["external_share_movement_price_unavailable"]
+    assert wire_series["net_external_cashflow_in"] is None
 
 
 def test_whole_account_performance_uses_priceable_share_transfer_cashflow(session):
