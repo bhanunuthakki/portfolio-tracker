@@ -145,6 +145,28 @@ def test_performance_receipt_rejects_a_non_reconciling_decimal_identity():
         PerformanceV1Result.model_validate(payload)
 
 
+def test_performance_receipt_lineage_is_additive_and_validated_when_present():
+    payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    receipt = payload["series"]["equation_receipt"]
+    assert receipt is not None
+
+    # A v1.1 payload predates row-level lineage. It remains valid under the
+    # v1 additive-field compatibility contract.
+    receipt.pop("operative_external_cashflows")
+    parsed = PerformanceV1Result.model_validate(payload)
+    assert parsed.series.equation_receipt is not None
+    assert parsed.series.equation_receipt.operative_external_cashflows == []
+
+    # A v1.2 producer that explicitly emits lineage cannot bypass the exact
+    # row/date reconciliation checks by supplying an empty list.
+    receipt["operative_external_cashflows"] = []
+    with pytest.raises(
+        ValidationError,
+        match="dated external cashflows must cover every nonzero operative date",
+    ):
+        PerformanceV1Result.model_validate(payload)
+
+
 def test_fixture_scenarios_express_their_states():
     payloads = build_fixture_payloads()
     current = PortfolioSnapshotV1.model_validate(payloads["portfolio-snapshot.json"])

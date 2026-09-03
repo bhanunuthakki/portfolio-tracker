@@ -1501,7 +1501,7 @@
     },
     "methodology": "risk.beta_drawdown",
     "methodology_version": "2",
-    "schema_version": "1.1.0",
+    "schema_version": "1.2.0",
     "source_providers": [
       "plaid",
       "snaptrade"

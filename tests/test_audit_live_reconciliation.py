@@ -40,7 +40,7 @@ def _build_database(path: Path) -> tuple[int, int, int]:
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32))")
-        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0025')")
+        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0026')")
 
     with Session(engine) as session:
         broker_item = Item(
@@ -296,7 +296,7 @@ def test_audit_resolves_every_event_and_reports_private_evidence(tmp_path: Path)
     database_preview = cast("dict[str, object]", preview["database"])
     assert database_preview["query_only"] is True
     assert database_preview["integrity"] == "ok"
-    assert database_preview["alembic_revision"] == "0025"
+    assert database_preview["alembic_revision"] == "0026"
     assert preview["window"] == {
         "latest_complete_observed_snapshot_date": "2032-06-30",
         "two_year_start_date": "2030-06-30",

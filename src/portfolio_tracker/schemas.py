@@ -309,7 +309,13 @@ class PerformanceEquationReceipt(BaseModel):
     benchmark_price_resolution_policy: Literal["same_day_or_previous_us_market_close"]
     opening_value: Decimal
     dated_external_cashflows: list[PerformanceDatedCashflow]
-    operative_external_cashflows: list[PerformanceOperativeCashflow]
+    # Added in v1.2. Older v1 payloads omit this field, so it must remain
+    # optional-on-input under the additive compatibility policy. The current
+    # producer always supplies it; when supplied, the validator below enforces
+    # the complete row-level lineage bridge.
+    operative_external_cashflows: list[PerformanceOperativeCashflow] = Field(
+        default_factory=list[PerformanceOperativeCashflow]
+    )
     net_external_cashflow_in: Decimal
     ending_value: Decimal
     investment_gain: Decimal
@@ -325,31 +331,32 @@ class PerformanceEquationReceipt(BaseModel):
         net_flow = sum((flow.amount for flow in self.dated_external_cashflows), Decimal(0))
         if net_flow != self.net_external_cashflow_in:
             raise ValueError("dated external cashflows do not reconcile to net flow")
-        operative_ids = [flow.flow_id for flow in self.operative_external_cashflows]
-        if len(operative_ids) != len(set(operative_ids)):
-            raise ValueError("operative external cashflow IDs must be unique")
         dated_dates = [flow.date for flow in self.dated_external_cashflows]
         if len(dated_dates) != len(set(dated_dates)):
             raise ValueError("dated external cashflow dates must be unique")
-        operative_by_date: dict[date, Decimal] = {}
-        for flow in self.operative_external_cashflows:
-            operative_by_date[flow.date] = (
-                operative_by_date.get(flow.date, Decimal(0)) + flow.amount
-            )
-        nonzero_operative_dates = {
-            flow_date for flow_date, amount in operative_by_date.items() if amount != 0
-        }
-        if set(dated_dates) != nonzero_operative_dates:
-            raise ValueError("dated external cashflows must cover every nonzero operative date")
-        for dated_flow in self.dated_external_cashflows:
-            if operative_by_date.get(dated_flow.date, Decimal(0)) != dated_flow.amount:
-                raise ValueError("operative external cashflows do not reconcile by date")
-            if set(dated_flow.flow_ids) != {
-                flow.flow_id
-                for flow in self.operative_external_cashflows
-                if flow.date == dated_flow.date
-            }:
-                raise ValueError("dated external cashflow IDs do not match operative rows")
+        if "operative_external_cashflows" in self.model_fields_set:
+            operative_ids = [flow.flow_id for flow in self.operative_external_cashflows]
+            if len(operative_ids) != len(set(operative_ids)):
+                raise ValueError("operative external cashflow IDs must be unique")
+            operative_by_date: dict[date, Decimal] = {}
+            for flow in self.operative_external_cashflows:
+                operative_by_date[flow.date] = (
+                    operative_by_date.get(flow.date, Decimal(0)) + flow.amount
+                )
+            nonzero_operative_dates = {
+                flow_date for flow_date, amount in operative_by_date.items() if amount != 0
+            }
+            if set(dated_dates) != nonzero_operative_dates:
+                raise ValueError("dated external cashflows must cover every nonzero operative date")
+            for dated_flow in self.dated_external_cashflows:
+                if operative_by_date.get(dated_flow.date, Decimal(0)) != dated_flow.amount:
+                    raise ValueError("operative external cashflows do not reconcile by date")
+                if set(dated_flow.flow_ids) != {
+                    flow.flow_id
+                    for flow in self.operative_external_cashflows
+                    if flow.date == dated_flow.date
+                }:
+                    raise ValueError("dated external cashflow IDs do not match operative rows")
         if self.ending_value - self.opening_value - net_flow != self.investment_gain:
             raise ValueError("whole-portfolio value bridge does not reconcile")
         if self.portfolio_equation_residual != 0:

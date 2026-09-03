@@ -177,7 +177,7 @@ Every decision-support response carries a `meta` block:
 
 ```jsonc
 "meta": {
-  "schema_version": "1.1.0",          // semver; MAJOR change ⇒ fail closed
+  "schema_version": "1.2.0",          // semver; MAJOR change ⇒ fail closed
   "generated_at": "2026-07-23T06:00:00Z",
   "as_of": "2026-07-22",              // observation date; null ⇒ no data
   "currency": "USD",

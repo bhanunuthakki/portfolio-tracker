@@ -55,7 +55,7 @@ from portfolio_tracker.services.performance import (  # noqa: E402
     unpriceable_snapshot_dates,
 )
 
-EXPECTED_ALEMBIC_REVISION = "0025"
+EXPECTED_ALEMBIC_REVISION = "0026"
 PREVIEW_SCHEMA_VERSION = "1"
 SHA256_PREFIX = "sha256:"
 

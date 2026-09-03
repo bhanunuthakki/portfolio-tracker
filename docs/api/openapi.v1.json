@@ -2191,7 +2191,6 @@
           "benchmark_price_resolution_policy",
           "opening_value",
           "dated_external_cashflows",
-          "operative_external_cashflows",
           "net_external_cashflow_in",
           "ending_value",
           "investment_gain",
@@ -4528,7 +4527,7 @@
   "info": {
     "description": "Versioned consumer-read contract for portfolio facts. See docs/api/v1-overview.md for envelope and freshness semantics.",
     "title": "Portfolio Data Service API",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "openapi": "3.1.0",
   "paths": {
