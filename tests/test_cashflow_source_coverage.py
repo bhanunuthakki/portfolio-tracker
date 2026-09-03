@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
+    Benchmark,
     CashFlowSourceAttestation,
     CashFlowSourceGap,
     HoldingSnapshot,
@@ -282,6 +283,10 @@ def test_performance_fails_closed_until_source_window_is_attested(session):
                 quantity=Decimal(1),
                 institution_value=Decimal(110),
             ),
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
     session.commit()

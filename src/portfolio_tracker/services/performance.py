@@ -257,9 +257,7 @@ def compute_performance_series(
     value_assessment = _daily_portfolio_value_assessment(session, start_date, end_date)
     daily_value = value_assessment.values
     if not daily_value:
-        no_value_reasons = set(value_assessment.calculation_reason_codes) or {
-            _NO_PORTFOLIO_VALUES
-        }
+        no_value_reasons = set(value_assessment.calculation_reason_codes) or {_NO_PORTFOLIO_VALUES}
         if not source_coverage.is_complete:
             no_value_reasons.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
         return PerformanceSeries(

@@ -358,11 +358,16 @@ def test_performance_series_requires_exact_requested_valuation_boundaries(monkey
     end = date(2025, 1, 3)
     monkeypatch.setattr(
         performance_service,
-        "_daily_portfolio_value",
-        lambda *_args: {
-            start + timedelta(days=1): Decimal(1000),
-            end - timedelta(days=1): Decimal(1000),
-        },
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={
+                start + timedelta(days=1): Decimal(1000),
+                end - timedelta(days=1): Decimal(1000),
+            },
+            provenance={},
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
     )
 
     series = performance_service.compute_performance_series(session, start, end)
@@ -383,8 +388,16 @@ def test_performance_series_fails_closed_when_required_benchmark_marks_are_missi
     end = date(2025, 1, 21)
     monkeypatch.setattr(
         performance_service,
-        "_daily_portfolio_value",
-        lambda *_args: {start: Decimal(1000), end: Decimal(1100)},
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={start: Decimal(1000), end: Decimal(1100)},
+            provenance={
+                start: "observed_complete_snapshot",
+                end: "observed_complete_snapshot",
+            },
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
     )
     monkeypatch.setattr(
         performance_service,
@@ -446,8 +459,16 @@ def test_performance_series_requires_every_configured_policy_component(monkeypat
     end = date(2025, 1, 3)
     monkeypatch.setattr(
         performance_service,
-        "_daily_portfolio_value",
-        lambda *_args: {start: Decimal(1000), end: Decimal(1100)},
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={start: Decimal(1000), end: Decimal(1100)},
+            provenance={
+                start: "observed_complete_snapshot",
+                end: "observed_complete_snapshot",
+            },
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
     )
     monkeypatch.setattr(
         performance_service,
@@ -1146,6 +1167,15 @@ def test_performance_reports_supported_modeled_opening_provenance(session):
             source=PriceSource.YFINANCE.value,
             adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
         )
+    )
+    _approve_source_coverage(session, account, start, end)
+    session.add_all(
+        [
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
+        ]
     )
     session.commit()
 
