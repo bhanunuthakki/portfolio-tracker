@@ -451,15 +451,68 @@
         "title": "BetaV1Result",
         "type": "object"
       },
+      "CashFlowIssueV1": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "component_transaction_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Component Transaction Ids",
+            "type": "array"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "security_key": {
+            "title": "Security Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "date",
+          "security_key",
+          "component_transaction_ids"
+        ],
+        "title": "CashFlowIssueV1",
+        "type": "object"
+      },
       "CashFlowV1": {
         "properties": {
           "account_id": {
-            "title": "Account Id",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Account Ids",
+            "type": "array"
           },
           "account_name": {
-            "title": "Account Name",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Name"
           },
           "amount": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -470,9 +523,20 @@
             "title": "Classification",
             "type": "string"
           },
+          "classification_rule": {
+            "title": "Classification Rule",
+            "type": "string"
+          },
           "classification_source": {
             "title": "Classification Source",
             "type": "string"
+          },
+          "component_transaction_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Component Transaction Ids",
+            "type": "array"
           },
           "currency": {
             "title": "Currency",
@@ -481,6 +545,10 @@
           "date": {
             "format": "date",
             "title": "Date",
+            "type": "string"
+          },
+          "flow_id": {
+            "title": "Flow Id",
             "type": "string"
           },
           "name": {
@@ -494,9 +562,35 @@
             ],
             "title": "Name"
           },
+          "security_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security Id"
+          },
+          "security_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Security Ids",
+            "type": "array"
+          },
           "signed_external_amount": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Signed External Amount",
+            "type": "string"
+          },
+          "source_kind": {
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "source_provider": {
+            "title": "Source Provider",
             "type": "string"
           },
           "subtype": {
@@ -510,18 +604,74 @@
             ],
             "title": "Subtype"
           },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
           "transaction_id": {
-            "title": "Transaction Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
           },
           "type": {
             "title": "Type",
             "type": "string"
+          },
+          "valuation_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valuation Price"
+          },
+          "valuation_price_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valuation Price Date"
+          },
+          "valuation_price_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valuation Price Source"
           }
         },
         "required": [
+          "flow_id",
           "transaction_id",
+          "component_transaction_ids",
           "account_id",
+          "account_ids",
           "account_name",
           "date",
           "name",
@@ -531,7 +681,16 @@
           "signed_external_amount",
           "classification",
           "classification_source",
-          "currency"
+          "classification_rule",
+          "source_kind",
+          "source_provider",
+          "currency",
+          "security_id",
+          "security_ids",
+          "ticker",
+          "valuation_price",
+          "valuation_price_date",
+          "valuation_price_source"
         ],
         "title": "CashFlowV1",
         "type": "object"
@@ -554,13 +713,31 @@
             "title": "Include Internal",
             "type": "boolean"
           },
+          "is_complete": {
+            "title": "Is Complete",
+            "type": "boolean"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/CashFlowIssueV1"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
           "meta": {
             "$ref": "#/components/schemas/V1Meta"
           },
           "net_external_cashflow_in": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Net External Cashflow In",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net External Cashflow In"
           },
           "next_cursor": {
             "anyOf": [
@@ -586,6 +763,8 @@
           "include_internal",
           "cash_flows",
           "net_external_cashflow_in",
+          "is_complete",
+          "issues",
           "next_cursor"
         ],
         "title": "CashFlowsV1Result",
@@ -4069,7 +4248,7 @@
     },
     "/api/v1/cash-flows": {
       "get": {
-        "description": "Deterministically classified cash flows, using the exact TWR-pipeline\nprecedence (override \u2192 name hint \u2192 subtype heuristic).",
+        "description": "Canonical whole-portfolio cash-flow ledger for ``(start, end]``.\n\nRows include owner overrides, deterministic name/subtype classification,\nand dollar-valued unmatched share transfers. ``net_external_cashflow_in``\nis the total for the full requested window, independent of pagination.",
         "operationId": "cash_flows_v1_api_v1_cash_flows_get",
         "parameters": [
           {

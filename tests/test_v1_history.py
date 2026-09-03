@@ -14,6 +14,9 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
+    Price,
+    PriceAdjustmentBasis,
+    PriceSource,
     Security,
     TransactionOverride,
 )
@@ -171,6 +174,79 @@ def test_cash_flows_pagination_walks_past_filtered_rows(client, session):
     _seed(session)
     rows = _walk_pages(client, "/api/v1/cash-flows", {"limit": 1}, "cash_flows")
     assert [r["transaction_id"] for r in rows] == ["t5", "t4", "t3"]
+
+
+def test_cash_flow_window_total_is_not_page_local(client, session):
+    _seed(session)
+
+    first = client.get("/api/v1/cash-flows", params={"limit": 1}).json()
+    second = client.get(
+        "/api/v1/cash-flows",
+        params={"limit": 1, "cursor": first["next_cursor"]},
+    ).json()
+
+    # The total describes the requested window, not whichever page happens to
+    # be visible. This is the number performance subtracts from portfolio gain.
+    assert Decimal(first["net_external_cashflow_in"]) == Decimal("1300")
+    assert Decimal(second["net_external_cashflow_in"]) == Decimal("1300")
+
+
+def test_synthesized_share_transfer_is_visible_in_cash_flow_ledger(client, session):
+    acct = _seed(session)
+    security = session.query(Security).filter_by(ticker="AAPL").one()
+    transfer_date = _FRESH - timedelta(days=4)
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="acat-in-aapl",
+            account_id=acct.account_id,
+            security_id=security.security_id,
+            date=transfer_date,
+            name="External asset transfer in",
+            quantity=Decimal("2"),
+            amount=Decimal(0),
+            type="cash",
+            subtype="external_asset_transfer_in",
+            currency="USD",
+        )
+    )
+    session.add(
+        Price(
+            security_id=security.security_id,
+            date=transfer_date,
+            close=Decimal("125"),
+            source=PriceSource.YFINANCE.value,
+            adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+        )
+    )
+    session.commit()
+
+    payload = client.get(
+        "/api/v1/cash-flows",
+        params={
+            "start_date": (transfer_date - timedelta(days=1)).isoformat(),
+            "end_date": transfer_date.isoformat(),
+        },
+    ).json()
+    synthetic = next(
+        row for row in payload["cash_flows"] if row["source_kind"] == "share_transfer_valuation"
+    )
+
+    assert synthetic["transaction_id"] is None
+    assert synthetic["component_transaction_ids"] == ["acat-in-aapl"]
+    assert synthetic["classification"] == "external_in"
+    assert synthetic["classification_source"] == "derived_share_transfer_net"
+    assert synthetic["valuation_price"] == "125.000000"
+    assert synthetic["valuation_price_date"] == transfer_date.isoformat()
+    assert synthetic["valuation_price_source"] == "historical_close"
+    assert Decimal(synthetic["signed_external_amount"]) == Decimal("250")
+    assert Decimal(payload["net_external_cashflow_in"]) == Decimal("250")
+
+    # Both consumers must read the same canonical derived ledger.
+    from portfolio_tracker.services.performance import _daily_external_cashflows
+
+    assert _daily_external_cashflows(session, transfer_date - timedelta(days=1), transfer_date) == {
+        transfer_date: Decimal("250")
+    }
 
 
 def test_position_snapshots(client, session):

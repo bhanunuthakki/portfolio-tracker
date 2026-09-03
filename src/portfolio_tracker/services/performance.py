@@ -54,7 +54,8 @@ from portfolio_tracker.models import (
     Security,
 )
 from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
-from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.active_items import valued_account_ids
+from portfolio_tracker.services.external_flow_ledger import build_external_flow_ledger
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -410,7 +411,7 @@ def _forward_subset_values(
     end_date: date,
     security_ids: frozenset[int],
 ) -> dict[date, Decimal]:
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -446,7 +447,7 @@ def _backfill_subset_values(
     price` summed across the listed securities, which is what we want for
     "value of the index-ETF portion."
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     anchor_date = session.execute(
@@ -570,7 +571,7 @@ def _daily_internal_index_cashflows(
     """
     if not security_ids:
         return {}
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = (
@@ -894,6 +895,31 @@ def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
 def _daily_external_cashflow_assessment(
     session: Session, start_date: date, end_date: date
 ) -> _CashflowAssessment:
+    """Project the canonical ledger into the performance calculation contract."""
+    ledger = build_external_flow_ledger(session, start_date, end_date)
+    reason_codes = tuple(
+        sorted(
+            {
+                {
+                    "share_transfer_missing_security": (_EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY),
+                    "share_transfer_missing_ticker": _EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER,
+                    "share_transfer_price_unavailable": (
+                        _EXTERNAL_SHARE_MOVEMENT_PRICE_UNAVAILABLE
+                    ),
+                }[issue.code]
+                for issue in ledger.issues
+            }
+        )
+    )
+    return _CashflowAssessment(
+        cashflows=(ledger.daily_external_cashflows if not reason_codes else {}),
+        calculation_reason_codes=reason_codes,
+    )
+
+
+def _legacy_daily_external_cashflow_assessment(  # pyright: ignore[reportUnusedFunction]
+    session: Session, start_date: date, end_date: date
+) -> _CashflowAssessment:
     """Sum signed external cashflows per day (positive = INTO portfolio).
 
     Direction handling:
@@ -905,7 +931,7 @@ def _daily_external_cashflow_assessment(
         type), we trust Plaid's standard sign convention: negative amount
         = cash going INTO the account = inflow, so cashflow_in = -amount.
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return _CashflowAssessment(cashflows={}, calculation_reason_codes=())
     rows = session.execute(
@@ -1377,7 +1403,7 @@ def _cached_daily_values(session: Session, start_date: date, end_date: date) -> 
 def _forward_values_from_snapshots(
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -1421,7 +1447,7 @@ def _backfill_values_from_transactions(
 
     Daily total = positions × historical_prices  +  cash_adjustment[d].
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     anchor_row = session.execute(
@@ -1514,7 +1540,7 @@ def _backfill_values_from_transactions(
 
 
 def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]:
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(

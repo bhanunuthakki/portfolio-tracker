@@ -6,9 +6,9 @@ row cap. The cursor is an opaque base64 token over the ordering key; consumers
 follow ``next_cursor`` until null. Historical endpoints take bounded date
 parameters with documented defaults.
 
-Cash-flow classification reuses the exact TWR pipeline primitives
-(`services/performance.py`) so this endpoint can never disagree with the
-return calculation it explains.
+Cash-flow classification and performance both consume the canonical derived
+ledger in ``services/external_flow_ledger.py``, so this endpoint cannot drift
+from the return calculation it explains.
 """
 
 from __future__ import annotations
@@ -29,15 +29,15 @@ from portfolio_tracker.models import (
     Security,
     SecurityClassification,
 )
-from portfolio_tracker.services.active_items import active_account_ids
-from portfolio_tracker.services.performance import (
-    _load_transaction_overrides,  # pyright: ignore[reportPrivateUsage]
-    _signed_cashflow,  # pyright: ignore[reportPrivateUsage]
+from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
+from portfolio_tracker.services.external_flow_ledger import (
+    build_external_flow_ledger,
     effective_classification,
+    load_transaction_overrides,
 )
 from portfolio_tracker.services.positioning import classify_asset_type
 from portfolio_tracker.services.v1_accounts import build_accounts_result
-from portfolio_tracker.services.v1_common import V1Meta, build_meta
+from portfolio_tracker.services.v1_common import V1AccountCoverage, V1Meta, build_meta
 
 DEFAULT_PAGE_SIZE = 500
 MAX_PAGE_SIZE = 1000
@@ -72,21 +72,32 @@ def _history_meta(
     as_of: date,
     methodology: str,
     links: dict[str, str],
+    methodology_version: str = "1",
+    included_account_ids: frozenset[int] | None = None,
     generated_at: datetime | None = None,
 ) -> V1Meta:
     """Envelope for history endpoints — coverage/sync from the accounts
     builder; ``as_of`` is the query window end (event streams have no single
     observation date)."""
     accounts_meta = build_accounts_result(session).meta
+    coverage = accounts_meta.account_coverage
+    if included_account_ids is not None:
+        previously_included = set(coverage.included_account_ids)
+        excluded = set(coverage.excluded_account_ids) | (previously_included - included_account_ids)
+        coverage = V1AccountCoverage(
+            included_account_ids=sorted(included_account_ids),
+            excluded_account_ids=sorted(excluded),
+            lagging_account_ids=sorted(set(coverage.lagging_account_ids) & included_account_ids),
+        )
     return build_meta(
         as_of=as_of,
         source_providers=accounts_meta.source_providers,
-        coverage=accounts_meta.account_coverage,
+        coverage=coverage,
         last_successful_sync_at=accounts_meta.last_successful_sync_at,
         warnings=[],
         links=links,
         methodology=methodology,
-        methodology_version="1",
+        methodology_version=methodology_version,
         # History windows are user-chosen; the *holdings* staleness signal
         # lives on snapshot/accounts responses. Suppress date-based staleness
         # by evaluating against the window end itself.
@@ -194,7 +205,7 @@ def build_transactions_page(
         )
     rows = session.execute(stmt.limit(limit + 1)).all()
 
-    overrides = _load_transaction_overrides(session)
+    overrides = load_transaction_overrides(session)
     page = rows[:limit]
     out: list[TransactionV1] = []
     for t, a, s in page:
@@ -239,9 +250,12 @@ def build_transactions_page(
 
 
 class CashFlowV1(BaseModel):
-    transaction_id: str
-    account_id: int
-    account_name: str
+    flow_id: str
+    transaction_id: str | None
+    component_transaction_ids: list[str]
+    account_id: int | None
+    account_ids: list[int]
+    account_name: str | None
     date: date
     name: str | None
     type: str
@@ -251,8 +265,24 @@ class CashFlowV1(BaseModel):
     # money entered). Zero for internal events.
     signed_external_amount: Decimal
     classification: str  # external_in | external_out | internal
-    classification_source: str  # override | heuristic
+    classification_source: str  # override | heuristic | derived_share_transfer_net
+    classification_rule: str
+    source_kind: str  # transaction | share_transfer_valuation
+    source_provider: str
     currency: str
+    security_id: int | None
+    security_ids: list[int]
+    ticker: str | None
+    valuation_price: Decimal | None
+    valuation_price_date: date | None
+    valuation_price_source: str | None
+
+
+class CashFlowIssueV1(BaseModel):
+    code: str
+    date: date
+    security_key: str
+    component_transaction_ids: list[str]
 
 
 class CashFlowsV1Result(BaseModel):
@@ -261,7 +291,9 @@ class CashFlowsV1Result(BaseModel):
     end_date: date
     include_internal: bool
     cash_flows: list[CashFlowV1]
-    net_external_cashflow_in: Decimal
+    net_external_cashflow_in: Decimal | None
+    is_complete: bool
+    issues: list[CashFlowIssueV1]
     next_cursor: str | None
 
 
@@ -276,13 +308,15 @@ def build_cash_flows_page(
     generated_at: datetime | None = None,
 ) -> CashFlowsV1Result:
     start, end = _bounded_window(start_date, end_date, TRANSACTIONS_DEFAULT_DAYS)
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     links = {"transactions": "/api/v1/transactions"}
     meta = _history_meta(
         session,
         as_of=end,
         methodology="cash_flow.twr_classification",
         links=links,
+        methodology_version="2",
+        included_account_ids=accts,
         generated_at=generated_at,
     )
     if not accts:
@@ -293,30 +327,10 @@ def build_cash_flows_page(
             include_internal=include_internal,
             cash_flows=[],
             net_external_cashflow_in=Decimal(0),
+            is_complete=True,
+            issues=[],
             next_cursor=None,
         )
-
-    def base_stmt(after: tuple[date, str] | None):
-        stmt = (
-            select(InvestmentTransaction, Account)
-            .join(Account, Account.account_id == InvestmentTransaction.account_id)
-            .where(InvestmentTransaction.date >= start)
-            .where(InvestmentTransaction.date <= end)
-            .where(InvestmentTransaction.account_id.in_(accts))
-            .order_by(
-                InvestmentTransaction.date.desc(),
-                InvestmentTransaction.plaid_investment_transaction_id.desc(),
-            )
-        )
-        if after is not None:
-            stmt = stmt.where(
-                tuple_(
-                    InvestmentTransaction.date,
-                    InvestmentTransaction.plaid_investment_transaction_id,
-                )
-                < after
-            )
-        return stmt
 
     after: tuple[date, str] | None = None
     if cursor is not None:
@@ -326,66 +340,63 @@ def build_cash_flows_page(
         except ValueError as exc:
             raise InvalidCursorError("cursor date is not ISO YYYY-MM-DD") from exc
 
-    overrides = _load_transaction_overrides(session)
-    # Classification filters rows AFTER the SQL keyset walk, so page through
-    # the raw stream batch-by-batch and emit classified rows until the page
-    # fills or the stream is exhausted — never a silent cap (PRD §7.5).
-    out: list[CashFlowV1] = []
-    net_in = Decimal(0)
-    next_cursor: str | None = None
-    batch_size = MAX_PAGE_SIZE * 4
-    while next_cursor is None:
-        batch = session.execute(base_stmt(after).limit(batch_size)).all()
-        for t, a in batch:
-            after = (t.date, t.plaid_investment_transaction_id)
-            override = overrides.get(t.plaid_investment_transaction_id)
-            cls = effective_classification(
-                t.type,
-                t.subtype,
-                override,
-                amount=Decimal(t.amount) if t.amount is not None else None,
-                name=t.name,
-            )
-            if cls is None:
-                continue  # not a cashflow-shaped row (buy/sell/fee)
-            if cls == "internal" and not include_internal:
-                continue
-            signed = _signed_cashflow(
-                t.type,
-                t.subtype,
-                Decimal(t.amount or 0),
-                override=override,
-                name=t.name,
-            )
-            out.append(
-                CashFlowV1(
-                    transaction_id=t.plaid_investment_transaction_id,
-                    account_id=a.account_id,
-                    account_name=a.name,
-                    date=t.date,
-                    name=t.name,
-                    type=t.type,
-                    subtype=t.subtype,
-                    amount=t.amount if t.amount is not None else Decimal(0),
-                    signed_external_amount=signed,
-                    classification=cls,
-                    classification_source="override" if override is not None else "heuristic",
-                    currency=t.currency,
-                )
-            )
-            net_in += signed
-            if len(out) >= limit:
-                next_cursor = _encode_cursor(after[0].isoformat(), after[1])
-                break
-        if len(batch) < batch_size:
-            break  # stream exhausted
+    ledger = build_external_flow_ledger(session, start, end, account_ids=accts)
+    eligible = [
+        entry for entry in ledger.entries if include_internal or entry.classification != "internal"
+    ]
+    if after is not None:
+        eligible = [entry for entry in eligible if (entry.date, entry.flow_id) < after]
+    page = eligible[:limit]
+    out = [
+        CashFlowV1(
+            flow_id=entry.flow_id,
+            transaction_id=entry.transaction_id,
+            component_transaction_ids=list(entry.component_transaction_ids),
+            account_id=entry.account_id,
+            account_ids=list(entry.account_ids),
+            account_name=entry.account_name,
+            date=entry.date,
+            name=entry.name,
+            type=entry.type,
+            subtype=entry.subtype,
+            amount=entry.amount,
+            signed_external_amount=entry.signed_external_amount,
+            classification=entry.classification,
+            classification_source=entry.classification_source,
+            classification_rule=entry.classification_rule,
+            source_kind=entry.source_kind,
+            source_provider=entry.source_provider,
+            currency=entry.currency,
+            security_id=entry.security_id,
+            security_ids=list(entry.security_ids),
+            ticker=entry.ticker,
+            valuation_price=entry.valuation_price,
+            valuation_price_date=entry.valuation_price_date,
+            valuation_price_source=entry.valuation_price_source,
+        )
+        for entry in page
+    ]
+    next_cursor = None
+    if len(eligible) > limit:
+        last = page[-1]
+        next_cursor = _encode_cursor(last.date.isoformat(), last.flow_id)
     return CashFlowsV1Result(
         meta=meta,
         start_date=start,
         end_date=end,
         include_internal=include_internal,
         cash_flows=out,
-        net_external_cashflow_in=net_in,
+        net_external_cashflow_in=(ledger.net_external_cashflow_in if not ledger.issues else None),
+        is_complete=not ledger.issues,
+        issues=[
+            CashFlowIssueV1(
+                code=issue.code,
+                date=issue.date,
+                security_key=issue.security_key,
+                component_transaction_ids=list(issue.component_transaction_ids),
+            )
+            for issue in ledger.issues
+        ],
         next_cursor=next_cursor,
     )
 

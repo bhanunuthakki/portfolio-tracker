@@ -161,7 +161,7 @@ _TAXABLE_SUBTYPES: frozenset[str] = frozenset(
 # Name fallback — used ONLY when the structured subtype/type doesn't resolve.
 # Some feeds (Fidelity via SnapTrade) omit subtype entirely, leaving the
 # account name as the sole signal. This mirrors the sanctioned name-based
-# fallback in `services/performance.py:_classify_by_name`. Matched as whole
+# fallback in `services/external_flow_ledger.py:classify_by_name`. Matched as whole
 # words (so "ira" doesn't fire inside "Miraflores"), plus a couple of compound
 # phrases checked as substrings.
 _RETIREMENT_NAME_WORDS: frozenset[str] = frozenset(

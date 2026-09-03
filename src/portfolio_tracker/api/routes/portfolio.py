@@ -40,11 +40,11 @@ from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
-from portfolio_tracker.services.performance import (
-    _is_external_cashflow,  # pyright: ignore[reportPrivateUsage]
-    _load_transaction_overrides,  # pyright: ignore[reportPrivateUsage]
-    _signed_cashflow,  # pyright: ignore[reportPrivateUsage]
+from portfolio_tracker.services.external_flow_ledger import (
     effective_classification,
+    is_external_cashflow,
+    load_transaction_overrides,
+    signed_cashflow,
 )
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -283,7 +283,7 @@ def transactions(
         .limit(limit)
     ).all()
 
-    overrides = _load_transaction_overrides(session)
+    overrides = load_transaction_overrides(session)
     return [
         InvestmentTransactionOut(
             plaid_investment_transaction_id=t.plaid_investment_transaction_id,
@@ -562,12 +562,12 @@ def cashflow_audit(
     groups: list[CashflowGroupOut] = []
     net_in = Decimal(0)
     for tx_type, tx_subtype, count, total_amount in rows:
-        is_external = _is_external_cashflow(tx_type, tx_subtype)
+        is_external = is_external_cashflow(tx_type, tx_subtype)
         if is_external:
             # Use the same signed-cashflow logic as TWR so the audit total
             # exactly matches what the chart sees. `_signed_cashflow` handles
             # the sign-convention inconsistencies across brokers per subtype.
-            net_in += _signed_cashflow(tx_type, tx_subtype, Decimal(total_amount or 0))
+            net_in += signed_cashflow(tx_type, tx_subtype, Decimal(total_amount or 0))
         groups.append(
             CashflowGroupOut(
                 type=str(tx_type),

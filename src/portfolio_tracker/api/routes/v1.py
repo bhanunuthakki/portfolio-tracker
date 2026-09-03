@@ -236,8 +236,12 @@ def cash_flows_v1(
     limit: int = Query(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
     cursor: str | None = Query(default=None),
 ) -> CashFlowsV1Result:
-    """Deterministically classified cash flows, using the exact TWR-pipeline
-    precedence (override → name hint → subtype heuristic)."""
+    """Canonical whole-portfolio cash-flow ledger for ``(start, end]``.
+
+    Rows include owner overrides, deterministic name/subtype classification,
+    and dollar-valued unmatched share transfers. ``net_external_cashflow_in``
+    is the total for the full requested window, independent of pagination.
+    """
     return build_cash_flows_page(
         session,
         start_date=start_date,

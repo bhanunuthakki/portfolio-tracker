@@ -19,28 +19,40 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.schemas import PerformanceSeries
+from portfolio_tracker.services.active_items import valued_account_ids
 from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.drawdown import DrawdownResult
 from portfolio_tracker.services.exit_quality import ExitQualityResult
 from portfolio_tracker.services.position_alpha import PositionAlphaResult
 from portfolio_tracker.services.v1_accounts import build_accounts_result
-from portfolio_tracker.services.v1_common import V1Meta, build_meta
+from portfolio_tracker.services.v1_common import V1AccountCoverage, V1Meta, build_meta
 
 
 def _analytics_meta(
     session: Session,
     *,
     methodology: str,
-    methodology_version: str = "1",
     links: dict[str, str],
+    methodology_version: str = "1",
+    included_account_ids: frozenset[int] | None = None,
     today: date | None = None,
     generated_at: datetime | None = None,
 ) -> V1Meta:
     accounts_meta = build_accounts_result(session, today=today, generated_at=generated_at).meta
+    coverage = accounts_meta.account_coverage
+    if included_account_ids is not None:
+        previously_included = set(coverage.included_account_ids)
+        coverage = V1AccountCoverage(
+            included_account_ids=sorted(included_account_ids),
+            excluded_account_ids=sorted(
+                set(coverage.excluded_account_ids) | (previously_included - included_account_ids)
+            ),
+            lagging_account_ids=sorted(set(coverage.lagging_account_ids) & included_account_ids),
+        )
     return build_meta(
         as_of=accounts_meta.as_of,
         source_providers=accounts_meta.source_providers,
-        coverage=accounts_meta.account_coverage,
+        coverage=coverage,
         last_successful_sync_at=accounts_meta.last_successful_sync_at,
         warnings=[],
         links=links,
@@ -109,6 +121,7 @@ def performance_meta(
             "risk": "/api/v1/analytics/risk",
             "cash_flows": "/api/v1/cash-flows",
         },
+        included_account_ids=valued_account_ids(session),
         today=today,
         generated_at=generated_at,
     )
