@@ -19,6 +19,7 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
+    PortfolioValueDaily,
     Price,
     PriceAdjustmentBasis,
     PriceSource,
@@ -29,6 +30,7 @@ from portfolio_tracker.services import performance as performance_service
 from portfolio_tracker.services.external_flow_ledger import classify_transaction_cashflow
 from portfolio_tracker.services.performance import (
     _backfill_values_from_transactions,
+    _is_transfer_shaped_fee,
     _modified_dietz_series,
     _money_flow_matched_value,
     _policy_matched_value,
@@ -239,8 +241,16 @@ def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
 
     monkeypatch.setattr(
         performance_service,
-        "_daily_portfolio_value",
-        lambda *_args: {start: Decimal(1000), end: Decimal(1300)},
+        "_daily_portfolio_value_assessment",
+        lambda *_args: performance_service._PortfolioValueAssessment(
+            values={start: Decimal(1000), end: Decimal(1300)},
+            provenance={
+                start: "observed_complete_snapshot",
+                end: "observed_complete_snapshot",
+            },
+            valuation_account_ids=(),
+            calculation_reason_codes=(),
+        ),
     )
     monkeypatch.setattr(
         performance_service,
@@ -413,6 +423,18 @@ def test_backfill_cash_adjustment_prevents_vstart_collapse(session):
     # Bought 4 shares for $400 on Jan 5. Walking back, positions drop to 6 but
     # the +$400 cash adjustment compensates: at a flat $100 price, V stays
     # $1000 every day (no fake ramp from the deployment).
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-marker",
+            account_id=account.account_id,
+            security_id=None,
+            date=date(2025, 1, 1),
+            type="cash",
+            subtype="dividend",
+            quantity=Decimal(0),
+            amount=Decimal(0),
+        )
+    )
     session.add(
         InvestmentTransaction(
             plaid_investment_transaction_id="tx-buy",
@@ -796,3 +818,301 @@ def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session
     assert result.calculation_reason_codes == ["nonpositive_dietz_denominator"]
     assert result.net_external_cashflow_in is None
     assert all(point.portfolio_return_pct is None for point in result.points)
+
+
+def test_performance_rejects_partial_requested_end_boundary(session):
+    item = Item(source="plaid", plaid_item_id="partial-item", is_data_active=True)
+    session.add(item)
+    session.flush()
+    accounts = [
+        Account(
+            item_id=item.item_id,
+            plaid_account_id=f"partial-account-{index}",
+            name=f"Account {index}",
+            type="investment",
+        )
+        for index in range(2)
+    ]
+    security = Security(
+        plaid_security_id="partial-security",
+        ticker="AAA",
+        type="equity",
+        is_cash_equivalent=False,
+    )
+    session.add_all([*accounts, security])
+    session.flush()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 2)
+    for account in accounts:
+        session.add(
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(1),
+                institution_price=Decimal(100),
+                institution_value=Decimal(100),
+            )
+        )
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=end,
+            account_id=accounts[0].account_id,
+            security_id=security.security_id,
+            quantity=Decimal(1),
+            institution_price=Decimal(101),
+            institution_value=Decimal(101),
+        )
+    )
+    # A stale cache row must not disguise the partial observed boundary.
+    session.add(
+        PortfolioValueDaily(
+            date=end,
+            total_value=Decimal(202),
+            total_cost_basis=None,
+            source="backfill",
+        )
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert "partial_snapshot_end_date" in result.calculation_reason_codes
+    assert result.ending_value_provenance is None
+
+
+def test_performance_reports_observed_boundary_provenance(session):
+    item = Item(source="plaid", plaid_item_id="observed-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="observed-account",
+        name="Observed",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="observed-security",
+        ticker="AAA",
+        type="equity",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 2)
+    for on_date, value in ((start, Decimal(100)), (end, Decimal(110))):
+        session.add(
+            HoldingSnapshot(
+                snapshot_date=on_date,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(1),
+                institution_price=value,
+                institution_value=value,
+            )
+        )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.opening_value_provenance == "observed_complete_snapshot"
+    assert result.ending_value_provenance == "observed_complete_snapshot"
+    assert result.valuation_account_ids == [account.account_id]
+
+
+def test_performance_reports_supported_modeled_opening_provenance(session):
+    item = Item(source="plaid", plaid_item_id="modeled-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="modeled-account",
+        name="Modeled",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="modeled-security",
+        ticker="AAA",
+        type="equity",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 3)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=end,
+            account_id=account.account_id,
+            security_id=security.security_id,
+            quantity=Decimal(1),
+            institution_price=Decimal(110),
+            institution_value=Decimal(110),
+        )
+    )
+    session.add(
+        Price(
+            security_id=security.security_id,
+            date=start,
+            close=Decimal(100),
+            source=PriceSource.YFINANCE.value,
+            adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+        )
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "available"
+    assert result.opening_value_provenance == "modeled_transaction_walkback"
+    assert result.ending_value_provenance == "observed_complete_snapshot"
+    assert result.backfill_start_unreliable is True
+
+
+def test_modeled_opening_requires_full_account_anchor(session):
+    item = Item(source="plaid", plaid_item_id="anchor-item", is_data_active=True)
+    accounts = [
+        Account(
+            item=item,
+            plaid_account_id=f"anchor-account-{index}",
+            name=f"Anchor {index}",
+            type="investment",
+        )
+        for index in range(2)
+    ]
+    securities = [
+        Security(
+            plaid_security_id=f"anchor-security-{index}",
+            ticker=f"A{index}",
+            type="equity",
+            is_cash_equivalent=False,
+        )
+        for index in range(2)
+    ]
+    session.add_all([item, *accounts, *securities])
+    session.flush()
+    start = date(2025, 12, 31)
+    end = date(2026, 1, 3)
+    # Each account has snapshot evidence, but never on the same date. There is
+    # no full-book anchor from which the opening can be reconstructed.
+    for index, on_date in enumerate((date(2026, 1, 2), end)):
+        session.add(
+            HoldingSnapshot(
+                snapshot_date=on_date,
+                account_id=accounts[index].account_id,
+                security_id=securities[index].security_id,
+                quantity=Decimal(1),
+                institution_price=Decimal(100),
+                institution_value=Decimal(100),
+            )
+        )
+        session.add(
+            Price(
+                security_id=securities[index].security_id,
+                date=start,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            )
+        )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert "modeled_opening_account_coverage_incomplete" in result.calculation_reason_codes
+    assert result.opening_value_provenance is None
+
+
+def test_modeled_opening_fails_closed_when_anchor_position_cannot_be_valued(session):
+    item = Item(source="plaid", plaid_item_id="unpriced-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="unpriced-account",
+        name="Unpriced",
+        type="investment",
+    )
+    security = Security(
+        plaid_security_id="unpriced-security",
+        ticker="NOQUOTE",
+        type="equity",
+        is_cash_equivalent=False,
+    )
+    session.add_all([item, account, security])
+    session.flush()
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 3)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=end,
+            account_id=account.account_id,
+            security_id=security.security_id,
+            quantity=Decimal(1),
+            institution_price=None,
+            institution_value=Decimal(100),
+        )
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert "modeled_opening_valuation_coverage_incomplete" in result.calculation_reason_codes
+    assert result.opening_value_provenance is None
+
+
+def test_backfill_does_not_reverse_cash_equivalent_quantity_and_cash_twice(session):
+    item = Item(source="plaid", plaid_item_id="cash-item", is_data_active=True)
+    account = Account(
+        item=item,
+        plaid_account_id="cash-account",
+        name="Cash",
+        type="investment",
+    )
+    cash = Security(
+        plaid_security_id="cash-security",
+        ticker="CUR:USD",
+        type="cash",
+        is_cash_equivalent=True,
+    )
+    session.add_all([item, account, cash])
+    session.flush()
+    start = date(2026, 1, 1)
+    anchor = date(2026, 1, 3)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=cash.security_id,
+            quantity=Decimal(1500),
+            institution_price=Decimal(1),
+            institution_value=Decimal(1500),
+        )
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="cash-deposit",
+            account_id=account.account_id,
+            security_id=cash.security_id,
+            date=date(2026, 1, 2),
+            name="deposit",
+            quantity=Decimal(-500),
+            amount=Decimal(-500),
+            type="cash",
+            subtype="deposit",
+        )
+    )
+    session.commit()
+
+    values = _backfill_values_from_transactions(session, start, date(2026, 1, 2))
+
+    assert values[start] == Decimal(1000)
+
+
+def test_transfer_shaped_fee_is_cash_neutral():
+    assert _is_transfer_shaped_fee("fee - TRANSFER IN VTI")
+    assert _is_transfer_shaped_fee("fee - TRANSFER OUT BN")
+    assert not _is_transfer_shaped_fee("fee - MARGIN INTEREST USD")
+    assert not _is_transfer_shaped_fee(None)
+    assert _reverse_transaction_cash_delta(
+        _tx("fee", amount=Decimal(134957), name="fee - TRANSFER IN VTI"),
+        frozenset(),
+    ) == Decimal(0)

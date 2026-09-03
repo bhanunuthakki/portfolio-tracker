@@ -117,7 +117,13 @@ def test_fixtures_parse_into_response_models():
 
 @pytest.mark.parametrize(
     "field",
-    ["net_external_cashflow_in", "backfill_start_unreliable"],
+    [
+        "net_external_cashflow_in",
+        "backfill_start_unreliable",
+        "opening_value_provenance",
+        "ending_value_provenance",
+        "valuation_account_ids",
+    ],
 )
 def test_performance_contract_requires_financial_provenance_fields(field: str):
     payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))

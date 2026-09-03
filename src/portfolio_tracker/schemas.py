@@ -193,6 +193,18 @@ class PerformanceSeries(BaseModel):
     # the backfill is missing pre-existing positions). Frontend renders a
     # warning when true.
     backfill_start_unreliable: bool
+    # Boundary lineage is explicit because a transaction-walk value is an
+    # estimate, not broker-observed evidence. `None` means the requested
+    # boundary could not be supported and the calculation is unavailable.
+    opening_value_provenance: (
+        Literal["observed_complete_snapshot", "modeled_transaction_walkback"] | None
+    )
+    ending_value_provenance: (
+        Literal["observed_complete_snapshot", "modeled_transaction_walkback"] | None
+    )
+    # Exact account universe whose value and flows were paired by the return
+    # engine. Empty only when no valued account universe could be established.
+    valuation_account_ids: list[int]
 
 
 class CashflowGroupOut(BaseModel):

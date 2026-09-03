@@ -1634,6 +1634,21 @@
             "title": "End Date",
             "type": "string"
           },
+          "ending_value_provenance": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observed_complete_snapshot",
+                  "modeled_transaction_walkback"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ending Value Provenance"
+          },
           "methodology": {
             "const": "performance.modified_dietz",
             "title": "Methodology",
@@ -1656,6 +1671,21 @@
             ],
             "title": "Net External Cashflow In"
           },
+          "opening_value_provenance": {
+            "anyOf": [
+              {
+                "enum": [
+                  "observed_complete_snapshot",
+                  "modeled_transaction_walkback"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Opening Value Provenance"
+          },
           "points": {
             "items": {
               "$ref": "#/components/schemas/PerformancePoint"
@@ -1667,6 +1697,13 @@
             "format": "date",
             "title": "Start Date",
             "type": "string"
+          },
+          "valuation_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Valuation Account Ids",
+            "type": "array"
           }
         },
         "required": [
@@ -1679,7 +1716,10 @@
           "base_value",
           "points",
           "net_external_cashflow_in",
-          "backfill_start_unreliable"
+          "backfill_start_unreliable",
+          "opening_value_provenance",
+          "ending_value_provenance",
+          "valuation_account_ids"
         ],
         "title": "PerformanceSeries",
         "type": "object"

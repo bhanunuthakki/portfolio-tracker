@@ -24,15 +24,22 @@ Run modes:
 
     # custom window
     python -m portfolio_tracker.jobs.daily_values --start 2024-01-01 --end 2024-06-30
+
+    # preview modeled-cache invalidation after a transaction/override correction
+    python -m portfolio_tracker.jobs.daily_values --rebuild-modeled --start 2024-01-01
+
+    # apply the reviewed invalidation, then reconstruct and persist modeled rows
+    python -m portfolio_tracker.jobs.daily_values --rebuild-modeled --apply --start 2024-01-01
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -51,10 +58,16 @@ def run(
     start_date: date | None = None,
     end_date: date | None = None,
     bootstrap: bool = False,
+    rebuild_modeled: bool = False,
+    apply_rebuild: bool = False,
 ) -> int:
     """Compute and upsert daily portfolio values for the given window.
 
     Returns the number of rows written.
+
+    `rebuild_modeled=True` explicitly invalidates derived cache rows in the
+    requested window before recomputing. It is dry-run-only unless
+    `apply_rebuild=True`; observed rows are never deleted.
 
     `bootstrap=True` widens the start to the earliest reconstructable date
     (capped at `_BOOTSTRAP_MAX_LOOKBACK_DAYS`). Otherwise defaults to a
@@ -70,6 +83,13 @@ def run(
 
         if start_date > end_date:
             return 0
+
+        if rebuild_modeled:
+            preview = preview_modeled_cache_rebuild(session, start_date, end_date)
+            if not apply_rebuild:
+                return 0
+            apply_modeled_cache_rebuild(session, preview)
+            session.flush()
 
         # `_daily_portfolio_value` already prefers snapshots and falls back
         # to the (now cash-adjusted) transaction walk-back. Tag each row's
@@ -100,6 +120,10 @@ def _resolve_start(session: Session, start_date: date | None, bootstrap: bool, t
 
 
 def _dates_with_snapshots(session: Session, start_date: date, end_date: date) -> set[date]:
+    from portfolio_tracker.services.performance import (
+        _complete_snapshot_dates,  # pyright: ignore[reportPrivateUsage]
+    )
+
     rows = (
         session.execute(
             select(HoldingSnapshot.snapshot_date)
@@ -110,7 +134,46 @@ def _dates_with_snapshots(session: Session, start_date: date, end_date: date) ->
         .scalars()
         .all()
     )
-    return set(rows)
+    return set(_complete_snapshot_dates(session, set(rows)))
+
+
+@dataclass(frozen=True)
+class ModeledCacheRebuildPreview:
+    start_date: date
+    end_date: date
+    modeled_rows_to_replace: int
+    observed_rows_preserved: int
+
+
+def preview_modeled_cache_rebuild(
+    session: Session, start_date: date, end_date: date
+) -> ModeledCacheRebuildPreview:
+    """Describe a modeled-cache rebuild without mutating persistent state."""
+    counts: dict[str, int] = {}
+    for source, count in session.execute(
+        select(PortfolioValueDaily.source, func.count())
+        .where(PortfolioValueDaily.date >= start_date)
+        .where(PortfolioValueDaily.date <= end_date)
+        .group_by(PortfolioValueDaily.source)
+    ).all():
+        counts[source] = int(count)
+    return ModeledCacheRebuildPreview(
+        start_date=start_date,
+        end_date=end_date,
+        modeled_rows_to_replace=int(counts.get("backfill", 0)),
+        observed_rows_preserved=int(counts.get("snapshot", 0)),
+    )
+
+
+def apply_modeled_cache_rebuild(session: Session, preview: ModeledCacheRebuildPreview) -> int:
+    """Delete only modeled rows named by a previously reviewed preview."""
+    session.execute(
+        delete(PortfolioValueDaily)
+        .where(PortfolioValueDaily.date >= preview.start_date)
+        .where(PortfolioValueDaily.date <= preview.end_date)
+        .where(PortfolioValueDaily.source == "backfill")
+    )
+    return preview.modeled_rows_to_replace
 
 
 def _upsert(
@@ -157,6 +220,19 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Crystallize the full reconstructable history (~24 months).",
     )
     parser.add_argument(
+        "--rebuild-modeled",
+        action="store_true",
+        help=(
+            "Preview invalidation of modeled cache rows before reconstructing "
+            "them from corrected transactions and overrides."
+        ),
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply --rebuild-modeled after printing its preview.",
+    )
+    parser.add_argument(
         "--start",
         type=_parse_date,
         help="ISO date for the start of the window (overrides --bootstrap).",
@@ -171,10 +247,34 @@ def _build_argparser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     args = _build_argparser().parse_args()
+    if args.apply and not args.rebuild_modeled:
+        raise SystemExit("--apply requires --rebuild-modeled")
+    if args.rebuild_modeled:
+        with SessionLocal() as preview_session:
+            preview_today = date.today()
+            preview_end = args.end or preview_today
+            preview_start = _resolve_start(
+                preview_session,
+                args.start,
+                args.bootstrap,
+                preview_today,
+            )
+            preview = preview_modeled_cache_rebuild(preview_session, preview_start, preview_end)
+        print(
+            "daily_values modeled-cache rebuild preview: "
+            f"{preview.modeled_rows_to_replace} modeled rows would be replaced; "
+            f"{preview.observed_rows_preserved} observed rows would be preserved; "
+            f"window {preview.start_date} -> {preview.end_date}; "
+            f"apply={'yes' if args.apply else 'no'}"
+        )
+        if not args.apply:
+            raise SystemExit(0)
     written = run(
         start_date=args.start,
         end_date=args.end,
         bootstrap=args.bootstrap,
+        rebuild_modeled=args.rebuild_modeled,
+        apply_rebuild=args.apply,
     )
     span = (args.start, args.end or date.today())
     # Plain ASCII so the message survives the Windows cp1252 console.

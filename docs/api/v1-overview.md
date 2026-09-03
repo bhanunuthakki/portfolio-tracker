@@ -73,6 +73,12 @@ The raw performance, position-performance, beta, and drawdown result objects
 also carry required `methodology` and `methodology_version` literals. This lets
 legacy endpoint consumers prove the calculation contract without depending on
 the v1 envelope; v1 consumers must require the embedded markers to match meta.
+Performance additionally identifies the exact `valuation_account_ids` and the
+opening/ending value provenance. A requested ending boundary must be a complete
+broker snapshot; a modeled opening is allowed only from a complete full-book
+snapshot anchor. Partial or unsupported boundaries return stable reason codes
+with `calculation_status=unavailable` rather than silently shortening the
+window.
 
 ### Pagination
 
