@@ -45,7 +45,7 @@ from portfolio_tracker.models import (  # noqa: E402
 )
 from portfolio_tracker.services.active_items import valued_account_ids  # noqa: E402
 
-EXPECTED_ALEMBIC_REVISION = "0026"
+EXPECTED_ALEMBIC_REVISION = "0027"
 PARSER_VERSION = "robinhood_activity_csv.v4"
 SOURCE_TIMEZONE = "America/New_York"
 _DATE_SHIFT_DAYS = 14
@@ -392,7 +392,10 @@ def _load_inventory(path: Path) -> EvidenceInventory:
 
 
 def _match_source_rows(
-    inventory: EvidenceInventory, rows: tuple[SourceRow, ...]
+    inventory: EvidenceInventory,
+    rows: tuple[SourceRow, ...],
+    requested_return_start: date,
+    requested_return_end: date,
 ) -> tuple[tuple[EvidenceEvent, SourceRow], ...]:
     # A fully identified in-kind ACATI row outside the requested performance
     # window is retained and hashed as source evidence, but is not a monetary
@@ -400,7 +403,7 @@ def _match_source_rows(
     # silently omitting transferred positions could distort return attribution.
     if any(
         row.is_in_kind_transfer
-        and inventory.coverage_start <= row.activity_date <= inventory.coverage_end
+        and requested_return_start < row.activity_date <= requested_return_end
         for row in rows
     ):
         raise BuildError("in_kind_transfer_inside_requested_window")
@@ -584,9 +587,16 @@ def _build_document(
     inventory: EvidenceInventory,
     rows: tuple[SourceRow, ...],
     csv_path: Path,
+    requested_return_start: date,
+    requested_return_end: date,
 ) -> tuple[dict[str, object], Counter[str]]:
     account_identity_sha256 = _verify_account(session, inventory)
-    matched = _match_source_rows(inventory, rows)
+    matched = _match_source_rows(
+        inventory,
+        rows,
+        requested_return_start,
+        requested_return_end,
+    )
     counts: Counter[str] = Counter()
     events: list[dict[str, object]] = []
     for event, source_row in matched:
@@ -679,15 +689,32 @@ def _build_document(
             for gap in gaps
         )
     )
+    gaps.extend(
+        {
+            "gap_start": row.activity_date.isoformat(),
+            "gap_end": row.activity_date.isoformat(),
+            "reason_code": "unreconciled_difference",
+        }
+        for row in rows
+        if row.is_in_kind_transfer
+        and not requested_return_start < row.activity_date <= requested_return_end
+        and not any(
+            gap["gap_start"] <= row.activity_date.isoformat() <= gap["gap_end"]
+            and gap["reason_code"] == "unreconciled_difference"
+            for gap in gaps
+        )
+    )
     candidate_hashes = sorted(row.source_row_sha256 for row in rows if row.is_cashflow_candidate)
     document: dict[str, object] = {
-        "schema_version": "2",
+        "schema_version": "3",
         "account_id": inventory.account_id,
         "account_identity_sha256": account_identity_sha256,
         "account_mapping_basis": "provider_account_id",
         "account_mapping_confidence": "exact",
         "coverage_start": inventory.coverage_start.isoformat(),
         "coverage_end": inventory.coverage_end.isoformat(),
+        "requested_return_start": requested_return_start.isoformat(),
+        "requested_return_end": requested_return_end.isoformat(),
         "source_type": inventory.source_type,
         "source_reference": (f"private:{inventory.source_type}:{inventory.source_document_sha256}"),
         "source_document_sha256": inventory.source_document_sha256,
@@ -728,10 +755,15 @@ def build_execution_manifests(
     inventory_paths: Sequence[Path],
     csv_paths: Sequence[Path],
     output_directory: Path,
+    *,
+    requested_return_start: date,
+    requested_return_end: date,
 ) -> BuildResult:
     """Build and atomically publish explicit manifests from read-only inputs."""
     if not inventory_paths or not csv_paths:
         raise BuildError("inputs_required")
+    if requested_return_start >= requested_return_end:
+        raise BuildError("requested_return_window_invalid")
     output_directory = Path(output_directory)
     if output_directory.exists():
         raise BuildError("output_directory_exists")
@@ -754,7 +786,14 @@ def build_execution_manifests(
                 if matched_csv is None:
                     raise BuildError("source_hash_mismatch")
                 csv_path, rows = matched_csv
-                document, counts = _build_document(session, inventory, rows, csv_path)
+                document, counts = _build_document(
+                    session,
+                    inventory,
+                    rows,
+                    csv_path,
+                    requested_return_start,
+                    requested_return_end,
+                )
                 total_counts.update(counts)
                 file_token = _digest(
                     {
@@ -807,13 +846,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--inventory", type=Path, action="append", required=True)
     parser.add_argument("--csv", type=Path, action="append", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--return-start", type=date.fromisoformat, required=True)
+    parser.add_argument("--return-end", type=date.fromisoformat, required=True)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = build_execution_manifests(args.db, args.inventory, args.csv, args.output_dir)
+        result = build_execution_manifests(
+            args.db,
+            args.inventory,
+            args.csv,
+            args.output_dir,
+            requested_return_start=args.return_start,
+            requested_return_end=args.return_end,
+        )
         print(json.dumps(result.console_summary(), sort_keys=True))
         return 0
     except BuildError as exc:

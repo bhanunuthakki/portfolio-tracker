@@ -470,27 +470,31 @@ def test_lineage_current_decision_and_supersession_constraints(
         run_mutation = CashFlowReconciliationRunTransactionMutation(
             run_id=run.run_id,
             target_transaction_id=transaction.plaid_investment_transaction_id,
-            mutation_kind=(
-                CashFlowReconciliationTransactionMutationKind.OVERRIDE_UPDATE.value
-            ),
+            mutation_kind=(CashFlowReconciliationTransactionMutationKind.OVERRIDE_UPDATE.value),
             before_payload_sha256="a" * 64,
             after_payload_sha256="b" * 64,
         )
         session.add_all([run_decision, run_mutation])
         session.commit()
 
-        assert session.get(
-            CashFlowReconciliationRunDecision,
-            (run.run_id, historical.decision_key),
-        ) is not None
-        assert session.get(
-            CashFlowReconciliationRunTransactionMutation,
-            (
-                run.run_id,
-                transaction.plaid_investment_transaction_id,
-                CashFlowReconciliationTransactionMutationKind.OVERRIDE_UPDATE.value,
-            ),
-        ) is not None
+        assert (
+            session.get(
+                CashFlowReconciliationRunDecision,
+                (run.run_id, historical.decision_key),
+            )
+            is not None
+        )
+        assert (
+            session.get(
+                CashFlowReconciliationRunTransactionMutation,
+                (
+                    run.run_id,
+                    transaction.plaid_investment_transaction_id,
+                    CashFlowReconciliationTransactionMutationKind.OVERRIDE_UPDATE.value,
+                ),
+            )
+            is not None
+        )
 
         second_event = _add_attested_event(
             session,
@@ -528,5 +532,90 @@ def test_lineage_current_decision_and_supersession_constraints(
             session.commit()
         session.rollback()
 
+    engine.dispose()
+    get_settings.cache_clear()
+
+
+def test_return_scope_migration_preserves_legacy_receipts_and_constraints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "return-scope-round-trip.db"
+    config = _config(database_path, monkeypatch)
+    command.upgrade(config, "0026")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    legacy_values = {
+        "run_id": "1" * 64,
+        "plan_digest": "2" * 64,
+        "manifest_set": "3" * 64,
+    }
+    insert_sql = text(
+        "INSERT INTO cashflow_reconciliation_runs "
+        "(run_id, plan_digest, manifest_set_sha256, software_revision, backup_reference, "
+        "preview_reference, affected_start, affected_end, affected_account_count, "
+        "source_event_count, planned_mutation_count, applied_mutation_count, status) VALUES "
+        "(:run_id, :plan_digest, :manifest_set, 'fixture', 'backup', 'preview', "
+        "'2025-01-01', '2025-01-31', 1, 1, 1, 0, 'previewed')"
+    )
+    with engine.begin() as connection:
+        connection.execute(insert_sql, legacy_values)
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    columns = {
+        column["name"] for column in inspect(engine).get_columns("cashflow_reconciliation_runs")
+    }
+    assert {"requested_return_start", "requested_return_end"} <= columns
+    with engine.begin() as connection:
+        legacy_scope = connection.execute(
+            text(
+                "SELECT requested_return_start, requested_return_end "
+                "FROM cashflow_reconciliation_runs WHERE run_id = :run_id"
+            ),
+            {"run_id": legacy_values["run_id"]},
+        ).one()
+        assert tuple(legacy_scope) == (None, None)
+        connection.execute(
+            text(
+                "INSERT INTO cashflow_reconciliation_runs "
+                "(run_id, plan_digest, manifest_set_sha256, software_revision, "
+                "backup_reference, preview_reference, affected_start, affected_end, "
+                "requested_return_start, requested_return_end, affected_account_count, "
+                "source_event_count, planned_mutation_count, applied_mutation_count, status) "
+                "VALUES (:run_id, :plan_digest, :manifest_set, 'fixture', 'backup', 'preview', "
+                "'2022-03-29', '2026-07-31', '2024-09-03', '2026-09-03', "
+                "1, 1, 1, 0, 'previewed')"
+            ),
+            {"run_id": "4" * 64, "plan_digest": "5" * 64, "manifest_set": "6" * 64},
+        )
+    with pytest.raises(IntegrityError), engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO cashflow_reconciliation_runs "
+                "(run_id, plan_digest, manifest_set_sha256, software_revision, "
+                "backup_reference, preview_reference, affected_start, affected_end, "
+                "requested_return_start, requested_return_end, affected_account_count, "
+                "source_event_count, planned_mutation_count, applied_mutation_count, status) "
+                "VALUES (:run_id, :plan_digest, :manifest_set, 'fixture', 'backup', "
+                "'preview', '2025-01-01', '2025-01-31', '2025-01-01', NULL, "
+                "1, 1, 1, 0, 'previewed')"
+            ),
+            {
+                "run_id": "7" * 64,
+                "plan_digest": "8" * 64,
+                "manifest_set": "9" * 64,
+            },
+        )
+    engine.dispose()
+
+    command.downgrade(config, "0026")
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    downgraded_columns = {
+        column["name"] for column in inspect(engine).get_columns("cashflow_reconciliation_runs")
+    }
+    assert "requested_return_start" not in downgraded_columns
+    assert "requested_return_end" not in downgraded_columns
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM cashflow_reconciliation_runs")) == 2
     engine.dispose()
     get_settings.cache_clear()

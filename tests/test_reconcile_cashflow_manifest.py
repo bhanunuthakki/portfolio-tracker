@@ -86,6 +86,9 @@ def _manifest_source(
     tmp_path: Path,
     account: Account,
     events: list[dict[str, object]],
+    *,
+    requested_return_start: str = "2024-09-03",
+    requested_return_end: str = "2026-09-03",
 ) -> ManifestSource:
     source_path = tmp_path / "statement.csv"
     max_ordinal = max(int(event["source_row_ordinal"]) for event in events)
@@ -179,13 +182,15 @@ def _manifest_source(
     manifest_path.write_text(
         json.dumps(
             {
-                "schema_version": "2",
+                "schema_version": "3",
                 "account_id": account.account_id,
                 "account_identity_sha256": _sha256(account.plaid_account_id.encode("utf-8")),
                 "account_mapping_basis": "provider_account_id",
                 "account_mapping_confidence": "exact",
                 "coverage_start": "2024-09-03",
                 "coverage_end": "2026-07-31",
+                "requested_return_start": requested_return_start,
+                "requested_return_end": requested_return_end,
                 "source_type": "brokerage_statement",
                 "source_reference": f"private:brokerage_statement:{source_sha256}",
                 "source_document_sha256": source_sha256,
@@ -299,6 +304,118 @@ def test_manifest_verifies_source_hash_and_account_identity(session, tmp_path):
 
     with pytest.raises(ManifestValidationError, match="account mapping"):
         build_reconciliation_plan(session, [source])
+
+
+def test_manifest_set_requires_one_requested_return_window(session, tmp_path):
+    account = _account(session)
+    first_dir = tmp_path / "first"
+    second_dir = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = _manifest_source(
+        first_dir,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    second = _manifest_source(
+        second_dir,
+        account,
+        [_event(1, "2025-01-03", "25.00", "external_in")],
+        requested_return_start="2024-10-01",
+    )
+
+    with pytest.raises(ManifestValidationError, match="requested return window"):
+        build_reconciliation_plan(session, [first, second])
+
+
+def test_requested_return_window_changes_plan_digest(session, tmp_path):
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    first = build_reconciliation_plan(session, [source])
+    payload = json.loads(source.manifest_path.read_text(encoding="utf-8"))
+    payload["requested_return_start"] = "2024-10-01"
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    second = build_reconciliation_plan(session, [source])
+
+    assert first.requested_return_start == date(2024, 9, 3)
+    assert second.requested_return_start == date(2024, 10, 1)
+    assert first.plan_digest != second.plan_digest
+
+
+def test_v3_manifest_independently_rejects_in_period_in_kind_transfer(session, tmp_path):
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+        requested_return_end="2026-07-31",
+    )
+    with source.source_path.open("a", encoding="utf-8") as handle:
+        handle.write("07/31/2026,07/31/2026,07/31/2026,SYN,in-kind transfer,ACATI,2,,--\n")
+    payload = json.loads(source.manifest_path.read_text(encoding="utf-8"))
+    source_sha256 = _sha256(source.source_path.read_bytes())
+    payload["source_document_sha256"] = source_sha256
+    payload["source_reference"] = f"private:brokerage_statement:{source_sha256}"
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ManifestValidationError, match="in-kind transfer"):
+        build_reconciliation_plan(session, [source])
+
+
+def test_v3_manifest_requires_gap_for_opening_boundary_in_kind_transfer(session, tmp_path):
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    with source.source_path.open("a", encoding="utf-8") as handle:
+        handle.write("09/03/2024,09/03/2024,09/03/2024,SYN,in-kind transfer,ACATI,2,,--\n")
+    payload = json.loads(source.manifest_path.read_text(encoding="utf-8"))
+    source_sha256 = _sha256(source.source_path.read_bytes())
+    payload["source_document_sha256"] = source_sha256
+    payload["source_reference"] = f"private:brokerage_statement:{source_sha256}"
+    payload["source_row_count"] = 2
+    payload["gaps"] = [
+        {
+            "gap_start": "2024-09-03",
+            "gap_end": "2024-09-03",
+            "reason_code": "unreconciled_difference",
+        }
+    ]
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = build_reconciliation_plan(session, [source])
+    assert plan.conflict_count == 0
+    payload["gaps"] = []
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ManifestValidationError, match="explicit source gap"):
+        build_reconciliation_plan(session, [source])
+
+
+def test_legacy_v2_manifest_retains_implicit_scope_compatibility(session, tmp_path):
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    payload = json.loads(source.manifest_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = "2"
+    payload.pop("requested_return_start")
+    payload.pop("requested_return_end")
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = build_reconciliation_plan(session, [source])
+
+    assert plan.requested_return_start is None
+    assert plan.requested_return_end is None
 
 
 def test_plan_classifies_each_event_once_without_writing(session, tmp_path):
@@ -530,6 +647,8 @@ def test_private_preview_includes_net_cashflow_by_status(session, tmp_path):
         "event_count": 0,
         "net_external_cashflow": "0",
     }
+    assert payload["requested_return_start"] == "2024-09-03"
+    assert payload["requested_return_end"] == "2026-09-03"
     assert destination.stat().st_mode & 0o777 == 0o600
 
 
@@ -593,6 +712,8 @@ def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path)
     assert run.plan_digest == plan.plan_digest
     assert run.backup_reference == "private:backup:before"
     assert run.preview_reference == "private:preview:approved"
+    assert run.requested_return_start == date(2024, 9, 3)
+    assert run.requested_return_end == date(2026, 9, 3)
     memberships = tuple(session.scalars(select(CashFlowReconciliationRunDecision)))
     transaction_mutations = tuple(
         session.scalars(select(CashFlowReconciliationRunTransactionMutation))

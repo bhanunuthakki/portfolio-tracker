@@ -1052,6 +1052,12 @@ class CashFlowReconciliationRun(Base):
             name="ck_cashflow_reconciliation_runs_date_order",
         ),
         CheckConstraint(
+            "(requested_return_start IS NULL AND requested_return_end IS NULL) OR "
+            "(requested_return_start IS NOT NULL AND requested_return_end IS NOT NULL AND "
+            "requested_return_start < requested_return_end)",
+            name="ck_cashflow_reconciliation_runs_requested_return_window",
+        ),
+        CheckConstraint(
             "affected_account_count >= 0 AND source_event_count >= 0 AND "
             "planned_mutation_count >= 0 AND applied_mutation_count >= 0 AND "
             "applied_mutation_count <= planned_mutation_count",
@@ -1078,6 +1084,8 @@ class CashFlowReconciliationRun(Base):
     preview_reference: Mapped[str] = mapped_column(String(512), nullable=False)
     affected_start: Mapped[date] = mapped_column(Date, nullable=False)
     affected_end: Mapped[date] = mapped_column(Date, nullable=False)
+    requested_return_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    requested_return_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     affected_account_count: Mapped[int] = mapped_column(Integer, nullable=False)
     source_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
     planned_mutation_count: Mapped[int] = mapped_column(Integer, nullable=False)

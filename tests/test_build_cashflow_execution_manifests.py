@@ -27,6 +27,9 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts import build_cashflow_execution_manifests as builder  # noqa: E402
 
+_RETURN_START = date(2025, 1, 1)
+_RETURN_END = date(2025, 12, 31)
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -37,7 +40,7 @@ def _database(path: Path, events: list[dict[str, object]]) -> tuple[int, str]:
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32))")
-        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0026')")
+        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0027')")
     raw_account_identity = "private-provider-account-id"
     with Session(engine) as session:
         item = Item(
@@ -206,6 +209,25 @@ def _inputs(
     return database, inventory, csv_path
 
 
+def _build(
+    database: Path,
+    inventory: Path,
+    csv_path: Path,
+    output: Path,
+    *,
+    return_start: date = _RETURN_START,
+    return_end: date = _RETURN_END,
+) -> builder.BuildResult:
+    return builder.build_execution_manifests(
+        database,
+        [inventory],
+        [csv_path],
+        output,
+        requested_return_start=return_start,
+        requested_return_end=return_end,
+    )
+
+
 def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     tmp_path: Path,
 ) -> None:
@@ -214,7 +236,7 @@ def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     output = tmp_path / "private-execution-manifests"
     before = _sha256(database)
 
-    result = builder.build_execution_manifests(database, [inventory], [csv_path], output)
+    result = _build(database, inventory, csv_path, output)
 
     assert _sha256(database) == before
     assert result.event_count == 68
@@ -230,6 +252,11 @@ def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     assert len(manifests) == 1
     assert os.stat(manifests[0]).st_mode & 0o777 == 0o600
     payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "3"
+    assert payload["requested_return_start"] == _RETURN_START.isoformat()
+    assert payload["requested_return_end"] == _RETURN_END.isoformat()
+    assert payload["coverage_start"] == "2025-01-01"
+    assert payload["coverage_end"] == "2025-12-31"
     assert len(payload["events"]) == 68
     assert all("resolution" in event for event in payload["events"])
     assert payload["events"][67]["disposition"] == "statement_supplement"
@@ -248,7 +275,7 @@ def test_multiple_same_account_candidates_fail_closed_without_output(tmp_path: P
     before = _sha256(database)
 
     with pytest.raises(builder.BuildError, match="transaction_match_ambiguous"):
-        builder.build_execution_manifests(database, [inventory], [csv_path], output)
+        _build(database, inventory, csv_path, output)
 
     assert _sha256(database) == before
     assert not output.exists()
@@ -267,7 +294,7 @@ def test_legacy_inventory_derives_exact_source_code_account_hash_and_capture_tim
     inventory.write_text(json.dumps(payload), encoding="utf-8")
     output = tmp_path / "private-execution-manifests"
 
-    result = builder.build_execution_manifests(database, [inventory], [csv_path], output)
+    result = _build(database, inventory, csv_path, output)
 
     assert result.event_count == 2
     manifest = json.loads(next(output.glob("*.json")).read_text(encoding="utf-8"))
@@ -289,7 +316,7 @@ def test_source_or_account_identity_mismatch_fails_closed(tmp_path: Path, change
         expected = "account_identity_mismatch"
 
     with pytest.raises(builder.BuildError, match=expected):
-        builder.build_execution_manifests(database, [inventory], [csv_path], tmp_path / "output")
+        _build(database, inventory, csv_path, tmp_path / "output")
 
 
 def test_inventory_must_disposition_every_parsed_cashflow_candidate(tmp_path: Path) -> None:
@@ -299,12 +326,7 @@ def test_inventory_must_disposition_every_parsed_cashflow_candidate(tmp_path: Pa
     inventory.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(builder.BuildError, match="cashflow_candidate_omitted"):
-        builder.build_execution_manifests(
-            database,
-            [inventory],
-            [csv_path],
-            tmp_path / "output",
-        )
+        _build(database, inventory, csv_path, tmp_path / "output")
 
 
 def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> None:
@@ -317,7 +339,7 @@ def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> No
         event["source_code"] = source_code
     database, inventory, csv_path = _inputs(tmp_path, events)
     non_external_rows = (
-        "12/31/2024,12/31/2024,12/31/2024,SYN,private description,ACATI,2,,--\n"
+        "01/01/2025,01/01/2025,01/01/2025,SYN,private description,ACATI,2,,--\n"
         "02/01/2025,02/01/2025,02/01/2025,,private description,SLIP,,,$7.00\n"
         "02/02/2025,02/02/2025,02/02/2025,,private description,FEE,,,($2.00)\n"
         "02/03/2025,02/03/2025,02/03/2025,,private description,GOLD,,,$5.00\n"
@@ -329,12 +351,7 @@ def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> No
     inventory_payload["source_document_sha256"] = _sha256(csv_path)
     inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
 
-    result = builder.build_execution_manifests(
-        database,
-        [inventory],
-        [csv_path],
-        tmp_path / "output",
-    )
+    result = _build(database, inventory, csv_path, tmp_path / "output")
 
     assert result.event_count == 5
     manifest = json.loads(next((tmp_path / "output").glob("*.json")).read_text())
@@ -402,11 +419,70 @@ def test_in_kind_transfer_inside_requested_window_fails_closed(tmp_path: Path) -
     inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
 
     with pytest.raises(builder.BuildError, match="in_kind_transfer_inside_requested_window"):
-        builder.build_execution_manifests(
+        _build(database, inventory, csv_path, tmp_path / "output")
+
+
+@pytest.mark.parametrize(
+    ("in_kind_date", "return_start"),
+    (
+        (date(2025, 1, 1), date(2025, 1, 2)),
+        (date(2025, 1, 1), date(2025, 1, 1)),
+    ),
+)
+def test_in_kind_transfer_before_or_on_opening_boundary_is_gap_not_cashflow(
+    tmp_path: Path,
+    in_kind_date: date,
+    return_start: date,
+) -> None:
+    events = _events(1)
+    database, inventory, csv_path = _inputs(tmp_path, events)
+    row_date = in_kind_date.strftime("%m/%d/%Y")
+    with csv_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{row_date},{row_date},{row_date},SYN,private description,ACATI,2,,--\n")
+    inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
+    inventory_payload["source_document_sha256"] = _sha256(csv_path)
+    inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
+
+    result = _build(
+        database,
+        inventory,
+        csv_path,
+        tmp_path / "output",
+        return_start=return_start,
+    )
+
+    assert result.event_count == 1
+    manifest = json.loads(next((tmp_path / "output").glob("*.json")).read_text())
+    assert manifest["cashflow_candidate_count"] == 1
+    assert {
+        "gap_start": in_kind_date.isoformat(),
+        "gap_end": in_kind_date.isoformat(),
+        "reason_code": "unreconciled_difference",
+    } in manifest["gaps"]
+
+
+@pytest.mark.parametrize(
+    ("return_start", "return_end"),
+    (
+        (date(2025, 1, 1), date(2025, 1, 1)),
+        (date(2025, 1, 2), date(2025, 1, 1)),
+    ),
+)
+def test_requested_return_window_must_be_nonempty_and_ordered(
+    tmp_path: Path,
+    return_start: date,
+    return_end: date,
+) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+
+    with pytest.raises(builder.BuildError, match="requested_return_window_invalid"):
+        _build(
             database,
-            [inventory],
-            [csv_path],
+            inventory,
+            csv_path,
             tmp_path / "output",
+            return_start=return_start,
+            return_end=return_end,
         )
 
 
@@ -445,7 +521,7 @@ def test_shifted_provider_date_is_deduplicated_and_recorded(tmp_path: Path) -> N
     engine.dispose()
 
     output = tmp_path / "private-execution-manifests"
-    result = builder.build_execution_manifests(database, [inventory], [csv_path], output)
+    result = _build(database, inventory, csv_path, output)
 
     assert result.status_counts["provider_exact"] == 1
     assert result.status_counts["statement_supplement"] == 0
@@ -496,12 +572,7 @@ def test_shifted_provider_match_fails_closed_when_bounded_candidates_are_ambiguo
     engine.dispose()
 
     with pytest.raises(builder.BuildError, match="transaction_match_ambiguous"):
-        builder.build_execution_manifests(
-            database,
-            [inventory],
-            [csv_path],
-            tmp_path / "output",
-        )
+        _build(database, inventory, csv_path, tmp_path / "output")
 
 
 def test_cli_stdout_contains_only_sanitized_counts_and_digests(
@@ -520,6 +591,10 @@ def test_cli_stdout_contains_only_sanitized_counts_and_digests(
             str(csv_path),
             "--output-dir",
             str(output),
+            "--return-start",
+            _RETURN_START.isoformat(),
+            "--return-end",
+            _RETURN_END.isoformat(),
         ]
     )
 

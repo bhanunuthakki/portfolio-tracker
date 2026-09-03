@@ -101,7 +101,7 @@ _STATUS_ORDER: tuple[EntryStatus, ...] = (
     "conflict",
     "excluded",
 )
-_TOP_LEVEL_KEYS = frozenset(
+_TOP_LEVEL_KEYS_V2 = frozenset(
     {
         "schema_version",
         "account_id",
@@ -125,7 +125,11 @@ _TOP_LEVEL_KEYS = frozenset(
         "events",
     }
 )
-_REQUIRED_TOP_LEVEL_KEYS = _TOP_LEVEL_KEYS - {"schema_version"}
+_TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | frozenset(
+    {"requested_return_start", "requested_return_end"}
+)
+_REQUIRED_TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V2 - {"schema_version"}
+_REQUIRED_TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V3
 _EVENT_KEYS = frozenset(
     {
         "source_row_ordinal",
@@ -289,10 +293,13 @@ class _Event:
 @dataclass(frozen=True)
 class _Manifest:
     source: ManifestSource
+    schema_version: Literal["2", "3"]
     account_id: int
     account_identity_sha256: str
     coverage_start: date
     coverage_end: date
+    requested_return_start: date | None
+    requested_return_end: date | None
     source_type: str
     source_reference: str
     source_document_sha256: str
@@ -393,6 +400,8 @@ class ReconciliationPlan:
     manifests: tuple[_Manifest, ...]
     entries: tuple[PlanEntry, ...]
     attestations: tuple[_AttestationPlan, ...]
+    requested_return_start: date | None
+    requested_return_end: date | None
     status_counts: dict[str, int]
     planned_mutation_count: int
     conflict_count: int
@@ -1041,14 +1050,21 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ManifestValidationError("manifest is not valid UTF-8 JSON") from exc
     payload = _expect_object(raw, "manifest")
+    schema_version = payload.get("schema_version")
+    if schema_version == "2":
+        required_keys = _REQUIRED_TOP_LEVEL_KEYS_V2
+        allowed_keys = _TOP_LEVEL_KEYS_V2
+    elif schema_version == "3":
+        required_keys = _REQUIRED_TOP_LEVEL_KEYS_V3
+        allowed_keys = _TOP_LEVEL_KEYS_V3
+    else:
+        raise ManifestValidationError("manifest.schema_version must be 2 or 3")
     _expect_keys(
         payload,
-        required=_REQUIRED_TOP_LEVEL_KEYS,
-        allowed=_TOP_LEVEL_KEYS,
+        required=required_keys,
+        allowed=allowed_keys,
         context="manifest",
     )
-    if payload.get("schema_version") != "2":
-        raise ManifestValidationError("manifest.schema_version must be 2")
 
     account_id = payload["account_id"]
     if isinstance(account_id, bool) or not isinstance(account_id, int) or account_id < 1:
@@ -1080,11 +1096,38 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     coverage_end = _expect_date(payload["coverage_end"], "manifest.coverage_end")
     if coverage_start > coverage_end:
         raise ManifestValidationError("manifest coverage dates are reversed")
+    if schema_version == "3":
+        requested_return_start = _expect_date(
+            payload["requested_return_start"], "manifest.requested_return_start"
+        )
+        requested_return_end = _expect_date(
+            payload["requested_return_end"], "manifest.requested_return_end"
+        )
+        if requested_return_start >= requested_return_end:
+            raise ManifestValidationError("manifest requested return dates are reversed or empty")
+    else:
+        # Schema v2 did not separate source coverage from requested return
+        # scope. Preserve its conservative historical behavior.
+        requested_return_start = None
+        requested_return_end = None
     if any(
         _is_in_kind_transfer(row)
-        and coverage_start
-        <= _parse_robinhood_date(row.activity_date, "in-kind transfer")
-        <= coverage_end
+        and (
+            (
+                schema_version == "3"
+                and requested_return_start is not None
+                and requested_return_end is not None
+                and requested_return_start
+                < _parse_robinhood_date(row.activity_date, "in-kind transfer")
+                <= requested_return_end
+            )
+            or (
+                schema_version == "2"
+                and coverage_start
+                <= _parse_robinhood_date(row.activity_date, "in-kind transfer")
+                <= coverage_end
+            )
+        )
         for row in source_rows
     ):
         raise ManifestValidationError(
@@ -1163,6 +1206,26 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         gap_keys.add(key)
         gaps.append(_Gap(gap_start, gap_end, reason))
     gaps.sort(key=lambda gap: (gap.gap_start, gap.gap_end, gap.reason_code))
+    if schema_version == "3":
+        assert requested_return_start is not None
+        assert requested_return_end is not None
+        outside_window_in_kind_dates = {
+            _parse_robinhood_date(row.activity_date, "in-kind transfer")
+            for row in source_rows
+            if _is_in_kind_transfer(row)
+            and not requested_return_start
+            < _parse_robinhood_date(row.activity_date, "in-kind transfer")
+            <= requested_return_end
+        }
+        for in_kind_date in outside_window_in_kind_dates:
+            if not any(
+                gap.reason_code == "unreconciled_difference"
+                and gap.gap_start <= in_kind_date <= gap.gap_end
+                for gap in gaps
+            ):
+                raise ManifestValidationError(
+                    "out-of-window in-kind transfer requires an explicit source gap"
+                )
 
     raw_events = payload["events"]
     if not isinstance(raw_events, list):
@@ -1241,20 +1304,31 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     }
     identity_digest = _digest(identity_payload)
     attestation_key = f"cashflow:v2:{identity_digest[:52]}"
-    manifest_digest = _digest(
-        {
-            **identity_payload,
-            "source_reference_hash": _sha256_text(source_reference),
-            "captured_at": _datetime_text(captured_at),
-            "events": [event.digest_payload() for event in events],
-        }
-    )
+    manifest_payload = {
+        **identity_payload,
+        "source_reference_hash": _sha256_text(source_reference),
+        "captured_at": _datetime_text(captured_at),
+        "events": [event.digest_payload() for event in events],
+    }
+    if schema_version == "3":
+        assert requested_return_start is not None
+        assert requested_return_end is not None
+        manifest_payload.update(
+            {
+                "requested_return_start": requested_return_start.isoformat(),
+                "requested_return_end": requested_return_end.isoformat(),
+            }
+        )
+    manifest_digest = _digest(manifest_payload)
     return _Manifest(
         source=source,
+        schema_version=cast(Literal["2", "3"], schema_version),
         account_id=account_id,
         account_identity_sha256=account_identity,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
+        requested_return_start=requested_return_start,
+        requested_return_end=requested_return_end,
         source_type=source_type,
         source_reference=source_reference,
         source_document_sha256=source_sha256,
@@ -1704,6 +1778,22 @@ def build_reconciliation_plan(
         ManifestSource(Path(source.manifest_path), Path(source.source_path)) for source in sources
     )
     manifests = tuple(_parse_manifest(session, source) for source in normalized_sources)
+    schema_versions = {manifest.schema_version for manifest in manifests}
+    if len(schema_versions) != 1:
+        raise ManifestValidationError("schema v2 and v3 manifests cannot be mixed")
+    if schema_versions == {"3"}:
+        requested_windows = {
+            (manifest.requested_return_start, manifest.requested_return_end)
+            for manifest in manifests
+        }
+        if len(requested_windows) != 1:
+            raise ManifestValidationError("manifests do not share one requested return window")
+        requested_return_start, requested_return_end = next(iter(requested_windows))
+        assert requested_return_start is not None
+        assert requested_return_end is not None
+    else:
+        requested_return_start = None
+        requested_return_end = None
     manifest_digests = [manifest.manifest_digest for manifest in manifests]
     if len(manifest_digests) != len(set(manifest_digests)):
         raise ManifestValidationError("duplicate manifest source")
@@ -1775,7 +1865,7 @@ def build_reconciliation_plan(
     planned_mutations += provenance_mutations
     if planned_mutations:
         planned_mutations += 1  # durable applied-run receipt
-    plan_payload = {
+    plan_payload: dict[str, object] = {
         "plan_version": "cashflow_reconciliation.v1",
         "manifests": [manifest.manifest_digest for manifest in manifests],
         "entries": [entry.digest_payload() for entry in entries],
@@ -1783,11 +1873,20 @@ def build_reconciliation_plan(
         "planned_mutation_count": planned_mutations,
         "conflict_count": conflict_count,
     }
+    if requested_return_start is not None and requested_return_end is not None:
+        plan_payload.update(
+            {
+                "requested_return_start": requested_return_start.isoformat(),
+                "requested_return_end": requested_return_end.isoformat(),
+            }
+        )
     return ReconciliationPlan(
         sources=normalized_sources,
         manifests=manifests,
         entries=entries,
         attestations=attestations,
+        requested_return_start=requested_return_start,
+        requested_return_end=requested_return_end,
         status_counts=status_counts,
         planned_mutation_count=planned_mutations,
         conflict_count=conflict_count,
@@ -2048,6 +2147,8 @@ def _persist_run_receipt(
             preview_reference=preview_reference,
             affected_start=min(item.coverage_start for item in plan.manifests),
             affected_end=max(item.coverage_end for item in plan.manifests),
+            requested_return_start=plan.requested_return_start,
+            requested_return_end=plan.requested_return_end,
             affected_account_count=len({item.account_id for item in plan.manifests}),
             source_event_count=len(plan.entries),
             planned_mutation_count=plan.planned_mutation_count,
@@ -2110,6 +2211,8 @@ def _verify_run_receipt(
     if (
         run is None
         or run.plan_digest != plan.plan_digest
+        or run.requested_return_start != plan.requested_return_start
+        or run.requested_return_end != plan.requested_return_end
         or run.planned_mutation_count != plan.planned_mutation_count
         or run.applied_mutation_count != plan.planned_mutation_count
     ):
@@ -2393,7 +2496,8 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
 
     Unlike stdout, this owner-requested private artifact includes dated amounts
     needed to prove one-to-one source coverage.  Account and provider
-    transaction identifiers remain absent or hashed.
+    transaction identifiers remain only in this private artifact so an owner
+    can audit the exact provider row selected; they are never written to stdout.
     """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2434,6 +2538,14 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
     payload = {
         **plan.console_summary(),
         "preview_schema": "cashflow_reconciliation_preview.v1",
+        "requested_return_start": (
+            plan.requested_return_start.isoformat()
+            if plan.requested_return_start is not None
+            else None
+        ),
+        "requested_return_end": (
+            plan.requested_return_end.isoformat() if plan.requested_return_end is not None else None
+        ),
         "private_totals": {
             "external_in": _decimal_text(external_in_total),
             "external_out": _decimal_text(external_out_total),
@@ -2573,9 +2685,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         with SessionLocal() as session:
             plan = build_reconciliation_plan(session, sources)
+            preview_reference: str | None = None
             if args.preview_path is not None:
                 write_private_preview_artifact(plan, args.preview_path)
+                preview_reference = (
+                    f"private:preview:sha256:{_sha256_bytes(args.preview_path.read_bytes())}"
+                )
             if args.commit:
+                assert preview_reference is not None
                 result = apply_reconciliation_plan(
                     session,
                     plan,
@@ -2583,7 +2700,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     approved_at=args.approved_at,
                     software_revision=args.software_revision,
                     backup_reference=args.backup_reference,
-                    preview_reference=str(args.preview_path),
+                    preview_reference=preview_reference,
                 )
                 summary = result.console_summary()
             else:
@@ -2592,6 +2709,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if summary.get("conflict_count", 0) == 0 else 2
     except (ManifestValidationError, ReconciliationConflictError):
         # Never echo an exception whose text could contain a private path or ID.
+        print(_canonical_json({"committed": False, "error_code": "reconciliation_failed"}))
+        return 2
+    except Exception:
+        # Database and filesystem exceptions may contain private paths, SQL
+        # parameters, transaction identifiers, or amounts. Fail closed without
+        # reflecting exception content to an operator-visible stream.
         print(_canonical_json({"committed": False, "error_code": "reconciliation_failed"}))
         return 2
 

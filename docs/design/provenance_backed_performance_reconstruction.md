@@ -82,14 +82,20 @@ with zero candidates may certify only when the parser records zero candidates;
 an empty hand-authored event list is insufficient.
 
 An `ACATI` statement row with `Amount="--"`, an instrument, and a nonzero
-quantity is an in-kind transfer, not a zero-dollar cash flow. When it predates
-the requested reconstruction boundary, its positions remain part of opening
-capital and no dated flow is added to `(start, end]`. If such a row falls
-inside the requested source-coverage window, manifest construction and
-independent manifest validation fail closed until the transferred quantity is
-matched and valued explicitly. Robinhood attestations created before parser
-version `robinhood_activity_csv.v4` are non-certifying because those versions
-did not encode this distinction.
+quantity is an in-kind transfer, not a zero-dollar cash flow. Source coverage
+continues to describe the full statement. Manifest schema v3 separately binds
+the requested return scope as `(requested_return_start, requested_return_end]`.
+An in-kind row on or before the opening boundary is not added as dated cash;
+the opening positions own its value. An in-kind row inside that open-left,
+closed-right scope makes manifest construction and independent validation fail
+closed until its quantity is matched and valued. An out-of-scope in-kind row is
+recorded as an explicit `unreconciled_difference` source gap, preventing a
+future longer return window from silently treating that row as reconciled.
+The requested dates are part of the execution-manifest and plan digests,
+private preview, and applied-run receipt, but not the reusable statement
+attestation identity. Robinhood attestations created before parser version
+`robinhood_activity_csv.v4` are non-certifying because those versions did not
+encode the cash-versus-in-kind distinction.
 
 ## Reconstruction
 
