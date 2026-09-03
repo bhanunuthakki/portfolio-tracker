@@ -7,7 +7,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from portfolio_tracker.jobs.reconcile_cashflow_manifest import (
     ManifestSource,
@@ -726,6 +727,44 @@ def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path)
         "override_insert",
     }
     assert all(len(row.after_payload_sha256) == 64 for row in transaction_mutations)
+
+
+def test_apply_orders_source_event_before_decision_with_production_session(
+    engine,
+    tmp_path,
+):
+    with Session(engine, autoflush=False) as production_session:
+        production_session.execute(text("PRAGMA foreign_keys=ON"))
+        assert production_session.scalar(text("PRAGMA foreign_keys")) == 1
+        account = _account(production_session)
+        source = _manifest_source(
+            tmp_path,
+            account,
+            [_event(1, "2025-01-02", "100.00", "external_in")],
+        )
+        plan = build_reconciliation_plan(production_session, [source])
+
+        result = apply_reconciliation_plan(
+            production_session,
+            plan,
+            expected_plan_digest=plan.plan_digest,
+            approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+            software_revision="a" * 40,
+            backup_reference="private:backup:before",
+            preview_reference="private:preview:approved",
+        )
+
+        assert result.committed is True
+        assert (
+            production_session.scalar(select(func.count(CashFlowSourceEvent.source_event_id))) == 1
+        )
+        assert (
+            production_session.scalar(
+                select(func.count(CashFlowReconciliationDecision.decision_key))
+            )
+            == 1
+        )
+        assert production_session.execute(text("PRAGMA foreign_key_check")).all() == []
 
 
 def test_statement_effective_date_cannot_depart_from_activity_date(session, tmp_path):

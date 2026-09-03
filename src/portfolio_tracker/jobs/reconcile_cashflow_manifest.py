@@ -2040,6 +2040,11 @@ def _persist_source_events_and_decisions(
         source_event = session.get(CashFlowSourceEvent, entry.source_event_id)
         if source_event is None:
             session.add(CashFlowSourceEvent(**source_values))
+            # SessionLocal disables autoflush, and these provenance mappers do not
+            # declare an ORM relationship.  Materialize the parent before queuing
+            # its reconciliation decision so foreign-key enforcement cannot let
+            # SQLAlchemy emit the child first.
+            session.flush()
             mutations += 1
         elif not _source_event_matches(source_event, source_values):
             raise ReconciliationConflictError("source event changed before commit")
