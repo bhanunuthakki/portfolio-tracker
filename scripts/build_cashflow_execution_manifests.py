@@ -46,7 +46,7 @@ from portfolio_tracker.models import (  # noqa: E402
 from portfolio_tracker.services.active_items import valued_account_ids  # noqa: E402
 
 EXPECTED_ALEMBIC_REVISION = "0026"
-PARSER_VERSION = "robinhood_activity_csv.v2"
+PARSER_VERSION = "robinhood_activity_csv.v3"
 SOURCE_TIMEZONE = "America/New_York"
 _DATE_SHIFT_DAYS = 14
 _HEADERS: tuple[str, ...] = (
@@ -67,7 +67,7 @@ _STATUS_ORDER = (
     "excluded",
     "unresolved",
 )
-_NON_CASH_CODES = frozenset({"Buy", "Sell", "CDIV", "INT", "SPL", "REC"})
+_SUPPORTED_EXTERNAL_CASH_CODES = frozenset({"ACH", "MTCH", "ACATI", "DRFRO", "CFIR"})
 
 
 class BuildError(RuntimeError):
@@ -217,7 +217,7 @@ class SourceRow:
     process_date: date | None
     settlement_date: date | None
     source_code: str
-    signed_amount: Decimal
+    signed_amount: Decimal | None
     source_row_sha256: str
     is_cashflow_candidate: bool
 
@@ -340,7 +340,12 @@ def _parse_csv(path: Path) -> tuple[str, tuple[SourceRow, ...]]:
         source_code = record[5].strip()
         if not source_code or len(source_code) > 32:
             raise BuildError("csv_source_code_invalid")
-        signed_amount = _parse_amount(record[8])
+        try:
+            signed_amount = _parse_amount(record[8])
+        except BuildError:
+            if source_code in _SUPPORTED_EXTERNAL_CASH_CODES:
+                raise
+            signed_amount = None
         rows.append(
             SourceRow(
                 ordinal=len(rows) + 1,
@@ -350,7 +355,11 @@ def _parse_csv(path: Path) -> tuple[str, tuple[SourceRow, ...]]:
                 source_code=source_code,
                 signed_amount=signed_amount,
                 source_row_sha256=_source_row_sha256(record),
-                is_cashflow_candidate=(signed_amount != 0 and source_code not in _NON_CASH_CODES),
+                is_cashflow_candidate=(
+                    source_code in _SUPPORTED_EXTERNAL_CASH_CODES
+                    and signed_amount is not None
+                    and signed_amount != 0
+                ),
             )
         )
     return _sha256(raw), tuple(rows)
@@ -391,6 +400,8 @@ def _match_source_rows(
             raise BuildError("source_row_reused")
         if not selected.is_cashflow_candidate:
             raise BuildError("source_event_not_cashflow_candidate")
+        if selected.signed_amount is None:
+            raise BuildError("csv_amount_invalid")
         used.add(selected.ordinal)
         matched.append((event, selected))
     candidate_ordinals = {row.ordinal for row in rows if row.is_cashflow_candidate}
@@ -550,6 +561,8 @@ def _build_document(
     counts: Counter[str] = Counter()
     events: list[dict[str, object]] = []
     for event, source_row in matched:
+        if source_row.signed_amount is None:
+            raise BuildError("csv_amount_invalid")
         source_event_id = _digest(
             {
                 "identity_version": "cashflow_source_row.v2",

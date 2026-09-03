@@ -174,7 +174,7 @@ _ROBINHOOD_HEADERS: tuple[str, ...] = (
     "Price",
     "Amount",
 )
-_NON_CASH_CODES = frozenset({"Buy", "Sell", "CDIV", "INT", "SPL", "REC"})
+_SUPPORTED_EXTERNAL_CASH_CODES = frozenset({"ACH", "MTCH", "ACATI", "DRFRO", "CFIR"})
 
 
 class ManifestValidationError(ValueError):
@@ -630,6 +630,16 @@ def _parse_robinhood_amount(value: str, context: str) -> Decimal:
     return amount
 
 
+def _external_cash_candidate_amount(
+    row: _SourceRow,
+    context: str,
+) -> Decimal | None:
+    if row.transaction_code.strip() not in _SUPPORTED_EXTERNAL_CASH_CODES:
+        return None
+    amount = _parse_robinhood_amount(row.amount, context)
+    return amount if amount != 0 else None
+
+
 def _account_identity_sha256(account: Account) -> str:
     return _sha256_text(account.plaid_account_id)
 
@@ -766,7 +776,8 @@ def _parse_event(
     source_amount = _expect_decimal(
         payload["source_amount"], f"{context}.source_amount", allow_zero=True
     )
-    if _parse_robinhood_amount(source_row.amount, context) != source_amount:
+    source_candidate_amount = _external_cash_candidate_amount(source_row, context)
+    if source_candidate_amount is None or source_candidate_amount != source_amount:
         raise ManifestValidationError(f"{context} amount does not match its evidence CSV row")
     source_amount_sign_basis = _expect_string(
         payload["source_amount_sign_basis"],
@@ -1145,8 +1156,7 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     parsed_candidate_ordinals = {
         ordinal
         for ordinal, row in enumerate(source_rows, start=1)
-        if _parse_robinhood_amount(row.amount, f"evidence source row {ordinal}") != 0
-        and row.transaction_code.strip() not in _NON_CASH_CODES
+        if _external_cash_candidate_amount(row, f"evidence source row {ordinal}") is not None
     }
     event_ordinals = set(ordinals)
     if parsed_candidate_ordinals != event_ordinals:

@@ -307,6 +307,62 @@ def test_inventory_must_disposition_every_parsed_cashflow_candidate(tmp_path: Pa
         )
 
 
+def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> None:
+    events = _events(5)
+    for event, source_code in zip(
+        events,
+        ("ACH", "MTCH", "ACATI", "DRFRO", "CFIR"),
+        strict=True,
+    ):
+        event["source_code"] = source_code
+    database, inventory, csv_path = _inputs(tmp_path, events)
+    non_external_rows = (
+        "02/01/2025,02/01/2025,02/01/2025,,private description,SLIP,,,$7.00\n"
+        "02/02/2025,02/02/2025,02/02/2025,,private description,FEE,,,($2.00)\n"
+        "02/03/2025,02/03/2025,02/03/2025,,private description,GOLD,,,$5.00\n"
+        "02/04/2025,02/04/2025,02/04/2025,,private description,REC,,,--\n"
+    )
+    with csv_path.open("a", encoding="utf-8") as handle:
+        handle.write(non_external_rows)
+    inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
+    inventory_payload["source_document_sha256"] = _sha256(csv_path)
+    inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
+
+    result = builder.build_execution_manifests(
+        database,
+        [inventory],
+        [csv_path],
+        tmp_path / "output",
+    )
+
+    assert result.event_count == 5
+    manifest = json.loads(next((tmp_path / "output").glob("*.json")).read_text())
+    assert manifest["cashflow_candidate_count"] == 5
+    assert manifest["source_row_count"] == 9
+    assert [event["source_code"] for event in manifest["events"]] == [
+        "ACH",
+        "MTCH",
+        "ACATI",
+        "DRFRO",
+        "CFIR",
+    ]
+
+
+def test_nonnumeric_amount_fails_closed_for_supported_external_cash_code(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "invalid-external-amount.csv"
+    csv_path.write_text(
+        "Activity Date,Process Date,Settle Date,Instrument,Description,"
+        "Trans Code,Quantity,Price,Amount\n"
+        "02/01/2025,02/01/2025,02/01/2025,,private description,ACH,,,--\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(builder.BuildError, match="csv_amount_invalid"):
+        builder._parse_csv(csv_path)
+
+
 def test_shifted_provider_date_is_deduplicated_and_recorded(tmp_path: Path) -> None:
     events = _events(1)
     database, inventory, csv_path = _inputs(tmp_path, events)
