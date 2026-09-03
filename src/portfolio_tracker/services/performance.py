@@ -10,17 +10,15 @@ this series is **money-weighted (Modified Dietz)**, NOT a chained daily TWR.
 At each observation date `d` it computes a single-window return-since-start
 with a contribution-weighted denominator:
 
-    return_pct(d) = (V(d) − V_start − Σ_{i: d_i≤d} C_i)
-                    / (V_start + Σ_{i: d_i≤d} C_i · (d − d_i)/(d − d_0))
+    return_pct(d) = (V(d) − V_start − Σ_{i: d_0<d_i≤d} C_i)
+                    / (V_start + Σ_{i: d_0<d_i≤d} C_i · (d − d_i)/(d − d_0))
 
 (see `modified_dietz_series`). `C_i` is an *external* cashflow on day `d_i`
 — deposits, withdrawals, ACATS transfers; trades, dividends, fees, and
 interest are internal events that move V but not the cashflow term. The
 contribution-weighted denominator makes the % sensitive to cashflow timing
-on a heavy-contribution book — which is exactly why the dollar-legible
-`position_alpha` engine is canonical for the headline; this series is kept
-for the /performance endpoint (consumed by the companion earnings-summary
-project) and as the matched-flow benchmark source for the Risk Metrics card.
+on a heavy-contribution book. This whole-portfolio series is the canonical
+headline comparison; position-level results are supporting attribution.
 
 Two-stage construction:
 
@@ -177,11 +175,12 @@ def compute_performance_series(
     Modified Dietz return at every observation date:
 
         return_pct(d) = (V(d) - V_start - cumulative_C(d))
-                        / (V_start + sum_{i: d_i<=d} C_i * (d-d_i)/(d-d_0))
+                        / (V_start + sum_{i: d_0<d_i<=d} C_i * (d-d_i)/(d-d_0))
 
-    Both portfolio and benchmark series share the SAME denominator on each
-    day, so even when V_start is unreliable (transaction-walk reconstruction
-    misses cash), the GAP between the lines is the true relative performance.
+    Both portfolio and benchmark series share the SAME denominator and dated
+    external-flow set on each day, so percentage-point and dollar differences
+    reconcile. Any warning about reconstructed V_start still applies to both
+    the absolute returns and their comparison.
 
     `reserve_amount` carves a fixed dollar amount off the top of both the
     actual portfolio's V and the synthetic-benchmark starting capital. The
@@ -239,6 +238,11 @@ def compute_performance_series(
             )
             for d, c in internal_flows.items():
                 daily_cashflow[d] = daily_cashflow.get(d, Decimal(0)) + c
+
+    # The opening value is end-of-day, so activity on that date is already
+    # represented in V_start. Keep one canonical (start, end] flow set for
+    # the portfolio return, synthetic books, and reported four-part bridge.
+    daily_cashflow = _cashflows_within_valuation_period(sorted_dates, daily_cashflow)
 
     # Reserve adjustment: shift V_start, V[d], and synthetic bases down by
     # `reserve_amount`. The cashflow series is left intact. Clamp to zero
@@ -602,9 +606,10 @@ def _policy_matched_value(
     """Synthetic value of a multi-ticker policy portfolio over time.
 
     Same logic as `_money_flow_matched_value` but for a basket: every
-    purchase (initial + each cashflow) is split across the policy tickers
-    in their target weights. Each lot is valued at today's prices for
-    every component.
+    purchase (initial + each cashflow after the end-of-day opening value)
+    is split across the policy tickers in their target weights. Cashflow
+    dates need not also be displayed valuation dates. Each lot is valued
+    at today's prices for every component.
 
     Missing-data handling: when a policy ticker has no benchmark price on
     the deployment date, we **renormalize** the remaining weights so the
@@ -631,20 +636,23 @@ def _policy_matched_value(
     if not initial_lot:
         return {}
     lots: list[dict[str, Decimal]] = [initial_lot]
+    cashflow_events = sorted(
+        _cashflows_within_valuation_period(sorted_dates, daily_cashflow).items()
+    )
+    cashflow_index = 0
 
     out: dict[date, Decimal] = {}
     for current_date in sorted_dates:
-        # base_value is an end-of-day opening value, so a start-date flow is
-        # already embedded in it. Only later flows create benchmark lots.
-        cf = (
-            daily_cashflow.get(current_date, Decimal(0))
-            if current_date > start_date
-            else Decimal(0)
-        )
-        if cf != 0:
-            cf_lot = _build_lot_renormalized(cf, weights, benchmark_series, current_date)
-            if cf_lot:
-                lots.append(cf_lot)
+        while (
+            cashflow_index < len(cashflow_events)
+            and cashflow_events[cashflow_index][0] <= current_date
+        ):
+            cashflow_date, cf = cashflow_events[cashflow_index]
+            cf_lot = _build_lot_renormalized(cf, weights, benchmark_series, cashflow_date)
+            if not cf_lot:
+                return {}
+            lots.append(cf_lot)
+            cashflow_index += 1
 
         # Value all lots at today's prices for every component.
         total = Decimal(0)
@@ -698,9 +706,10 @@ def _money_flow_matched_value(
     benchmark_closes: dict[date, Decimal],
 ) -> dict[date, Decimal]:
     """Build a synthetic value series: V_start invested in the benchmark at
-    `sorted_dates[0]`, plus each daily cashflow `cf` invested in the
-    benchmark at that day's close, all valued at the benchmark's close on
-    each day in `sorted_dates`.
+    `sorted_dates[0]`, plus each subsequent daily cashflow `cf` invested in
+    the benchmark at that day's close, all valued at the benchmark's close
+    on each day in `sorted_dates`. A cashflow date does not need to be a
+    displayed valuation date.
 
     Returns an empty dict when the benchmark series doesn't cover the start
     (we can't anchor the synthetic portfolio without a base price).
@@ -721,26 +730,50 @@ def _money_flow_matched_value(
     # purchased at the lot's date. Today's value = sum(qty * price_today).
     initial_shares = base_value / base_price
     lots: list[tuple[date, Decimal]] = [(start_date, initial_shares)]
+    cashflow_events = sorted(
+        _cashflows_within_valuation_period(sorted_dates, daily_cashflow).items()
+    )
+    cashflow_index = 0
 
     out: dict[date, Decimal] = {}
     for current_date in sorted_dates:
-        # base_value is an end-of-day opening value, so a start-date flow is
-        # already embedded in it. Only later flows create benchmark lots.
-        cf = (
-            daily_cashflow.get(current_date, Decimal(0))
-            if current_date > start_date
-            else Decimal(0)
-        )
-        if cf != 0:
-            cf_price = _last_known_price_within(benchmark_closes, current_date, days=14)
-            if cf_price is not None:
-                lots.append((current_date, cf / cf_price))
+        while (
+            cashflow_index < len(cashflow_events)
+            and cashflow_events[cashflow_index][0] <= current_date
+        ):
+            cashflow_date, cf = cashflow_events[cashflow_index]
+            cf_price = _last_known_price_within(benchmark_closes, cashflow_date, days=14)
+            if cf_price is None:
+                return {}
+            lots.append((cashflow_date, cf / cf_price))
+            cashflow_index += 1
         price_today = _last_known_price_within(benchmark_closes, current_date, days=14)
         if price_today is None:
             continue
         total_shares = sum((qty for _, qty in lots), Decimal(0))
         out[current_date] = total_shares * price_today
     return out
+
+
+def _cashflows_within_valuation_period(
+    sorted_dates: list[date], daily_cashflow: dict[date, Decimal]
+) -> dict[date, Decimal]:
+    """Return the canonical end-of-day cashflow set for a valuation window.
+
+    The first value is an end-of-day opening balance, so same-day flows are
+    already inside it. The ending value includes activity through its date.
+    Restricting once to ``(first valuation date, last valuation date]`` keeps
+    the actual return, benchmark lot walks, and reported net flow reconciled.
+    """
+    if not sorted_dates:
+        return {}
+    first_date = sorted_dates[0]
+    last_date = sorted_dates[-1]
+    return {
+        flow_date: amount
+        for flow_date, amount in daily_cashflow.items()
+        if first_date < flow_date <= last_date and amount != 0
+    }
 
 
 def modified_dietz_series(

@@ -25,6 +25,7 @@ from portfolio_tracker.models import (
     Security,
     StockSplit,
 )
+from portfolio_tracker.services import performance as performance_service
 from portfolio_tracker.services.performance import (
     _backfill_values_from_transactions,
     _modified_dietz_series,
@@ -138,6 +139,151 @@ def test_policy_match_does_not_double_count_start_date_cashflow():
     )
     assert out[d0] == Decimal(1000)
     assert out[d10] == Decimal(1100)
+
+
+# ---------------------------------------------------------------------------
+# Cash-flow-matched benchmark books
+# ---------------------------------------------------------------------------
+
+
+def test_money_flow_matched_value_invests_flow_between_observation_dates():
+    start = date(2025, 1, 1)
+    flow_date = date(2025, 1, 2)
+    end = date(2025, 1, 3)
+
+    out = _money_flow_matched_value(
+        [start, end],
+        Decimal(1000),
+        {flow_date: Decimal(550)},
+        {
+            start: Decimal(100),
+            flow_date: Decimal(110),
+            end: Decimal(121),
+        },
+    )
+
+    # Initial capital buys 10 shares; the intervening flow buys 5 shares.
+    assert out[end] == Decimal(1815)
+
+
+def test_policy_matched_value_invests_flow_between_observation_dates():
+    start = date(2025, 1, 1)
+    flow_date = date(2025, 1, 2)
+    end = date(2025, 1, 3)
+
+    out = _policy_matched_value(
+        [start, end],
+        Decimal(1000),
+        {flow_date: Decimal(550)},
+        {
+            "SPY": {
+                start: Decimal(100),
+                flow_date: Decimal(110),
+                end: Decimal(121),
+            }
+        },
+        {"SPY": Decimal(1)},
+    )
+
+    assert out[end] == Decimal(1815)
+
+
+def test_money_flow_matched_value_excludes_start_flow_and_includes_end_flow():
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 3)
+
+    out = _money_flow_matched_value(
+        [start, end],
+        Decimal(1000),
+        {
+            start: Decimal(500),
+            end: Decimal(-200),
+        },
+        {
+            start: Decimal(100),
+            end: Decimal(120),
+        },
+    )
+
+    # The opening value already contains start-date activity. The end-date
+    # withdrawal is part of (start, end] and sells benchmark shares at close.
+    assert out[start] == Decimal(1000)
+    assert out[end] == Decimal(1000)
+
+
+def test_policy_matched_value_excludes_start_flow_and_includes_end_flow():
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 3)
+
+    out = _policy_matched_value(
+        [start, end],
+        Decimal(1000),
+        {
+            start: Decimal(500),
+            end: Decimal(-200),
+        },
+        {"SPY": {start: Decimal(100), end: Decimal(120)}},
+        {"SPY": Decimal(1)},
+    )
+
+    assert out[start] == Decimal(1000)
+    assert out[end] == Decimal(1000)
+
+
+def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
+    start = date(2025, 1, 1)
+    flow_date = date(2025, 1, 2)
+    end = date(2025, 1, 3)
+    after_end = date(2025, 1, 4)
+
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value",
+        lambda *_args: {start: Decimal(1000), end: Decimal(1300)},
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_external_cashflow_assessment",
+        lambda *_args: performance_service._CashflowAssessment(
+            cashflows={
+                start: Decimal(50),
+                flow_date: Decimal(200),
+                end: Decimal(-100),
+                after_end: Decimal(900),
+            },
+            calculation_reason_codes=(),
+        ),
+    )
+    closes = {
+        start: Decimal(100),
+        flow_date: Decimal(100),
+        end: Decimal(100),
+    }
+    monkeypatch.setattr(
+        performance_service,
+        "_benchmark_series",
+        lambda *_args: {"SPY": closes, "QQQ": closes},
+    )
+    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
+    monkeypatch.setattr(
+        performance_service,
+        "_earliest_observed_date",
+        lambda *_args: start,
+    )
+
+    series = performance_service.compute_performance_series(session, start, end)
+    final = series.points[-1]
+
+    # Opening-date and post-ending-date flows are outside the end-of-day
+    # window. The same +$100 net flow feeds the bridge and both flat-price
+    # benchmark books, whose investment gain is therefore exactly zero.
+    assert series.net_external_cashflow_in == Decimal(100)
+    assert final.portfolio_value == Decimal(1300)
+    assert final.spy_equivalent_value == Decimal(1100)
+    assert final.qqq_equivalent_value == Decimal(1100)
+    assert final.spy_return_pct == Decimal(0)
+    assert final.qqq_return_pct == Decimal(0)
+    assert final.portfolio_return_pct == (Decimal(200) / Decimal(1100)) * Decimal(100)
 
 
 # ---------------------------------------------------------------------------
