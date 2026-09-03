@@ -10,12 +10,13 @@ Three documented bug-prone areas:
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
     Benchmark,
+    CashFlowSourceAttestation,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -57,6 +58,23 @@ def _tx(
         subtype=subtype,
         security_id=security_id,
         name=name,
+    )
+
+
+def _approve_source_coverage(session, account: Account, start: date, end: date) -> None:
+    session.add(
+        CashFlowSourceAttestation(
+            attestation_key=f"synthetic-performance-{account.account_id}-{start}-{end}",
+            account_id=account.account_id,
+            coverage_start=start + timedelta(days=1),
+            coverage_end=end,
+            source_type="provider_export",
+            source_reference="synthetic:performance-test",
+            source_sha256="a" * 64,
+            captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+            approved_at=datetime(2026, 1, 2, tzinfo=UTC),
+            methodology_version="1",
+        )
     )
 
 
@@ -849,6 +867,7 @@ def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(cl
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
+    _approve_source_coverage(session, account, start, end)
     session.commit()
 
     result = compute_performance_series(session, start, end)
@@ -928,6 +947,7 @@ def test_whole_account_performance_uses_priceable_share_transfer_cashflow(sessio
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
+    _approve_source_coverage(session, account, start, end)
     session.commit()
 
     result = compute_performance_series(session, start, end)
@@ -979,6 +999,7 @@ def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session
             Benchmark(symbol="QQQ", date=end, close=Decimal(100)),
         ]
     )
+    _approve_source_coverage(session, account, start, end)
     session.commit()
 
     result = compute_performance_series(session, start, end)

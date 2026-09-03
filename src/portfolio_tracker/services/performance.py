@@ -65,6 +65,10 @@ from portfolio_tracker.schemas import (
 )
 from portfolio_tracker.services import external_flow_ledger
 from portfolio_tracker.services.active_items import valued_account_ids
+from portfolio_tracker.services.cashflow_source_coverage import (
+    assess_cashflow_source_coverage,
+    source_coverage_out,
+)
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -97,6 +101,7 @@ _POLICY_BENCHMARK_PRICE_UNAVAILABLE = "policy_benchmark_price_unavailable"
 # ingestion delays without accepting an old mark as current. Every displayed
 # valuation date and every dated flow deployment must resolve inside it.
 BENCHMARK_PRICE_MAX_AGE_DAYS = 14
+_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE = "external_flow_source_coverage_incomplete"
 
 
 @dataclass(frozen=True)
@@ -241,15 +246,27 @@ def compute_performance_series(
     and add them to the cashflow series used for both Modified Dietz on
     V_active and for the synthetic benchmarks.
     """
+    account_ids = valued_account_ids(session)
+    source_coverage = assess_cashflow_source_coverage(
+        session,
+        start_date,
+        end_date,
+        account_ids=account_ids,
+    )
+    source_coverage_read = source_coverage_out(source_coverage)
     value_assessment = _daily_portfolio_value_assessment(session, start_date, end_date)
     daily_value = value_assessment.values
     if not daily_value:
-        no_value_reasons = list(value_assessment.calculation_reason_codes) or [_NO_PORTFOLIO_VALUES]
+        no_value_reasons = set(value_assessment.calculation_reason_codes) or {
+            _NO_PORTFOLIO_VALUES
+        }
+        if not source_coverage.is_complete:
+            no_value_reasons.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
         return PerformanceSeries(
             methodology="performance.modified_dietz",
             methodology_version="2",
             calculation_status="unavailable",
-            calculation_reason_codes=no_value_reasons,
+            calculation_reason_codes=sorted(no_value_reasons),
             start_date=start_date,
             end_date=end_date,
             base_value=Decimal(0),
@@ -260,6 +277,7 @@ def compute_performance_series(
             valuation_account_ids=list(value_assessment.valuation_account_ids),
             points=[],
             equation_receipt=None,
+            source_coverage=source_coverage_read,
         )
 
     boundary_reason_codes = set(value_assessment.calculation_reason_codes)
@@ -267,6 +285,8 @@ def compute_performance_series(
         boundary_reason_codes.add(_PORTFOLIO_START_VALUE_UNAVAILABLE)
     if end_date not in daily_value:
         boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
+    if not source_coverage.is_complete:
+        boundary_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
     if boundary_reason_codes:
         return PerformanceSeries(
             methodology="performance.modified_dietz",
@@ -299,6 +319,7 @@ def compute_performance_series(
             ending_value_provenance=value_assessment.provenance.get(end_date),
             valuation_account_ids=list(value_assessment.valuation_account_ids),
             equation_receipt=None,
+            source_coverage=source_coverage_read,
         )
 
     valuation_reason_codes = set(value_assessment.calculation_reason_codes)
@@ -373,6 +394,8 @@ def compute_performance_series(
     required_policy_tickers = {ticker for ticker, weight in policy_weights.items() if weight > 0}
     if required_policy_tickers and set(policy_price_inputs) != required_policy_tickers:
         calculation_reason_codes.add(_POLICY_BENCHMARK_PRICE_UNAVAILABLE)
+    if not source_coverage.is_complete:
+        calculation_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
     if not calculation_reason_codes and not modified_dietz_denominators_are_positive(
         sorted_dates, daily_cashflow, base_value_adj
     ):
@@ -426,6 +449,7 @@ def compute_performance_series(
             points=points,
             earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
             net_external_cashflow_in=None,
+            source_coverage=source_coverage_read,
             backfill_start_unreliable=(
                 opening_provenance != _OBSERVED_VALUE
                 or _is_start_value_unreliable(base_value, end_value)
@@ -514,6 +538,7 @@ def compute_performance_series(
         points=points,
         earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
+        source_coverage=source_coverage_read,
         backfill_start_unreliable=(
             opening_provenance != _OBSERVED_VALUE
             or _is_start_value_unreliable(base_value, end_value)

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
     Benchmark,
+    CashFlowSourceAttestation,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -106,6 +107,18 @@ def test_drawdown_propagates_unpriceable_external_share_transfer(session):
             Benchmark(symbol="SPY", date=_END, close=Decimal(100)),
             Benchmark(symbol="QQQ", date=_START, close=Decimal(100)),
             Benchmark(symbol="QQQ", date=_END, close=Decimal(100)),
+            CashFlowSourceAttestation(
+                attestation_key="synthetic-drawdown-source",
+                account_id=account.account_id,
+                coverage_start=date(2025, 1, 2),
+                coverage_end=_END,
+                source_type="provider_export",
+                source_reference="synthetic:drawdown-test",
+                source_sha256="e" * 64,
+                captured_at=datetime(2025, 2, 1, tzinfo=UTC),
+                approved_at=datetime(2025, 2, 2, tzinfo=UTC),
+                methodology_version="1",
+            ),
         ]
     )
     session.commit()

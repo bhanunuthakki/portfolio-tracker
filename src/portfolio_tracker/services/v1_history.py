@@ -29,7 +29,12 @@ from portfolio_tracker.models import (
     Security,
     SecurityClassification,
 )
+from portfolio_tracker.schemas import CashFlowSourceCoverageOut
 from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
+from portfolio_tracker.services.cashflow_source_coverage import (
+    assess_cashflow_source_coverage,
+    source_coverage_out,
+)
 from portfolio_tracker.services.external_flow_ledger import (
     build_external_flow_ledger,
     effective_classification,
@@ -292,6 +297,11 @@ class CashFlowsV1Result(BaseModel):
     include_internal: bool
     cash_flows: list[CashFlowV1]
     net_external_cashflow_in: Decimal | None
+    # Structural validity answers whether stored rows can be classified and
+    # valued. Source coverage separately proves authoritative history was
+    # reconciled for every valued account and requested date.
+    structural_is_complete: bool
+    source_coverage: CashFlowSourceCoverageOut
     is_complete: bool
     issues: list[CashFlowIssueV1]
     next_cursor: str | None
@@ -319,6 +329,13 @@ def build_cash_flows_page(
         included_account_ids=accts,
         generated_at=generated_at,
     )
+    source_coverage = assess_cashflow_source_coverage(
+        session,
+        start,
+        end,
+        account_ids=accts,
+    )
+    source_coverage_read = source_coverage_out(source_coverage)
     if not accts:
         return CashFlowsV1Result(
             meta=meta,
@@ -327,6 +344,8 @@ def build_cash_flows_page(
             include_internal=include_internal,
             cash_flows=[],
             net_external_cashflow_in=Decimal(0),
+            structural_is_complete=True,
+            source_coverage=source_coverage_read,
             is_complete=True,
             issues=[],
             next_cursor=None,
@@ -380,14 +399,18 @@ def build_cash_flows_page(
     if len(eligible) > limit:
         last = page[-1]
         next_cursor = _encode_cursor(last.date.isoformat(), last.flow_id)
+    structural_is_complete = not ledger.issues
+    is_complete = structural_is_complete and source_coverage.is_complete
     return CashFlowsV1Result(
         meta=meta,
         start_date=start,
         end_date=end,
         include_internal=include_internal,
         cash_flows=out,
-        net_external_cashflow_in=(ledger.net_external_cashflow_in if not ledger.issues else None),
-        is_complete=not ledger.issues,
+        net_external_cashflow_in=(ledger.net_external_cashflow_in if is_complete else None),
+        structural_is_complete=structural_is_complete,
+        source_coverage=source_coverage_read,
+        is_complete=is_complete,
         issues=[
             CashFlowIssueV1(
                 code=issue.code,

@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
+    CashFlowSourceAttestation,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -92,6 +93,20 @@ def _seed(session):
             quantity=Decimal(10),
             institution_value=Decimal(1000),
             cost_basis=Decimal(900),
+        )
+    )
+    session.add(
+        CashFlowSourceAttestation(
+            attestation_key="synthetic-v1-history",
+            account_id=acct.account_id,
+            coverage_start=_TODAY - timedelta(days=729),
+            coverage_end=_TODAY,
+            source_type="provider_export",
+            source_reference="synthetic:v1-history",
+            source_sha256="b" * 64,
+            captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+            approved_at=datetime(2026, 1, 2, tzinfo=UTC),
+            methodology_version="1",
         )
     )
     session.commit()

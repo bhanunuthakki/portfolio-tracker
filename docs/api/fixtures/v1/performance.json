@@ -4109,6 +4109,111 @@
         "spy_return_pct": "8.000951927351443010806596661"
       }
     ],
+    "source_coverage": {
+      "accounts": [
+        {
+          "account_id": 1,
+          "attestation_keys": [
+            "fixture-source-coverage-1"
+          ],
+          "covered_ranges": [
+            {
+              "end_date": "2026-07-23",
+              "start_date": "2025-07-24"
+            }
+          ],
+          "status": "complete",
+          "uncovered_ranges": []
+        },
+        {
+          "account_id": 2,
+          "attestation_keys": [
+            "fixture-source-coverage-2"
+          ],
+          "covered_ranges": [
+            {
+              "end_date": "2026-07-23",
+              "start_date": "2025-07-24"
+            }
+          ],
+          "status": "complete",
+          "uncovered_ranges": []
+        },
+        {
+          "account_id": 3,
+          "attestation_keys": [
+            "fixture-source-coverage-3"
+          ],
+          "covered_ranges": [
+            {
+              "end_date": "2026-07-23",
+              "start_date": "2025-07-24"
+            }
+          ],
+          "status": "complete",
+          "uncovered_ranges": []
+        }
+      ],
+      "attestations": [
+        {
+          "account_id": 1,
+          "approved_at": "2026-07-22T12:00:00",
+          "attestation_key": "fixture-source-coverage-1",
+          "captured_at": "2026-07-22T12:00:00",
+          "coverage_end": "2026-07-23",
+          "coverage_start": "2024-07-24",
+          "gaps": [],
+          "lifecycle_status": "approved",
+          "methodology_version": "1",
+          "source_reference": "synthetic:fixture-export-1",
+          "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "source_type": "provider_export",
+          "superseded_at": null,
+          "superseded_by_attestation_key": null,
+          "validation_reason_codes": []
+        },
+        {
+          "account_id": 2,
+          "approved_at": "2026-07-22T12:00:00",
+          "attestation_key": "fixture-source-coverage-2",
+          "captured_at": "2026-07-22T12:00:00",
+          "coverage_end": "2026-07-23",
+          "coverage_start": "2024-07-24",
+          "gaps": [],
+          "lifecycle_status": "approved",
+          "methodology_version": "1",
+          "source_reference": "synthetic:fixture-export-2",
+          "source_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "source_type": "provider_export",
+          "superseded_at": null,
+          "superseded_by_attestation_key": null,
+          "validation_reason_codes": []
+        },
+        {
+          "account_id": 3,
+          "approved_at": "2026-07-22T12:00:00",
+          "attestation_key": "fixture-source-coverage-3",
+          "captured_at": "2026-07-22T12:00:00",
+          "coverage_end": "2026-07-23",
+          "coverage_start": "2024-07-24",
+          "gaps": [],
+          "lifecycle_status": "approved",
+          "methodology_version": "1",
+          "source_reference": "synthetic:fixture-export-3",
+          "source_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "source_type": "provider_export",
+          "superseded_at": null,
+          "superseded_by_attestation_key": null,
+          "validation_reason_codes": []
+        }
+      ],
+      "is_complete": true,
+      "requested_end_date": "2026-07-23",
+      "requested_start_date": "2025-07-23",
+      "required_end_date": "2026-07-23",
+      "required_start_date": "2025-07-24",
+      "status": "complete"
+    },
     "start_date": "2025-07-23"
   }
 }

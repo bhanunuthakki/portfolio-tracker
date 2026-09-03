@@ -35,12 +35,12 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/portfolio-snapshot` | Bulk consumer read model: accounts + consolidated positions + five-way tax-bucket totals + equity fraction, one consistent read |
 | `GET /api/v1/portfolio/positions` | Consolidated positions with per-lot tax treatment (see `positions-v1.md`) |
 | `GET /api/v1/transactions` | Cursor-paginated normalized transactions with override + effective TWR classification (default window 730 days) |
-| `GET /api/v1/cash-flows` | Canonical whole-portfolio flow ledger for `(start, end]`: owner override → name rule → subtype rule, plus priced unmatched share transfers (`cash_flow.twr_classification` v2) |
+| `GET /api/v1/cash-flows` | Canonical whole-portfolio flow ledger for `(start, end]`: owner override → name rule → subtype rule, plus priced unmatched share transfers; reports structural validity separately from approved source-history coverage (`cash_flow.twr_classification` v2) |
 | `GET /api/v1/position-snapshots` | Historical observed holdings rows with `origin` markers (`broker` vs `manual` gap-fill); default window 90 days |
 | `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
-| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); exact requested opening/ending valuations and positive benchmark marks no more than 14 calendar days old are required at every displayed and flow-deployment date |
+| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields unless exact requested opening/ending valuations, approved source evidence for every valued account over `(start, end]`, priceable external flows, and positive benchmark marks no more than 14 calendar days old are all available |
 | `GET /api/v1/analytics/position-performance` | Split-normalized invested-position price/trade return and per-ticker dollar alpha vs cash-flow-matched price-return counterfactuals (`position_alpha.split_normalized_price_trade_modified_dietz` v3); derived fields are null with stable reason codes when share movements or price provenance cannot be reconciled |
 | `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v2); drawdown fails closed with the performance reason codes when its return index is unavailable |
 | `GET /api/v1/analytics/beta` | The regression half of `risk` alone — for consumers that don't need drawdown |
@@ -102,10 +102,26 @@ cursor returns the structured `INVALID_CURSOR` error (below).
 For `cash-flows`, `net_external_cashflow_in` always describes the complete
 requested window, not the current page. The ledger uses the same valued-account
 universe as performance and exposes provider, rule, component transaction, and
-historical-price provenance. If an unmatched share transfer cannot be priced
-from a close on or within 14 days before the event, `is_complete=false`, the
-window total is null, and `issues` carries `share_transfer_price_unavailable`;
-performance fails closed over that window instead of silently dropping value.
+historical-price provenance. `structural_is_complete` says whether the stored
+rows can be classified and valued. `source_coverage` separately reports whether
+every valued account has current, owner-approved evidence for every date in the
+end-of-day flow window `(start, end]`, including evidence reference/hash,
+capture and approval times, supersession, and explicit gaps. `is_complete` is
+true only when both checks pass; absence of ledger issues never implies source
+coverage. Draft, superseded, malformed, partial, or missing attestations do not
+count. When either check fails, the window total is null and performance returns
+unavailable with a stable reason such as
+`external_flow_source_coverage_incomplete` or
+`external_share_movement_price_unavailable`.
+
+Migration `0025` creates empty attestation tables deliberately. It does not
+infer historical coverage from the rows already stored. Recording or replacing
+an attestation is an operator-controlled reconciliation write that requires the
+private source artifact, its SHA-256 digest, the exact account/date scope, and
+owner approval.
+Approved evidence is retained through append-only supersession. Accounts with
+attestations cannot be hard-deleted until an explicit evidence-retention action
+is taken; database backup and restore remain the recovery boundary.
 
 ### Deprecation headers
 

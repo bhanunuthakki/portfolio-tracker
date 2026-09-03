@@ -558,6 +558,118 @@ class TransactionOverride(Base):
     )
 
 
+class CashFlowSourceType(StrEnum):
+    """Authoritative evidence used to reconcile an account's flow history."""
+
+    BROKERAGE_STATEMENT = "brokerage_statement"
+    PROVIDER_EXPORT = "provider_export"
+    OWNER_RECONCILIATION = "owner_reconciliation"
+
+
+class CashFlowSourceGapReason(StrEnum):
+    """Why a source attestation does not cover part of its declared range."""
+
+    PROVIDER_HISTORY_UNAVAILABLE = "provider_history_unavailable"
+    STATEMENT_MISSING = "statement_missing"
+    UNRESOLVED_CLASSIFICATION = "unresolved_classification"
+    UNRECONCILED_DIFFERENCE = "unreconciled_difference"
+
+
+class CashFlowSourceAttestation(Base):
+    """Owner-approved evidence that reconciles one account over a date range.
+
+    Coverage dates are inclusive source-history dates. Performance uses an
+    end-of-day opening value, so a requested ``[start, end]`` return requires
+    attested flow-source coverage over ``[start + 1 day, end]``.
+
+    ``source_reference`` identifies the private evidence without storing it;
+    ``source_sha256`` makes later replacement detectable. A row counts only
+    after approval and only while it has not been superseded. Corrections are
+    append-only: insert the replacement, then link the old row to it.
+    """
+
+    __tablename__ = "cashflow_source_attestations"
+    __table_args__ = (
+        CheckConstraint(
+            "coverage_start <= coverage_end",
+            name="ck_cashflow_source_attestations_date_order",
+        ),
+        CheckConstraint(
+            "source_type IN ('brokerage_statement', 'provider_export', 'owner_reconciliation')",
+            name="ck_cashflow_source_attestations_source_type",
+        ),
+        CheckConstraint(
+            "length(source_sha256) = 64",
+            name="ck_cashflow_source_attestations_sha256_length",
+        ),
+        CheckConstraint(
+            "approved_at IS NULL OR approved_at >= captured_at",
+            name="ck_cashflow_source_attestations_approval_order",
+        ),
+        CheckConstraint(
+            "(superseded_at IS NULL AND superseded_by_attestation_id IS NULL) OR "
+            "(superseded_at IS NOT NULL AND superseded_by_attestation_id IS NOT NULL)",
+            name="ck_cashflow_source_attestations_supersession_pair",
+        ),
+        Index(
+            "ix_cashflow_source_attestations_account_dates",
+            "account_id",
+            "coverage_start",
+            "coverage_end",
+        ),
+    )
+
+    attestation_id: Mapped[int] = mapped_column(primary_key=True)
+    attestation_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.account_id", ondelete="RESTRICT"), nullable=False
+    )
+    coverage_start: Mapped[date] = mapped_column(Date, nullable=False)
+    coverage_end: Mapped[date] = mapped_column(Date, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_reference: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    methodology_version: Mapped[str] = mapped_column(String(16), nullable=False, default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    superseded_by_attestation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("cashflow_source_attestations.attestation_id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+
+
+class CashFlowSourceGap(Base):
+    """An explicitly unresolved interval inside one source attestation."""
+
+    __tablename__ = "cashflow_source_gaps"
+    __table_args__ = (
+        CheckConstraint(
+            "gap_start <= gap_end",
+            name="ck_cashflow_source_gaps_date_order",
+        ),
+        CheckConstraint(
+            "reason_code IN "
+            "('provider_history_unavailable', 'statement_missing', "
+            "'unresolved_classification', 'unreconciled_difference')",
+            name="ck_cashflow_source_gaps_reason_code",
+        ),
+        Index("ix_cashflow_source_gaps_attestation", "attestation_id"),
+    )
+
+    gap_id: Mapped[int] = mapped_column(primary_key=True)
+    attestation_id: Mapped[int] = mapped_column(
+        ForeignKey("cashflow_source_attestations.attestation_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    gap_start: Mapped[date] = mapped_column(Date, nullable=False)
+    gap_end: Mapped[date] = mapped_column(Date, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(48), nullable=False)
+
+
 class TickerOverride(Base):
     """User-supplied ticker symbol for a security Plaid returned without one.
 

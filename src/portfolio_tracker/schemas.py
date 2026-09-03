@@ -173,6 +173,54 @@ class PerformancePoint(BaseModel):
     policy_equivalent_value: Decimal | None
 
 
+class SourceCoverageRangeOut(BaseModel):
+    start_date: date
+    end_date: date
+
+
+class CashFlowSourceGapOut(BaseModel):
+    start_date: date
+    end_date: date
+    reason_code: str
+
+
+class CashFlowSourceAttestationOut(BaseModel):
+    attestation_key: str
+    account_id: int
+    coverage_start: date
+    coverage_end: date
+    source_type: str
+    source_reference: str
+    source_sha256: str
+    captured_at: datetime
+    approved_at: datetime | None
+    lifecycle_status: str
+    superseded_at: datetime | None
+    superseded_by_attestation_key: str | None
+    methodology_version: str
+    gaps: list[CashFlowSourceGapOut]
+    validation_reason_codes: list[str]
+
+
+class CashFlowAccountSourceCoverageOut(BaseModel):
+    account_id: int
+    status: str
+    covered_ranges: list[SourceCoverageRangeOut]
+    uncovered_ranges: list[SourceCoverageRangeOut]
+    attestation_keys: list[str]
+
+
+class CashFlowSourceCoverageOut(BaseModel):
+    status: str
+    is_complete: bool
+    requested_start_date: date
+    requested_end_date: date
+    required_start_date: date | None
+    required_end_date: date | None
+    accounts: list[CashFlowAccountSourceCoverageOut]
+    attestations: list[CashFlowSourceAttestationOut]
+
+
 class PerformanceDatedCashflow(BaseModel):
     """One net external flow used by the whole-portfolio return window."""
 
@@ -264,6 +312,9 @@ class PerformanceSeries(BaseModel):
     # Net external cashflow into the portfolio over the window (positive = in).
     # Surfaced so the UI can show contributions alongside total return.
     net_external_cashflow_in: Decimal | None
+    # Separate from structural ledger validity: approved source evidence must
+    # cover every valued account over the exact (start, end] flow window.
+    source_coverage: CashFlowSourceCoverageOut
     # Whether the start value is suspiciously low vs the end value (suggests
     # the backfill is missing pre-existing positions). Frontend renders a
     # warning when true.

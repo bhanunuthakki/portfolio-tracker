@@ -48,6 +48,7 @@ from portfolio_tracker.models import (
     Account,
     Base,
     Benchmark,
+    CashFlowSourceAttestation,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -131,6 +132,21 @@ def _seed(
     )
     session.add_all([roth, hsa, brokerage, retired])
     session.flush()
+    for index, account in enumerate((roth, hsa, brokerage), start=1):
+        session.add(
+            CashFlowSourceAttestation(
+                attestation_key=f"fixture-source-coverage-{index}",
+                account_id=account.account_id,
+                coverage_start=FIXTURE_TODAY - timedelta(days=729),
+                coverage_end=FIXTURE_TODAY,
+                source_type="provider_export",
+                source_reference=f"synthetic:fixture-export-{index}",
+                source_sha256=str(index) * 64,
+                captured_at=_SYNC_AT,
+                approved_at=_SYNC_AT,
+                methodology_version="1",
+            )
+        )
 
     stock_a = Security(plaid_security_id="fx-s1", ticker="AAAA", name="Alpha Corp", type="cs")
     stock_b = Security(plaid_security_id="fx-s2", ticker="BBBB", name="Beta Corp", type="cs")
