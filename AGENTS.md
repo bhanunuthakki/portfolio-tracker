@@ -1,10 +1,10 @@
 # Portfolio Tracker — Project Rulebook
 
-Layers on the runtime's global `AGENTS.md`; it does NOT repeat global rules (safety, TDD, Deep Modules, code standards, pre-push order). Only repo-specific facts live here.
+Layers on the runtime's global safety, authority, and procedure contract. Only repo-specific facts live here.
 
 ## What this is
 
-Self-hosted, **single-user** personal investment tracker. Pulls holdings + transactions from Plaid and SnapTrade, snapshots daily, computes Modified-Dietz returns and risk metrics vs benchmarks, journals trades, and runs a deterministic CIO coaching panel. Runs entirely on localhost — no multi-tenant auth, no cloud except the aggregators + yfinance/Gmail. (This is why the Hardening Fleet caps at L1 here unless explicitly opted up.)
+Self-hosted, **single-user** personal investment tracker. Pulls holdings + transactions from Plaid and SnapTrade, snapshots daily, computes Modified-Dietz returns and risk metrics vs benchmarks, journals trades, and runs a deterministic CIO coaching panel. Runs entirely on localhost — no multi-tenant auth, no cloud except the aggregators + yfinance/Gmail. This profile rules out unrequested commercial scaffolding; hardening maturity still follows the durability and exposure of the actual state and operations.
 
 ## Layout & run
 
@@ -23,19 +23,20 @@ Self-hosted, **single-user** personal investment tracker. Pulls holdings + trans
 
 ## Toolchain (read from `pyproject.toml` / `frontend/package.json`)
 
-Pre-push, in order (global order applies):
+Repository validation before a push or release:
 1. `ruff format src` then `ruff check --fix src` — lint config `select`s E/F/I/N/UP/B/A/RET/SIM/RUF; RUF001-003 + E501 ignored (typographic symbols ×, −, σ are intentional).
 2. `pyright` — **strict** mode, resolves deps from the root `.venv` (`venvPath="."`, `venv=".venv"`); pass `--pythonpath <interp>` from a worktree where `.venv` is absent.
-3. `pytest` — `testpaths=["tests"]`, `pythonpath=["src"]` (the `tests/` dir is not yet created).
+3. `pytest` — `testpaths=["tests"]`, `pythonpath=["src"]`; keep external boundaries offline or faked.
 4. `cd frontend && npm run typecheck && npm run build` (typecheck = `tsc --noEmit` over both tsconfigs).
+5. `bash scripts/check_public_tree.sh` — the configured pre-push hook; it guards the public tree and does not replace the language-specific checks above.
 
 ## Vocabulary
 
 `DEFINITIONS.md` (repo root) is authoritative — use its terms verbatim (Positioning, Asset type, Sector, Region, Tax treatment, Classification, Concentration, Correlation/beta). Propose an addition there before coining any new domain term.
 
-## Secret & data files — never commit, never log (global Safety Rules 1, 3, 4)
+## Secret & data files — never commit, print, or log
 
-`credentials.json` and `token.json` (Gmail OAuth, repo root), `.env` / `.env.*` (Plaid/SnapTrade keys + Fernet key), and every `*.db` / `*.bak` (`portfolio.db`, `*.db.*.bak` — real holdings + balances) plus `CIO_CONTEXT.local.md` / `*.local.md` and `tax_forms/` are the files the global redaction + commit-halt + no-log rules cover here. All are gitignored; if any appears in a staged diff, halt. Access tokens are Fernet-encrypted at rest via `crypto.py` — never decrypt-and-print.
+`credentials.json` and `token.json` (Gmail OAuth, repo root), `.env` / `.env.*` (Plaid/SnapTrade keys + Fernet key), and every `*.db` / `*.bak` (`portfolio.db`, `*.db.*.bak` — real holdings + balances) plus `CIO_CONTEXT.local.md` / `*.local.md` and `tax_forms/` are secret or private data. All are gitignored; never print or log their contents, and halt if any appears in a staged diff. Access tokens are Fernet-encrypted at rest via `crypto.py` — never decrypt-and-print.
 
 ## Financial-data correctness and state changes
 
@@ -44,6 +45,7 @@ Pre-push, in order (global order applies):
   stale or partial-ingest warning next to affected metrics.
 - Reconcile aggregator identifiers and transactions before computing returns;
   never silently substitute the last good balance for a failed refresh.
+- Comparative returns use the same explicit as-of date, account and position universe, period boundaries, and matched cash flows. Report a difference between return rates in percentage points, not as an ambiguous percent change; percentage-point alpha and dollar alpha must reconcile under the same denominator before presentation.
 - Any schema migration, backfill, account relink, or destructive correction
   requires a verified backup and an explicit preview of affected accounts,
   date range, and row counts. Ask before operating on the user's live database.
@@ -52,3 +54,11 @@ Pre-push, in order (global order applies):
 - Keep deterministic portfolio math separate from LLM coaching. The panel may
   explain or challenge calculated results but may not invent holdings, prices,
   transactions, or tax facts.
+
+## Interface
+
+- Profile: dense-desktop
+- Contract: docs/UI_CONTRACT.md
+- Executable authority: frontend/src/index.css, frontend/src/components/ui.tsx, frontend/tailwind.config.js
+- Render: `cd frontend && npm run dev -- --host 127.0.0.1`, then inspect the affected route at 1440 × 900 and a narrow 390 × 844 viewport
+- Gate: `cd frontend && npm run typecheck && npm run build`
