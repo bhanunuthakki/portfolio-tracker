@@ -400,11 +400,17 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             report=report,
         )
 
+        performance_series = compute_performance_series(
+            session, window_start, _FRESH, Decimal(0), False
+        )
         performance = PerformanceV1Result(
-            meta=performance_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
-            series=compute_performance_series(
-                session, window_start, FIXTURE_TODAY, Decimal(0), False
+            meta=performance_meta(
+                session,
+                series=performance_series,
+                today=FIXTURE_TODAY,
+                generated_at=FIXTURE_GENERATED_AT,
             ),
+            series=performance_series,
         )
         position_performance = PositionPerformanceV1Result(
             meta=position_performance_meta(
@@ -415,7 +421,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         beta_result = compute_beta(
             session, window_start, FIXTURE_TODAY, "SPY", None, False, Decimal(0)
         )
-        drawdown_result = compute_drawdown(session, window_start, FIXTURE_TODAY, Decimal(0), False)
+        drawdown_result = compute_drawdown(session, window_start, _FRESH, Decimal(0), False)
         risk = RiskV1Result(
             meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
             beta=beta_result,

@@ -25,7 +25,13 @@ from portfolio_tracker.services.drawdown import DrawdownResult
 from portfolio_tracker.services.exit_quality import ExitQualityResult
 from portfolio_tracker.services.position_alpha import PositionAlphaResult
 from portfolio_tracker.services.v1_accounts import build_accounts_result
-from portfolio_tracker.services.v1_common import V1AccountCoverage, V1Meta, build_meta
+from portfolio_tracker.services.v1_common import (
+    W_CALCULATION_UNAVAILABLE,
+    V1AccountCoverage,
+    V1Meta,
+    V1Warning,
+    build_meta,
+)
 
 
 def _analytics_meta(
@@ -35,6 +41,7 @@ def _analytics_meta(
     links: dict[str, str],
     methodology_version: str = "1",
     included_account_ids: frozenset[int] | None = None,
+    warnings: list[V1Warning] | None = None,
     today: date | None = None,
     generated_at: datetime | None = None,
 ) -> V1Meta:
@@ -54,7 +61,7 @@ def _analytics_meta(
         source_providers=accounts_meta.source_providers,
         coverage=coverage,
         last_successful_sync_at=accounts_meta.last_successful_sync_at,
-        warnings=[],
+        warnings=warnings or [],
         links=links,
         methodology=methodology,
         methodology_version=methodology_version,
@@ -110,8 +117,26 @@ class ExitQualityV1Result(BaseModel):
 
 
 def performance_meta(
-    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+    session: Session,
+    *,
+    series: PerformanceSeries | None = None,
+    today: date | None = None,
+    generated_at: datetime | None = None,
 ) -> V1Meta:
+    warnings = (
+        [
+            V1Warning(
+                code=W_CALCULATION_UNAVAILABLE,
+                message=(
+                    "Whole-portfolio performance is unavailable: "
+                    + ", ".join(series.calculation_reason_codes)
+                ),
+                scope="performance",
+            )
+        ]
+        if series is not None and series.calculation_status == "unavailable"
+        else []
+    )
     return _analytics_meta(
         session,
         methodology="performance.modified_dietz",
@@ -122,6 +147,7 @@ def performance_meta(
             "cash_flows": "/api/v1/cash-flows",
         },
         included_account_ids=valued_account_ids(session),
+        warnings=warnings,
         today=today,
         generated_at=generated_at,
     )

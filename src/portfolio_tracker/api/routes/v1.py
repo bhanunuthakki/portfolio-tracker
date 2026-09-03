@@ -317,7 +317,7 @@ def analytics_performance(
     series = performance_service.compute_performance_series(
         session, start_date, end_date, Decimal(str(reserve_amount)), exclude_index_etfs
     )
-    return PerformanceV1Result(meta=performance_meta(session), series=series)
+    return PerformanceV1Result(meta=performance_meta(session, series=series), series=series)
 
 
 @router.get("/analytics/position-performance", response_model=PositionPerformanceV1Result)

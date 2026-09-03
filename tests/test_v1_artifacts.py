@@ -13,6 +13,7 @@ To accept an intentional change:
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
@@ -123,6 +124,7 @@ def test_fixtures_parse_into_response_models():
         "opening_value_provenance",
         "ending_value_provenance",
         "valuation_account_ids",
+        "equation_receipt",
     ],
 )
 def test_performance_contract_requires_financial_provenance_fields(field: str):
@@ -130,6 +132,16 @@ def test_performance_contract_requires_financial_provenance_fields(field: str):
     payload["series"].pop(field)
 
     with pytest.raises(ValidationError):
+        PerformanceV1Result.model_validate(payload)
+
+
+def test_performance_receipt_rejects_a_non_reconciling_decimal_identity():
+    payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    receipt = payload["series"]["equation_receipt"]
+    assert receipt is not None
+    receipt["investment_gain"] = str(Decimal(receipt["investment_gain"]) + Decimal("0.01"))
+
+    with pytest.raises(ValidationError, match="whole-portfolio value bridge"):
         PerformanceV1Result.model_validate(payload)
 
 

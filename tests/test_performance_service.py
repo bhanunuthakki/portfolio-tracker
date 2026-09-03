@@ -275,7 +275,9 @@ def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
         "_benchmark_series",
         lambda *_args: {"SPY": closes, "QQQ": closes},
     )
-    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
+    monkeypatch.setattr(
+        performance_service, "load_policy_weights", lambda *_args: {"SPY": Decimal(1)}
+    )
     monkeypatch.setattr(
         performance_service,
         "_earliest_observed_date",
@@ -292,9 +294,167 @@ def test_performance_series_uses_one_period_cashflow_set(monkeypatch, session):
     assert final.portfolio_value == Decimal(1300)
     assert final.spy_equivalent_value == Decimal(1100)
     assert final.qqq_equivalent_value == Decimal(1100)
+    assert final.policy_equivalent_value == Decimal(1100)
     assert final.spy_return_pct == Decimal(0)
     assert final.qqq_return_pct == Decimal(0)
     assert final.portfolio_return_pct == (Decimal(200) / Decimal(1100)) * Decimal(100)
+
+    receipt = series.equation_receipt
+    assert receipt is not None
+    assert receipt.opening_value == Decimal(1000)
+    assert [(flow.date, flow.amount) for flow in receipt.dated_external_cashflows] == [
+        (flow_date, Decimal(200)),
+        (end, Decimal(-100)),
+    ]
+    assert receipt.net_external_cashflow_in == Decimal(100)
+    assert receipt.ending_value == Decimal(1300)
+    assert receipt.investment_gain == Decimal(200)
+    assert receipt.modified_dietz_denominator == Decimal(1100)
+    assert receipt.portfolio_return_pct == (
+        receipt.investment_gain / receipt.modified_dietz_denominator
+    ) * Decimal(100)
+    assert receipt.portfolio_equation_residual == Decimal(0)
+    for benchmark in (receipt.spy, receipt.qqq):
+        assert benchmark.ending_value == Decimal(1100)
+        assert benchmark.investment_gain == Decimal(0)
+        assert benchmark.return_pct == Decimal(0)
+        assert benchmark.dollar_alpha == Decimal(200)
+        assert benchmark.percentage_point_alpha == receipt.portfolio_return_pct
+        assert benchmark.equation_residual == Decimal(0)
+    assert receipt.policy is not None
+    assert receipt.policy.ending_value == Decimal(1100)
+    assert receipt.policy.investment_gain == Decimal(0)
+    assert receipt.policy.return_pct == Decimal(0)
+    assert receipt.policy.dollar_alpha == Decimal(200)
+    assert receipt.policy.percentage_point_alpha == receipt.portfolio_return_pct
+    assert receipt.policy.equation_residual == Decimal(0)
+    assert receipt.calculation_id.startswith("sha256:")
+    assert receipt.external_flow_ledger_id.startswith("sha256:")
+    assert receipt.portfolio_valuation_input_id.startswith("sha256:")
+    assert receipt.spy.price_input_id.startswith("sha256:")
+    assert receipt.qqq.price_input_id.startswith("sha256:")
+
+
+def test_performance_series_requires_exact_requested_valuation_boundaries(monkeypatch, session):
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 3)
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value",
+        lambda *_args: {
+            start + timedelta(days=1): Decimal(1000),
+            end - timedelta(days=1): Decimal(1000),
+        },
+    )
+
+    series = performance_service.compute_performance_series(session, start, end)
+
+    assert series.calculation_status == "unavailable"
+    assert series.calculation_reason_codes == [
+        "portfolio_end_value_unavailable",
+        "portfolio_start_value_unavailable",
+    ]
+    assert series.equation_receipt is None
+
+
+def test_performance_series_fails_closed_when_required_benchmark_marks_are_missing(
+    monkeypatch, session, client
+):
+    start = date(2025, 1, 1)
+    flow_date = date(2025, 1, 20)
+    end = date(2025, 1, 21)
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value",
+        lambda *_args: {start: Decimal(1000), end: Decimal(1100)},
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_external_cashflow_assessment",
+        lambda *_args: performance_service._CashflowAssessment(
+            cashflows={flow_date: Decimal(100)}, calculation_reason_codes=()
+        ),
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_benchmark_series",
+        lambda *_args: {
+            # The ending mark cannot be used retrospectively for the flow;
+            # SPY's prior mark is 19 days old at deployment.
+            "SPY": {start: Decimal(100), end: Decimal(101)},
+            # QQQ's only mark is non-positive and must not be accepted.
+            "QQQ": {start: Decimal(0), flow_date: Decimal(0), end: Decimal(0)},
+        },
+    )
+    monkeypatch.setattr(performance_service, "load_policy_weights", lambda *_args: {})
+
+    series = performance_service.compute_performance_series(session, start, end)
+
+    assert series.calculation_status == "unavailable"
+    assert series.calculation_reason_codes == [
+        "qqq_benchmark_price_unavailable",
+        "spy_benchmark_price_unavailable",
+    ]
+    assert series.equation_receipt is None
+    assert all(point.spy_return_pct is None for point in series.points)
+    assert all(point.qqq_return_pct is None for point in series.points)
+
+    response = client.get(
+        "/api/v1/analytics/performance",
+        params={"start_date": start.isoformat(), "end_date": end.isoformat()},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["series"]["calculation_status"] == "unavailable"
+    calculation_warnings = [
+        warning
+        for warning in payload["meta"]["warnings"]
+        if warning["code"] == "CALCULATION_UNAVAILABLE"
+    ]
+    assert calculation_warnings == [
+        {
+            "code": "CALCULATION_UNAVAILABLE",
+            "message": (
+                "Whole-portfolio performance is unavailable: "
+                "qqq_benchmark_price_unavailable, spy_benchmark_price_unavailable"
+            ),
+            "scope": "performance",
+        }
+    ]
+
+
+def test_performance_series_requires_every_configured_policy_component(monkeypatch, session):
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 3)
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_portfolio_value",
+        lambda *_args: {start: Decimal(1000), end: Decimal(1100)},
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "_daily_external_cashflow_assessment",
+        lambda *_args: performance_service._CashflowAssessment(
+            cashflows={}, calculation_reason_codes=()
+        ),
+    )
+    closes = {start: Decimal(100), end: Decimal(110)}
+    monkeypatch.setattr(
+        performance_service,
+        "_benchmark_series",
+        lambda *_args: {"SPY": closes, "QQQ": closes},
+    )
+    monkeypatch.setattr(
+        performance_service,
+        "load_policy_weights",
+        lambda *_args: {"SPY": Decimal("0.5"), "VWO": Decimal("0.5")},
+    )
+
+    series = performance_service.compute_performance_series(session, start, end)
+
+    assert series.calculation_status == "unavailable"
+    assert series.calculation_reason_codes == ["policy_benchmark_price_unavailable"]
+    assert series.equation_receipt is None
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +845,8 @@ def test_whole_account_performance_fails_closed_on_unpriceable_share_transfer(cl
             ),
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
     session.commit()
@@ -761,6 +923,9 @@ def test_whole_account_performance_uses_priceable_share_transfer_cashflow(sessio
             Benchmark(symbol="SPY", date=start, close=Decimal(100)),
             Benchmark(symbol="SPY", date=movement_date, close=Decimal(105)),
             Benchmark(symbol="SPY", date=end, close=Decimal(110)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=movement_date, close=Decimal(105)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
     session.commit()
@@ -808,6 +973,10 @@ def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session
                 quantity=Decimal(1000),
                 amount=Decimal(1000),
             ),
+            Benchmark(symbol="SPY", date=start, close=Decimal(100)),
+            Benchmark(symbol="SPY", date=end, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=start, close=Decimal(100)),
+            Benchmark(symbol="QQQ", date=end, close=Decimal(100)),
         ]
     )
     session.commit()

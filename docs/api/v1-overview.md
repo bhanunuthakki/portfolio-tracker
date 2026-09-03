@@ -40,7 +40,7 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
-| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields when an in-kind external flow cannot be identified or valued |
+| `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); exact requested opening/ending valuations and positive benchmark marks no more than 14 calendar days old are required at every displayed and flow-deployment date |
 | `GET /api/v1/analytics/position-performance` | Split-normalized invested-position price/trade return and per-ticker dollar alpha vs cash-flow-matched price-return counterfactuals (`position_alpha.split_normalized_price_trade_modified_dietz` v3); derived fields are null with stable reason codes when share movements or price provenance cannot be reconciled |
 | `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v2); drawdown fails closed with the performance reason codes when its return index is unavailable |
 | `GET /api/v1/analytics/beta` | The regression half of `risk` alone — for consumers that don't need drawdown |
@@ -48,6 +48,17 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/analytics/exit-quality` | Sell-side quality: regret vs holding, exit alpha vs SPY (`exit_quality.repricing` v1) |
 
 Wealthplan normally needs exactly one `portfolio-snapshot` read per refresh.
+
+An available performance result includes `series.equation_receipt`, the atomic
+whole-portfolio bridge used for the headline: opening value, dated net external
+flows, ending value, investment gain, shared Modified-Dietz denominator,
+portfolio return, and SPY/QQQ/configured-policy counterfactual gains, returns,
+dollar alpha, and percentage-point alpha. Opaque SHA-256 identifiers bind the
+receipt to its flow-ledger, valuation, and resolved benchmark-price inputs.
+Unavailable results set the receipt and all derived point fields to null and
+return stable reason codes such as `portfolio_start_value_unavailable`,
+`portfolio_end_value_unavailable`, `spy_benchmark_price_unavailable`,
+`qqq_benchmark_price_unavailable`, and `policy_benchmark_price_unavailable`.
 
 **Deferred:** `GET/POST /api/v1/sync-runs` requires a run-log schema migration
 on the live database and ships with the Phase 3 migration batch (backup +
@@ -108,7 +119,7 @@ Every decision-support response carries a `meta` block:
 
 ```jsonc
 "meta": {
-  "schema_version": "1.0.0",          // semver; MAJOR change ⇒ fail closed
+  "schema_version": "1.1.0",          // semver; MAJOR change ⇒ fail closed
   "generated_at": "2026-07-23T06:00:00Z",
   "as_of": "2026-07-22",              // observation date; null ⇒ no data
   "currency": "USD",

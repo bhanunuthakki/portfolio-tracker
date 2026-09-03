@@ -122,7 +122,7 @@ def test_transactions_pagination_no_silent_cap(client, session):
 
     first = client.get("/api/v1/transactions", params={"limit": 2}).json()
     assert first["next_cursor"] is not None
-    assert first["meta"]["schema_version"] == "1.0.0"
+    assert first["meta"]["schema_version"] == "1.1.0"
     # Effective classification mirrors the TWR pipeline.
     by_id = {r["transaction_id"]: r for r in rows}
     assert by_id["t5"]["effective_classification"] == "external_in"
@@ -284,7 +284,7 @@ def test_invalid_cursor_is_structured_error(client, session):
 def test_data_quality_enveloped(client, session):
     _seed(session)
     data = client.get("/api/v1/data-quality").json()
-    assert data["meta"]["schema_version"] == "1.0.0"
+    assert data["meta"]["schema_version"] == "1.1.0"
     assert "findings" in data["report"]
     assert "summary_counts" in data["report"]
 
@@ -332,7 +332,7 @@ def test_risk_split_resources_match_the_combined_read(client, session):
     assert drawdown_only["drawdown"] == combined["drawdown"]
     # The split resources carry the same envelope contract.
     for payload in (beta_only, drawdown_only):
-        assert payload["meta"]["schema_version"] == "1.0.0"
+        assert payload["meta"]["schema_version"] == "1.1.0"
         assert payload["meta"]["methodology"] == "risk.beta_drawdown"
         assert payload["meta"]["methodology_version"] == "2"
     # Each half returns only its own half — that is the point of the split.

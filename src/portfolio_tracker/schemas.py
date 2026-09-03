@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class LinkTokenOut(BaseModel):
@@ -173,6 +173,81 @@ class PerformancePoint(BaseModel):
     policy_equivalent_value: Decimal | None
 
 
+class PerformanceDatedCashflow(BaseModel):
+    """One net external flow used by the whole-portfolio return window."""
+
+    date: date
+    amount: Decimal
+
+
+class PerformanceBenchmarkEquation(BaseModel):
+    """One cash-flow-matched counterfactual under the shared Dietz basis."""
+
+    benchmark: str
+    ending_value: Decimal
+    investment_gain: Decimal
+    return_pct: Decimal
+    dollar_alpha: Decimal
+    percentage_point_alpha: Decimal
+    equation_residual: Decimal
+    price_input_id: str
+
+
+class PerformanceEquationReceipt(BaseModel):
+    """Atomic, reproducible bridge for one whole-portfolio calculation."""
+
+    calculation_id: str
+    external_flow_ledger_id: str
+    portfolio_valuation_input_id: str
+    included_account_ids: list[int]
+    requested_start_date: date
+    requested_end_date: date
+    benchmark_price_max_age_days: int
+    opening_value: Decimal
+    dated_external_cashflows: list[PerformanceDatedCashflow]
+    net_external_cashflow_in: Decimal
+    ending_value: Decimal
+    investment_gain: Decimal
+    modified_dietz_denominator: Decimal
+    portfolio_return_pct: Decimal
+    portfolio_equation_residual: Decimal
+    spy: PerformanceBenchmarkEquation
+    qqq: PerformanceBenchmarkEquation
+    policy: PerformanceBenchmarkEquation | None
+
+    @model_validator(mode="after")
+    def validate_exact_identities(self) -> PerformanceEquationReceipt:
+        net_flow = sum((flow.amount for flow in self.dated_external_cashflows), Decimal(0))
+        if net_flow != self.net_external_cashflow_in:
+            raise ValueError("dated external cashflows do not reconcile to net flow")
+        if self.ending_value - self.opening_value - net_flow != self.investment_gain:
+            raise ValueError("whole-portfolio value bridge does not reconcile")
+        if self.portfolio_equation_residual != 0:
+            raise ValueError("whole-portfolio equation residual must be zero")
+        expected_return = (self.investment_gain / self.modified_dietz_denominator) * Decimal(100)
+        if self.portfolio_return_pct != expected_return:
+            raise ValueError("whole-portfolio return does not reconcile to Dietz capital")
+        for benchmark in (self.spy, self.qqq, self.policy):
+            if benchmark is None:
+                continue
+            if benchmark.ending_value - self.opening_value - net_flow != benchmark.investment_gain:
+                raise ValueError(f"{benchmark.benchmark} value bridge does not reconcile")
+            if benchmark.equation_residual != 0:
+                raise ValueError(f"{benchmark.benchmark} equation residual must be zero")
+            benchmark_return = (
+                benchmark.investment_gain / self.modified_dietz_denominator
+            ) * Decimal(100)
+            if benchmark.return_pct != benchmark_return:
+                raise ValueError(
+                    f"{benchmark.benchmark} return does not reconcile to Dietz capital"
+                )
+            if benchmark.dollar_alpha != self.investment_gain - benchmark.investment_gain:
+                raise ValueError(f"{benchmark.benchmark} dollar alpha does not reconcile")
+            if benchmark.percentage_point_alpha != self.portfolio_return_pct - benchmark.return_pct:
+                raise ValueError(f"{benchmark.benchmark} percentage-point alpha does not reconcile")
+        return self
+
+
 class PerformanceSeries(BaseModel):
     methodology: Literal["performance.modified_dietz"]
     methodology_version: Literal["2"]
@@ -205,6 +280,9 @@ class PerformanceSeries(BaseModel):
     # Exact account universe whose value and flows were paired by the return
     # engine. Empty only when no valued account universe could be established.
     valuation_account_ids: list[int]
+    # Present only when every prerequisite is available. All headline dollar
+    # and percentage values are derived atomically from this exact input set.
+    equation_receipt: PerformanceEquationReceipt | None
 
 
 class CashflowGroupOut(BaseModel):
