@@ -19,6 +19,7 @@ the profile so re-runs are idempotent: `local-{profile}-snaptrade`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated
@@ -48,10 +49,13 @@ from portfolio_tracker.services.account_valuations import (
     canonical_account_balance_source_sha256,
     record_account_valuation_observation,
 )
+from portfolio_tracker.services.provider_transaction_corrections import (
+    ProviderTransactionCorrectionApproval,
+)
 from portfolio_tracker.services.provider_transaction_provenance import (
     ProviderAccountTransactionCapture,
     ProviderHistoryGap,
-    persist_provider_account_attestation,
+    persist_provider_account_attestation_with_correction_approvals,
 )
 from portfolio_tracker.snaptrade_client import (
     SnapTradeNotConfiguredError,
@@ -119,6 +123,26 @@ def sync(
         ),
     ] = 730,
 ) -> SyncResultOut:
+    return sync_with_transaction_correction_approvals(
+        session,
+        profile,
+        lookback_days,
+    )
+
+
+def sync_with_transaction_correction_approvals(
+    session: Session,
+    profile: SnapTradeProfile = SnapTradeProfile.PRIMARY,
+    lookback_days: int = 730,
+    *,
+    transaction_correction_approvals: Mapping[str, ProviderTransactionCorrectionApproval]
+    | None = None,
+) -> SyncResultOut:
+    """Run the sync with optional exact plan-digest correction approvals.
+
+    The public HTTP route never supplies this mapping. It is reserved for the
+    local preview/backup/owner-approval workflow.
+    """
     creds = _load_credentials(session, profile)
     if creds is None:
         raise HTTPException(
@@ -304,7 +328,7 @@ def sync(
                     )
                 )
                 transactions_written += 1
-            persist_provider_account_attestation(
+            persist_provider_account_attestation_with_correction_approvals(
                 session,
                 ProviderAccountTransactionCapture(
                     account_id=account.account_id,
@@ -322,6 +346,7 @@ def sync(
                         coverage_end=today,
                     ),
                 ),
+                transaction_correction_approvals,
             )
 
     session.commit()

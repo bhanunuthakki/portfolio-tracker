@@ -32,6 +32,7 @@ from portfolio_tracker.services.provider_transaction_provenance import (
     ProviderAccountTransactionCapture,
     ProviderTransactionConflictError,
     persist_provider_account_attestation,
+    persist_provider_account_attestation_with_correction_approvals,
 )
 
 _CAPTURED = datetime(2025, 2, 1, tzinfo=UTC)
@@ -219,10 +220,10 @@ def test_apply_requires_verified_backup_then_persists_append_only_receipt(
         preview=preview,
         preview_sha256=preview_sha256,
     )
-    result = persist_provider_account_attestation(
+    result = persist_provider_account_attestation_with_correction_approvals(
         session,
         capture,
-        transaction_correction_approval=approval,
+        {plan.plan_digest: approval},
     )
     session.flush()
 

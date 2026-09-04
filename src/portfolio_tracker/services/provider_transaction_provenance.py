@@ -868,3 +868,25 @@ def persist_provider_account_attestation(
         len(unresolved_gap_dates),
         len(history_gaps),
     )
+
+
+def persist_provider_account_attestation_with_correction_approvals(
+    session: Session,
+    capture: ProviderAccountTransactionCapture,
+    approvals: Mapping[str, ProviderTransactionCorrectionApproval] | None,
+) -> ProviderAttestationWriteResult:
+    """Select only an approval bound to the exact current correction plan."""
+    try:
+        return persist_provider_account_attestation(session, capture)
+    except ProviderTransactionConflictError as exc:
+        plan = exc.correction_plan
+        if plan is None or approvals is None:
+            raise
+        approval = approvals.get(plan.plan_digest)
+        if approval is None:
+            raise
+        return persist_provider_account_attestation(
+            session,
+            capture,
+            transaction_correction_approval=approval,
+        )

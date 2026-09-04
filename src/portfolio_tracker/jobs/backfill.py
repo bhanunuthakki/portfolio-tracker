@@ -15,6 +15,7 @@ Run manually:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -35,9 +36,12 @@ from portfolio_tracker.provider_delivery import (
     ProviderPayloadError,
     canonical_normalized_record_set_sha256,
 )
+from portfolio_tracker.services.provider_transaction_corrections import (
+    ProviderTransactionCorrectionApproval,
+)
 from portfolio_tracker.services.provider_transaction_provenance import (
     ProviderAccountTransactionCapture,
-    persist_provider_account_attestation,
+    persist_provider_account_attestation_with_correction_approvals,
 )
 
 PLAID_INVESTMENT_TX_RETENTION_DAYS = 730  # 24 months
@@ -76,6 +80,9 @@ def run(start_date: date | None = None, end_date: date | None = None) -> int:
 def run_with_delivery_receipts(
     start_date: date | None = None,
     end_date: date | None = None,
+    *,
+    transaction_correction_approvals: Mapping[str, ProviderTransactionCorrectionApproval]
+    | None = None,
 ) -> BackfillRunResult:
     """Backfill and return count/digest receipts without private transaction values."""
     if end_date is None:
@@ -98,6 +105,7 @@ def run_with_delivery_receipts(
                 start_date,
                 end_date,
                 delivery_receipts=receipts,
+                transaction_correction_approvals=transaction_correction_approvals,
             )
         session.commit()
     return BackfillRunResult(rows_written=rows_written, item_receipts=tuple(receipts))
@@ -110,9 +118,17 @@ def _backfill_item(
     end_date: date,
     *,
     delivery_receipts: list[BackfillItemDeliveryReceipt] | None = None,
+    transaction_correction_approvals: Mapping[str, ProviderTransactionCorrectionApproval]
+    | None = None,
 ) -> int:
     """Compatibility helper returning only newly inserted row count."""
-    receipt = _backfill_item_with_delivery_receipt(session, item, start_date, end_date)
+    receipt = _backfill_item_with_delivery_receipt(
+        session,
+        item,
+        start_date,
+        end_date,
+        transaction_correction_approvals=transaction_correction_approvals,
+    )
     if receipt is None:
         return 0
     if delivery_receipts is not None:
@@ -125,6 +141,9 @@ def _backfill_item_with_delivery_receipt(
     item: Item,
     start_date: date,
     end_date: date,
+    *,
+    transaction_correction_approvals: Mapping[str, ProviderTransactionCorrectionApproval]
+    | None = None,
 ) -> BackfillItemDeliveryReceipt | None:
     if item.plaid_access_token_encrypted is None:
         return None
@@ -187,7 +206,7 @@ def _backfill_item_with_delivery_receipt(
     # inserting FK-dependent Source events and decisions. This is required in
     # production because SessionLocal has autoflush disabled.
     for provider_account_id, account_id in sorted(plaid_account_to_id.items()):
-        persist_provider_account_attestation(
+        persist_provider_account_attestation_with_correction_approvals(
             session,
             ProviderAccountTransactionCapture(
                 account_id=account_id,
@@ -203,6 +222,7 @@ def _backfill_item_with_delivery_receipt(
                 security_ids_by_provider_id=plaid_security_to_id,
                 captured_at=captured_at,
             ),
+            transaction_correction_approvals,
         )
 
     account_receipts: list[BackfillAccountDeliveryReceipt] = []
