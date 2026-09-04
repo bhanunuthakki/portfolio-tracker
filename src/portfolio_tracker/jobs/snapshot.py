@@ -14,6 +14,7 @@ Run manually:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -150,7 +151,10 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
             continue
         institution_value = holding.institution_value
         if institution_value is None and holding.institution_price is not None:
-            institution_value = holding.quantity * holding.institution_price
+            institution_value = plaid_client.normalize_provider_decimal(
+                holding.quantity * holding.institution_price,
+                quantum=Decimal("0.000001"),
+            )
         session.add(
             HoldingSnapshot(
                 snapshot_date=snapshot_date,

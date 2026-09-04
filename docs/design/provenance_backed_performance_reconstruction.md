@@ -108,14 +108,25 @@ captures link to the same immutable event and current decision, keeping the
 flow ID and equation receipt stable while each delivery attestation retains its
 own range and record-set hash.
 
-Provider transaction parser versions `plaid_investment_tx.v2` and
-`snaptrade_account_activity.v2` remove only binary floating-point transport
-noise when a numeric SDK value is within two machine ULPs of the database's
-declared six-decimal money or ten-decimal quantity grid. String and Decimal
-inputs retain every supplied digit, so genuine excess precision still fails
-closed. Earlier v1 attestations remain valid because they were already checked
-against the same storage grid; v2 records the new normalization semantics for
-new captures.
+Provider transaction parser versions `plaid_investment_tx.v3` and
+`snaptrade_account_activity.v3` apply explicit round-half-even normalization
+to the database's declared six-decimal money and ten-decimal quantity grids.
+This applies uniformly to SDK floats, strings, and Decimals, including direct
+account totals and calculated holding values. The maximum rounding error is
+half a storage quantum per normalized field: $0.0000005 for money and
+0.00000000005 shares for quantity. Delivery and attestation hashes commit to
+the normalized values and parser version, so this is a reproducible design
+choice rather than implicit database truncation. Earlier v1/v2 attestations
+remain readable and certifying because their stored values already satisfied
+the same grids; v3 identifies the broader, explicit normalization rule for new
+captures.
+
+Migration 0031 also repairs a known legacy schema drift in which a database
+could be stamped at revision 0023 while `policy_state` and
+`policy_write_receipts` were absent. It creates only whichever of those 0023
+tables are missing and seeds the required singleton state only when that table
+must be recreated. Downgrading to 0030 retains them because they logically
+belong to revision 0023.
 
 An existing provider record ID with changed economics is never overwritten by
 ordinary synchronization. The conflict produces an exact private correction

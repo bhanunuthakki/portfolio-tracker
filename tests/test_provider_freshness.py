@@ -44,7 +44,7 @@ def test_plaid_account_retains_direct_balance_last_updated_datetime() -> None:
     assert account.provider_balance_currency == "USD"
 
 
-def test_plaid_account_normalizes_only_float_noise_at_storage_precision() -> None:
+def test_plaid_account_normalizes_provider_values_at_storage_precision() -> None:
     account = plaid_client._account_from_plaid(
         _PlaidObject(
             {
@@ -66,34 +66,24 @@ def test_plaid_account_normalizes_only_float_noise_at_storage_precision() -> Non
     assert account.provider_balance_currency == "USD"
 
 
-def test_plaid_account_rejects_genuine_extra_precision_with_private_safe_diagnostic() -> None:
-    private_account_id = "private-account-id-must-not-be-logged"
-    private_value = "123.1234567"
-    with pytest.raises(plaid_client.PlaidAccountFieldNormalizationError) as raised:
-        plaid_client._account_from_plaid(
-            _PlaidObject(
-                {
-                    "account_id": private_account_id,
-                    "name": "Brokerage",
-                    "type": "investment",
-                    "balances": {
-                        "current": private_value,
-                        "iso_currency_code": "USD",
-                    },
-                }
-            )
+def test_plaid_account_quantizes_genuine_extra_precision_half_even() -> None:
+    account = plaid_client._account_from_plaid(
+        _PlaidObject(
+            {
+                "account_id": "private-account-id",
+                "name": "Brokerage",
+                "type": "investment",
+                "balances": {
+                    "current": "123.1234567",
+                    "available": "1.1234565",
+                    "iso_currency_code": "USD",
+                },
+            }
         )
+    )
 
-    public_message = str(raised.value)
-    assert private_account_id not in public_message
-    assert private_value not in public_message
-    assert "balances.current" in public_message
-    assert raised.value.private_diagnostic() == {
-        "provider": "plaid",
-        "provider_account_id": private_account_id,
-        "field": "balances.current",
-        "reason_code": "precision_exceeds_storage",
-    }
+    assert account.provider_total_value == Decimal("123.123457")
+    assert account.provider_available_cash == Decimal("1.123456")
 
 
 def test_plaid_balance_as_of_rejects_timestamp_without_timezone() -> None:

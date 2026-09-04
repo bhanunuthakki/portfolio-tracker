@@ -20,7 +20,6 @@ module stays cheap to import. Same rationale as `_ensure_snaptrade` in
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
@@ -126,7 +125,7 @@ class InvestmentsTransactionsResponse(BaseModel):
 
 
 _INVESTMENT_TRANSACTIONS_SOURCE_FORMAT = "plaid_investment_transactions_api"
-_INVESTMENT_TRANSACTIONS_PARSER_VERSION = "plaid_investment_tx.v2"
+_INVESTMENT_TRANSACTIONS_PARSER_VERSION = "plaid_investment_tx.v3"
 _ACCOUNT_BALANCE_STORAGE_QUANTUM = Decimal("0.000001")
 _ACCOUNT_BALANCE_MAX_ABSOLUTE = Decimal("100000000000000")
 _TRANSACTION_MONEY_STORAGE_QUANTUM = Decimal("0.000001")
@@ -351,23 +350,21 @@ def _opt_decimal(value: object) -> Decimal | None:
 
 
 def normalize_provider_decimal(value: object, *, quantum: Decimal) -> Decimal:
-    """Preserve provider precision, removing only binary-float transport noise.
+    """Normalize a provider number to the explicitly declared storage grid.
 
-    Provider SDKs deserialize JSON numbers as ``float``. Values that are
-    mathematically on our declared storage grid can therefore arrive a few
-    ULPs away from that grid. Only float inputs within two ULPs are rounded;
-    strings and Decimal values retain every supplied digit so genuine excess
-    precision still fails closed in the storage validator.
+    Broker SDKs expose a mixture of floats, strings, and Decimals, and some
+    account totals and execution prices legitimately carry more precision
+    than our durable money/quantity columns.  Half-even quantization is a
+    deterministic parser rule, not an implicit database-side truncation.  A
+    parser-versioned delivery digest commits to the normalized value.
     """
     normalized = Decimal(str(value))
-    if not isinstance(value, float) or not math.isfinite(value):
+    if not normalized.is_finite():
         return normalized
     try:
-        storage_value = normalized.quantize(quantum, rounding=ROUND_HALF_EVEN)
+        return normalized.quantize(quantum, rounding=ROUND_HALF_EVEN)
     except InvalidOperation:
         return normalized
-    tolerance = Decimal.from_float(math.ulp(value)) * 2
-    return storage_value if abs(normalized - storage_value) <= tolerance else normalized
 
 
 def optional_provider_decimal(value: object, *, quantum: Decimal) -> Decimal | None:
@@ -406,19 +403,7 @@ def _plaid_account_money(value: object, *, account_id: str, field: str) -> Decim
         raise PlaidAccountFieldNormalizationError(
             account_id=account_id, field=field, reason_code="outside_storage_capacity"
         )
-    if normalized == storage_value:
-        return normalized
-    if isinstance(value, float) and math.isfinite(value):
-        # Plaid's generated AccountBalance fields are floats. Accept rounding
-        # only when the discrepancy is indistinguishable from binary transport
-        # noise around an exact six-decimal value. This does not truncate a
-        # genuine seventh decimal supplied as a string or Decimal.
-        tolerance = Decimal.from_float(math.ulp(value)) * 2
-        if abs(normalized - storage_value) <= tolerance:
-            return storage_value
-    raise PlaidAccountFieldNormalizationError(
-        account_id=account_id, field=field, reason_code="precision_exceeds_storage"
-    )
+    return storage_value
 
 
 def _plaid_balance_currency(balances: dict[str, object], *, account_id: str) -> str | None:

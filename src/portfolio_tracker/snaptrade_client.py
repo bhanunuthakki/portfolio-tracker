@@ -37,6 +37,7 @@ from portfolio_tracker.plaid_client import (
     PlaidHolding,
     PlaidInvestmentTransaction,
     PlaidSecurity,
+    normalize_provider_decimal,
     optional_provider_decimal,
 )
 from portfolio_tracker.provider_delivery import (
@@ -84,7 +85,7 @@ class SnapTradeTransactionsResponse(BaseModel):
 
 
 _ACCOUNT_ACTIVITIES_SOURCE_FORMAT = "snaptrade_account_activities_api"
-_ACCOUNT_ACTIVITIES_PARSER_VERSION = "snaptrade_account_activity.v2"
+_ACCOUNT_ACTIVITIES_PARSER_VERSION = "snaptrade_account_activity.v3"
 _ACCOUNT_ACTIVITIES_PAGE_SIZE = 1000
 _MONEY_STORAGE_QUANTUM = Decimal("0.000001")
 _QUANTITY_STORAGE_QUANTUM = Decimal("0.0000000001")
@@ -516,7 +517,11 @@ def _holding_from_snaptrade(
         raw.get("units"), quantum=_QUANTITY_STORAGE_QUANTUM
     ) or Decimal(0)
     price = optional_provider_decimal(raw.get("price"), quantum=_MONEY_STORAGE_QUANTUM)
-    value = quantity * price if price is not None else None
+    value = (
+        normalize_provider_decimal(quantity * price, quantum=_MONEY_STORAGE_QUANTUM)
+        if price is not None
+        else None
+    )
     # SnapTrade reports `average_purchase_price` PER SHARE, but `cost_basis`
     # follows the Plaid convention of TOTAL dollars for the lot (every
     # downstream consumer — Holdings unrealized P&L, Trade Analysis — treats
@@ -526,7 +531,11 @@ def _holding_from_snaptrade(
     avg_price = optional_provider_decimal(
         raw.get("average_purchase_price"), quantum=_MONEY_STORAGE_QUANTUM
     )
-    cost_basis = avg_price * quantity if avg_price is not None else None
+    cost_basis = (
+        normalize_provider_decimal(avg_price * quantity, quantum=_MONEY_STORAGE_QUANTUM)
+        if avg_price is not None
+        else None
+    )
     return PlaidHolding(
         plaid_account_id=plaid_account_id,
         plaid_security_id=plaid_security_id,
@@ -679,7 +688,11 @@ def _snaptrade_available_cash(raw_balances: object, account_currency: str) -> De
         value = optional_provider_decimal(balance.get("cash"), quantum=_MONEY_STORAGE_QUANTUM)
         if value is not None:
             values.append(value)
-    return sum(values, Decimal(0)) if values else None
+    return (
+        normalize_provider_decimal(sum(values, Decimal(0)), quantum=_MONEY_STORAGE_QUANTUM)
+        if values
+        else None
+    )
 
 
 def _opt_str(value: object) -> str | None:
