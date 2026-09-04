@@ -80,6 +80,9 @@ _IN_KIND_CASH_SUBTYPES = frozenset({"external_asset_transfer_in", "external_asse
 _INTERNAL_TRANSFER_SUBTYPES = frozenset(
     {"assignment", "exercise", "merger", "spin off", "split", "stock distribution"}
 )
+_CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION = (
+    "corroborating_evidence_resolves_provider_unresolved"
+)
 
 
 class ProviderTransactionConflictError(ProviderDeliveryError):
@@ -479,6 +482,110 @@ def _decision_matches(
     )
 
 
+def _owner_resolution_payload_matches_provider_event(
+    decision: CashFlowReconciliationDecision,
+    event: _EventSpec,
+) -> bool:
+    """Verify the immutable payload emitted by manifest schema v4."""
+    if (
+        decision.approved_at is None
+        or decision.decision_authority != CashFlowDecisionAuthority.OWNER_APPROVED
+        or decision.confidence == CashFlowEvidenceConfidence.PROVISIONAL
+        or decision.resolution_kind == CashFlowResolutionKind.UNRESOLVED
+        or decision.effective_date_basis != CashFlowEffectiveDateBasis.OWNER_RESOLVED
+        or decision.target_transaction_id != event.transaction.plaid_investment_transaction_id
+        or decision.assumption_code != _CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION
+        or decision.methodology_version != "2"
+        or decision.decision_payload_sha256 != canonical_decision_payload_sha256(decision)
+    ):
+        return False
+    expected_key = _digest(
+        {
+            "identity_version": "cashflow_reconciliation_decision.v1",
+            "source_event_id": decision.source_event_id,
+            "decision_payload_sha256": decision.decision_payload_sha256,
+        }
+    )
+    return decision.decision_key == expected_key
+
+
+def _owner_resolution_matches_provider_event(
+    decision: CashFlowReconciliationDecision,
+    event: _EventSpec,
+) -> bool:
+    """Verify the narrow current owner decision emitted by manifest schema v4."""
+    return (
+        decision.superseded_at is None
+        and decision.superseded_by_decision_key is None
+        and _owner_resolution_payload_matches_provider_event(decision, event)
+    )
+
+
+def _current_decision_accepts_exact_provider_recapture(
+    session: Session,
+    event: _EventSpec,
+    current: CashFlowReconciliationDecision,
+) -> bool:
+    """Accept provider state or its exact, verified owner-approved descendant.
+
+    Provider capture remains authoritative for the immutable source event. A
+    later statement/owner reconciliation may resolve its provisional decision,
+    so exact future provider deliveries must preserve that decision instead of
+    trying to recreate the superseded provider interpretation. Broken links,
+    digest drift, and unrecognized replacement authorities fail closed.
+    """
+    if current.approved_at is None:
+        return False
+    desired_provider = _decision_row(event, current.approved_at)
+    if _decision_matches(current, desired_provider):
+        return (
+            current.superseded_at is None
+            and current.superseded_by_decision_key is None
+            and current.decision_payload_sha256 == canonical_decision_payload_sha256(current)
+        )
+
+    decisions = tuple(
+        session.scalars(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id == event.source_event_id
+            )
+        )
+    )
+    by_key = {decision.decision_key: decision for decision in decisions}
+    original = by_key.get(desired_provider.decision_key)
+    if (
+        original is None
+        or original.approved_at is None
+        or not _decision_matches(original, desired_provider)
+        or original.decision_payload_sha256 != canonical_decision_payload_sha256(original)
+    ):
+        return False
+
+    seen: set[str] = set()
+    cursor = original
+    while cursor.decision_key != current.decision_key:
+        if cursor.decision_key in seen:
+            return False
+        seen.add(cursor.decision_key)
+        successor_key = cursor.superseded_by_decision_key
+        if cursor.superseded_at is None or successor_key is None:
+            return False
+        successor = by_key.get(successor_key)
+        if successor is None or successor.source_event_id != event.source_event_id:
+            return False
+        if successor.approved_at is None or _normalize_captured_at(
+            cursor.superseded_at
+        ) != _normalize_captured_at(successor.approved_at):
+            return False
+        if successor.decision_key != current.decision_key and not (
+            _owner_resolution_payload_matches_provider_event(successor, event)
+        ):
+            return False
+        cursor = successor
+
+    return _owner_resolution_matches_provider_event(current, event)
+
+
 def _stored_event_matches(stored: CashFlowSourceEvent, event: _EventSpec) -> bool:
     transaction = event.transaction
     return (
@@ -545,9 +652,8 @@ def _existing_capture_matches(
         )
         if len(decisions) != 1:
             return False
-        desired = _decision_row(event, decisions[0].approved_at or datetime.min)
         current = decisions[0]
-        if not _decision_matches(current, desired):
+        if not _current_decision_accepts_exact_provider_recapture(session, event, current):
             return False
     return True
 
@@ -833,8 +939,10 @@ def persist_provider_account_attestation(
         )
         if not current_decisions:
             session.add(desired_decision)
-        elif len(current_decisions) != 1 or not _decision_matches(
-            current_decisions[0], desired_decision
+        elif len(current_decisions) != 1 or not _current_decision_accepts_exact_provider_recapture(
+            session,
+            event,
+            current_decisions[0],
         ):
             raise ProviderTransactionConflictError(
                 "canonical provider source event has conflicting decision lineage"

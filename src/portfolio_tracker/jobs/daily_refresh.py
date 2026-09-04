@@ -112,10 +112,17 @@ def run() -> int:
         from portfolio_tracker.jobs import benchmarks
 
         # A 30-day rolling pull keeps current revisions fresh. When a policy
-        # revision is still required, benchmarks.run automatically expands the
-        # one-time fetch/validation to the canonical two-year return horizon.
-        rows = benchmarks.run(today - _td(days=30), today)
-        print(f"[daily_refresh]   benchmarks: {rows} rows upserted")
+        # revision is still required, run_with_coverage automatically expands
+        # the one-time fetch/validation to the canonical two-year return horizon.
+        result = benchmarks.run_with_coverage(today - _td(days=30), today)
+        if result.status == "partial":
+            print(
+                "[daily_refresh]   benchmarks: PARTIAL "
+                f"({result.rows_written} rows upserted; "
+                f"{len(result.endpoint_coverage.missing_marks)} endpoint mark(s) unavailable)"
+            )
+        else:
+            print(f"[daily_refresh]   benchmarks: {result.rows_written} rows upserted")
     except Exception:
         failures += 1
         print("[daily_refresh]   benchmarks: FAILED")

@@ -39,13 +39,19 @@ from portfolio_tracker.jobs.reconcile_cashflow_manifest import (  # noqa: E402
 from portfolio_tracker.models import (  # noqa: E402
     Account,
     CashFlowReconciliationDecision,
+    CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     InvestmentTransaction,
     Item,
     TransactionOverride,
 )
 from portfolio_tracker.services.active_items import valued_account_ids  # noqa: E402
+from portfolio_tracker.services.cashflow_source_coverage import (  # noqa: E402
+    canonical_decision_payload_sha256,
+    decision_date_basis_matches_source,
+)
 
-EXPECTED_ALEMBIC_REVISION = "0027"
+EXPECTED_ALEMBIC_REVISION = "0031"
 PARSER_VERSION = "robinhood_activity_csv.v4"
 SOURCE_TIMEZONE = "America/New_York"
 _DATE_SHIFT_DAYS = 14
@@ -69,6 +75,16 @@ _STATUS_ORDER = (
 )
 _SUPPORTED_EXTERNAL_CASH_CODES = frozenset({"ACH", "MTCH", "ACATI", "DRFRO", "CFIR"})
 _SUPPORTED_IN_KIND_TRANSFER_CODES = frozenset({"ACATI"})
+_PROVIDER_UNRESOLVED_ASSUMPTION_CODES = frozenset(
+    {
+        "provider_activity_type_unresolved",
+        "provider_in_kind_requires_reconciliation",
+        "provider_external_cash_amount_zero",
+        "provider_cash_classification_unresolved",
+        "provider_transfer_classification_unresolved",
+    }
+)
+_CORROBORATING_PROVIDER_RESOLVED_ASSUMPTION = "corroborating_evidence_confirms_provider_resolved"
 
 
 class BuildError(RuntimeError):
@@ -240,6 +256,13 @@ class BuildResult:
             "conflict_count": self.conflict_count,
             "output_digest": self.output_digest,
         }
+
+
+@dataclass(frozen=True)
+class ProviderLineageMatch:
+    unresolved_reference: dict[str, object] | None = None
+    resolved_effective_date: date | None = None
+    resolved_effective_timezone: str | None = None
 
 
 def _sha256(payload: bytes) -> str:
@@ -483,7 +506,14 @@ def _resolve_event(
     event: EvidenceEvent,
     source_row: SourceRow,
     source_event_id: str,
-) -> tuple[str, dict[str, object], date | None, str | None, str | None]:
+) -> tuple[
+    str,
+    dict[str, object],
+    date | None,
+    str | None,
+    str | None,
+    InvestmentTransaction | None,
+]:
     if event.disposition in {"internal", "excluded", "unresolved"}:
         effective_date = _inventory_effective_date(event, source_row)
         if event.disposition == "unresolved":
@@ -494,6 +524,7 @@ def _resolve_event(
             effective_date,
             None if effective_date is None else "source_activity",
             event.assumption_code,
+            None,
         )
 
     candidates = _candidate_transactions(session, inventory, event, source_row)
@@ -508,6 +539,7 @@ def _resolve_event(
             _inventory_effective_date(event, source_row),
             "source_activity",
             event.assumption_code,
+            None,
         )
     transaction = candidates[0]
     current_decision = session.scalar(
@@ -539,6 +571,122 @@ def _resolve_event(
         source_row.activity_date,
         "source_activity",
         assumption,
+        transaction,
+    )
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _provider_lineage_match(
+    session: Session,
+    inventory: EvidenceInventory,
+    event: EvidenceEvent,
+    source_row: SourceRow,
+    target_transaction: InvestmentTransaction | None,
+) -> ProviderLineageMatch:
+    """Validate and bind corroborating evidence to one provider lineage."""
+    if (
+        inventory.source_type not in {"brokerage_statement", "owner_reconciliation"}
+        or target_transaction is None
+        or event.disposition == "unresolved"
+        or event.confidence == "provisional"
+    ):
+        return ProviderLineageMatch()
+    target_transaction_id = target_transaction.plaid_investment_transaction_id
+    provider_events = tuple(
+        session.scalars(
+            select(CashFlowSourceEvent)
+            .join(
+                CashFlowSourceAttestation,
+                CashFlowSourceAttestation.attestation_id == CashFlowSourceEvent.attestation_id,
+            )
+            .where(
+                CashFlowSourceAttestation.account_id == inventory.account_id,
+                CashFlowSourceAttestation.source_type == "provider_api",
+                CashFlowSourceEvent.source_record_id == target_transaction_id,
+            )
+            .order_by(CashFlowSourceEvent.source_event_id)
+        )
+    )
+    if not provider_events:
+        return ProviderLineageMatch()
+    if len(provider_events) != 1:
+        raise BuildError("provider_source_event_ambiguous")
+    provider_event = provider_events[0]
+    provider_attestation = session.get(
+        CashFlowSourceAttestation,
+        provider_event.attestation_id,
+    )
+    if (
+        provider_attestation is None
+        or provider_attestation.approved_at is None
+        or provider_event.source_locator_kind != "provider_record"
+        or provider_event.source_locator != target_transaction_id
+        or not _is_sha256(provider_event.source_event_id)
+        or not _is_sha256(provider_event.source_row_sha256)
+    ):
+        raise BuildError("provider_source_event_lineage_invalid")
+    current_decisions = tuple(
+        session.scalars(
+            select(CashFlowReconciliationDecision)
+            .where(
+                CashFlowReconciliationDecision.source_event_id == provider_event.source_event_id,
+                CashFlowReconciliationDecision.superseded_at.is_(None),
+            )
+            .order_by(CashFlowReconciliationDecision.decision_key)
+        )
+    )
+    if len(current_decisions) != 1:
+        raise BuildError("provider_current_decision_not_unique")
+    current = current_decisions[0]
+    canonical_payload_sha256 = canonical_decision_payload_sha256(current)
+    if (
+        not _is_sha256(current.decision_key)
+        or not _is_sha256(current.decision_payload_sha256)
+        or current.decision_payload_sha256 != canonical_payload_sha256
+    ):
+        raise BuildError("provider_current_decision_digest_mismatch")
+    if current.approved_at is None:
+        raise BuildError("provider_current_decision_unapproved")
+    if current.resolution_kind == "unresolved":
+        if (
+            current.decision_authority != "provider"
+            or current.methodology_version != "provider-api-v1"
+            or current.confidence != "provisional"
+            or current.target_transaction_id is not None
+            or current.assumption_code not in _PROVIDER_UNRESOLVED_ASSUMPTION_CODES
+        ):
+            raise BuildError("provider_current_unresolved_lineage_invalid")
+        return ProviderLineageMatch(
+            unresolved_reference={
+                "evidence_source_row_ordinal": source_row.ordinal,
+                "provider_source_event_id": provider_event.source_event_id,
+                "expected_provider_source_row_sha256": provider_event.source_row_sha256,
+                "expected_current_decision_key": current.decision_key,
+                "expected_current_decision_payload_sha256": canonical_payload_sha256,
+            }
+        )
+    if (
+        current.resolution_kind != "provider_exact"
+        or current.classification not in {"external_in", "external_out"}
+        or current.target_transaction_id != target_transaction_id
+        or current.confidence == "provisional"
+        or current.effective_date != target_transaction.date
+        or current.effective_timezone is None
+        or not decision_date_basis_matches_source(current, provider_event)
+    ):
+        raise BuildError("provider_current_resolved_lineage_invalid")
+    if (
+        current.classification != event.classification
+        or current.signed_external_amount != event.signed_external_amount
+        or provider_event.currency != target_transaction.currency
+    ):
+        raise BuildError("provider_resolved_economics_mismatch")
+    return ProviderLineageMatch(
+        resolved_effective_date=current.effective_date,
+        resolved_effective_timezone=current.effective_timezone,
     )
 
 
@@ -599,6 +747,7 @@ def _build_document(
     )
     counts: Counter[str] = Counter()
     events: list[dict[str, object]] = []
+    provider_unresolved_resolutions: list[dict[str, object]] = []
     for event, source_row in matched:
         if source_row.signed_amount is None:
             raise BuildError("csv_amount_invalid")
@@ -611,13 +760,31 @@ def _build_document(
                 "source_row_sha256": source_row.source_row_sha256,
             }
         )
-        disposition, resolution, effective_date, date_basis, assumption_code = _resolve_event(
+        (
+            disposition,
+            resolution,
+            effective_date,
+            date_basis,
+            assumption_code,
+            target_transaction,
+        ) = _resolve_event(session, inventory, event, source_row, source_event_id)
+        provider_match = _provider_lineage_match(
             session,
             inventory,
             event,
             source_row,
-            source_event_id,
+            target_transaction,
         )
+        if provider_match.unresolved_reference is not None:
+            provider_unresolved_resolutions.append(provider_match.unresolved_reference)
+        effective_timezone = event.effective_timezone
+        decision_authority = event.decision_authority
+        if provider_match.resolved_effective_date is not None:
+            effective_date = provider_match.resolved_effective_date
+            date_basis = "owner_resolved"
+            effective_timezone = provider_match.resolved_effective_timezone
+            decision_authority = "owner_approved"
+            assumption_code = _CORROBORATING_PROVIDER_RESOLVED_ASSUMPTION
         counts[
             "provider_exact" if disposition == "provider_supersedes_supplement" else disposition
         ] += 1
@@ -654,12 +821,10 @@ def _build_document(
                     effective_date.isoformat() if effective_date is not None else None
                 ),
                 "effective_date_basis": date_basis,
-                "effective_timezone": (
-                    None if disposition == "unresolved" else event.effective_timezone
-                ),
+                "effective_timezone": (None if disposition == "unresolved" else effective_timezone),
                 "confidence": event.confidence,
                 "assumption_code": assumption_code,
-                "decision_authority": event.decision_authority,
+                "decision_authority": decision_authority,
                 "resolution": resolution,
             }
         )
@@ -705,8 +870,11 @@ def _build_document(
         )
     )
     candidate_hashes = sorted(row.source_row_sha256 for row in rows if row.is_cashflow_candidate)
+    schema_version = (
+        "4" if inventory.source_type in {"brokerage_statement", "owner_reconciliation"} else "3"
+    )
     document: dict[str, object] = {
-        "schema_version": "3",
+        "schema_version": schema_version,
         "account_id": inventory.account_id,
         "account_identity_sha256": account_identity_sha256,
         "account_mapping_basis": "provider_account_id",
@@ -729,6 +897,17 @@ def _build_document(
         "gaps": gaps,
         "events": events,
     }
+    if schema_version == "4":
+        provider_event_ids = [
+            cast(str, resolution["provider_source_event_id"])
+            for resolution in provider_unresolved_resolutions
+        ]
+        if len(provider_event_ids) != len(set(provider_event_ids)):
+            raise BuildError("provider_resolution_evidence_ambiguous")
+        document["provider_unresolved_resolutions"] = sorted(
+            provider_unresolved_resolutions,
+            key=lambda resolution: cast(int, resolution["evidence_source_row_ordinal"]),
+        )
     return document, counts
 
 

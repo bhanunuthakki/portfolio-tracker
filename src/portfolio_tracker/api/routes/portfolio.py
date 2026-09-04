@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -40,11 +40,11 @@ from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
+from portfolio_tracker.services.cashflow_source_coverage import assess_cashflow_source_coverage
 from portfolio_tracker.services.external_flow_ledger import (
+    build_external_flow_ledger,
     effective_classification,
-    is_external_cashflow,
     load_transaction_overrides,
-    signed_cashflow,
 )
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -484,54 +484,94 @@ def cashflow_audit(
     """
     if end_date is None:
         end_date = date.today()
-    accts = active_account_ids(session)
+    active_accts = active_account_ids(session)
     if start_date is None:
         # For diagnostics, always go as far back as the data goes (24 months
         # by Plaid's retention) so the user sees every external cashflow.
         earliest_tx = (
             session.execute(
                 select(func.min(InvestmentTransaction.date)).where(
-                    InvestmentTransaction.account_id.in_(accts)
+                    InvestmentTransaction.account_id.in_(active_accts)
                 )
             ).scalar_one_or_none()
-            if accts
+            if active_accts
             else None
         )
-        start_date = earliest_tx or (end_date - timedelta(days=730))
-
-    rows: list[Any] = []
-    if accts:
-        rows = list(
-            session.execute(
-                select(
-                    InvestmentTransaction.type,
-                    InvestmentTransaction.subtype,
-                    func.count(InvestmentTransaction.plaid_investment_transaction_id),
-                    func.sum(InvestmentTransaction.amount),
-                )
-                .where(InvestmentTransaction.date >= start_date)
-                .where(InvestmentTransaction.date <= end_date)
-                .where(InvestmentTransaction.account_id.in_(accts))
-                .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-                .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-            ).all()
+        # The canonical ledger is open on the left because the opening value
+        # already contains same-day flows. Move the implicit boundary back one
+        # day so the legacy "all available history" default still includes the
+        # earliest transaction.
+        start_date = (
+            earliest_tx - timedelta(days=1)
+            if earliest_tx is not None
+            else end_date - timedelta(days=730)
         )
 
+    accts = performance.performance_account_ids(session, start_date, end_date)
+    source_coverage = assess_cashflow_source_coverage(
+        session,
+        start_date,
+        end_date,
+        account_ids=accts,
+    )
+    ledger = build_external_flow_ledger(
+        session,
+        start_date,
+        end_date,
+        account_ids=accts,
+    )
+    if ledger.issues or not source_coverage.is_complete:
+        # The legacy schema requires a non-null total. Returning 409 is the
+        # only fail-closed representation that preserves that response shape;
+        # the replacement v1 endpoint exposes the detailed issue/coverage
+        # packet and a null total in this state.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "cash-flow audit unavailable: canonical ledger or source coverage is incomplete",
+        )
+
+    grouped: dict[tuple[str, str | None, bool], tuple[int, Decimal]] = {}
+    represented_transaction_ids: set[str] = set()
+    for entry in ledger.entries:
+        is_external = entry.classification != "internal"
+        key = (entry.type, entry.subtype, is_external)
+        count, total_amount = grouped.get(key, (0, Decimal(0)))
+        grouped[key] = (count + 1, total_amount + entry.amount)
+        if entry.transaction_id is not None:
+            represented_transaction_ids.add(entry.transaction_id)
+        represented_transaction_ids.update(entry.component_transaction_ids)
+
+    # Retain the legacy endpoint's diagnostic rows for trades and other
+    # non-cashflow-shaped transactions. Every row that can affect performance
+    # is represented by the canonical ledger above; these remaining rows are
+    # informational and always classified as non-external.
+    if accts:
+        unrepresented_rows = session.scalars(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.date > start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(
+                InvestmentTransaction.plaid_investment_transaction_id.notin_(
+                    represented_transaction_ids
+                )
+            )
+        )
+        for transaction in unrepresented_rows:
+            key = (transaction.type, transaction.subtype, False)
+            count, total_amount = grouped.get(key, (0, Decimal(0)))
+            grouped[key] = (count + 1, total_amount + Decimal(transaction.amount or 0))
+
     groups: list[CashflowGroupOut] = []
-    net_in = Decimal(0)
-    for tx_type, tx_subtype, count, total_amount in rows:
-        is_external = is_external_cashflow(tx_type, tx_subtype)
-        if is_external:
-            # Use the same signed-cashflow logic as TWR so the audit total
-            # exactly matches what the chart sees. `_signed_cashflow` handles
-            # the sign-convention inconsistencies across brokers per subtype.
-            net_in += signed_cashflow(tx_type, tx_subtype, Decimal(total_amount or 0))
+    for (tx_type, tx_subtype, is_external), (count, total_amount) in sorted(
+        grouped.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2])
+    ):
         groups.append(
             CashflowGroupOut(
-                type=str(tx_type),
+                type=tx_type,
                 subtype=tx_subtype,
-                count=int(count),
-                sum_amount=Decimal(total_amount or 0),
+                count=count,
+                sum_amount=total_amount,
                 classified_as_external_cashflow=is_external,
             )
         )
@@ -540,8 +580,10 @@ def cashflow_audit(
         "Direction by subtype: `contribution`/`deposit`/`rollover`/`wire`/`ach` "
         "are inflows; `withdrawal` is outflow; `transfer` follows Plaid's signed "
         "amount because brokers use it for both directions.",
+        "Rows and the net total come from the same canonical external-flow ledger "
+        "as performance, including owner overrides and reconciliation provenance.",
         "Trades, dividends, interest, and fees are intentionally excluded — they "
-        "affect value but not basis.",
+        "affect value but are not external cash flows.",
         "`transfer/assignment` and other corporate-action subtypes are treated as INTERNAL.",
     ]
 
@@ -549,7 +591,7 @@ def cashflow_audit(
         start_date=start_date,
         end_date=end_date,
         groups=groups,
-        net_external_cashflow_in=net_in,
+        net_external_cashflow_in=ledger.net_external_cashflow_in,
         notes=notes,
     )
 

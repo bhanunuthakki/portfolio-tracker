@@ -193,6 +193,7 @@ _PROVIDER_UNRESOLVED_ASSUMPTION_CODES = frozenset(
 _CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION = (
     "corroborating_evidence_resolves_provider_unresolved"
 )
+_CORROBORATING_PROVIDER_RESOLVED_ASSUMPTION = "corroborating_evidence_confirms_provider_resolved"
 _ROBINHOOD_HEADERS: tuple[str, ...] = (
     "Activity Date",
     "Process Date",
@@ -1421,9 +1422,17 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         provider_unresolved_resolutions = ()
     if source_type == "brokerage_statement" and any(
         event.ledger_effective_date is not None
-        and (
-            event.effective_date_basis != "source_activity"
-            or event.ledger_effective_date != event.activity_date
+        and not (
+            event.effective_date_basis == "source_activity"
+            and event.ledger_effective_date == event.activity_date
+        )
+        and not (
+            schema_version == "4"
+            and event.resolution_kind == "existing_transaction"
+            and event.disposition == "provider_exact"
+            and event.effective_date_basis == "owner_resolved"
+            and event.decision_authority == "owner_approved"
+            and event.assumption_code == _CORROBORATING_PROVIDER_RESOLVED_ASSUMPTION
         )
         for event in events
     ):
@@ -1676,6 +1685,14 @@ def _plan_event(session: Session, manifest: _Manifest, event: _Event) -> PlanEnt
         event.effective_date_basis == "provider_posting" and event.ledger_effective_date != tx.date
     ):
         reason = "provider_posting_basis_does_not_match_target_date"
+    elif (
+        manifest.schema_version == "4"
+        and manifest.source_type == "brokerage_statement"
+        and event.effective_date_basis == "owner_resolved"
+        and event.assumption_code == _CORROBORATING_PROVIDER_RESOLVED_ASSUMPTION
+        and event.ledger_effective_date != tx.date
+    ):
+        reason = "provider_corroboration_date_does_not_match_target_date"
     else:
         reason = ""
     if reason:

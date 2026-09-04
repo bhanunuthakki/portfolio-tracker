@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import sys
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,14 +12,22 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from portfolio_tracker.jobs.reconcile_cashflow_manifest import apply_reconciliation_plan
 from portfolio_tracker.models import (
     Account,
     Base,
+    CashFlowReconciliationDecision,
+    CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
     Security,
 )
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_decision_payload_sha256,
+)
+from portfolio_tracker.services.external_flow_ledger import build_external_flow_ledger
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -40,7 +48,7 @@ def _database(path: Path, events: list[dict[str, object]]) -> tuple[int, str]:
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
         connection.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32))")
-        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0027')")
+        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0031')")
     raw_account_identity = "private-provider-account-id"
     with Session(engine) as session:
         item = Item(
@@ -228,6 +236,104 @@ def _build(
     )
 
 
+def _add_provider_unresolved(
+    database: Path,
+    *,
+    source_event_id: str = "e" * 64,
+    decision_key: str = "d" * 64,
+) -> tuple[str, str, str]:
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        transaction = session.get(
+            InvestmentTransaction,
+            "private-provider-transaction-0",
+        )
+        assert transaction is not None
+        captured_at = datetime(2026, 1, 1, tzinfo=UTC)
+        source_row_sha256 = hashlib.sha256(source_event_id.encode()).hexdigest()
+        attestation = CashFlowSourceAttestation(
+            attestation_key=hashlib.sha256(f"attestation:{source_event_id}".encode()).hexdigest(),
+            account_id=transaction.account_id,
+            coverage_start=transaction.date,
+            coverage_end=transaction.date,
+            source_type="provider_api",
+            broker_archive_coverage="unasserted",
+            source_reference=f"private:provider:{source_event_id}",
+            source_sha256=hashlib.sha256(f"source:{source_event_id}".encode()).hexdigest(),
+            captured_at=captured_at,
+            approved_at=captured_at,
+            methodology_version="provider-api-v1",
+        )
+        session.add(attestation)
+        session.flush()
+        provider_event = CashFlowSourceEvent(
+            source_event_id=source_event_id,
+            attestation_id=attestation.attestation_id,
+            source_record_id=transaction.plaid_investment_transaction_id,
+            source_locator_kind="provider_record",
+            source_locator=transaction.plaid_investment_transaction_id,
+            source_row_ordinal=None,
+            source_page=None,
+            source_line=None,
+            source_row_sha256=source_row_sha256,
+            activity_date=transaction.date,
+            process_date=None,
+            settlement_date=None,
+            source_amount=transaction.amount,
+            source_amount_sign_basis="provider_reported",
+            currency=transaction.currency,
+            source_code=transaction.type,
+        )
+        decision = CashFlowReconciliationDecision(
+            decision_key=decision_key,
+            source_event_id=source_event_id,
+            target_transaction_id=None,
+            resolution_kind="unresolved",
+            classification=None,
+            signed_external_amount=None,
+            effective_date=None,
+            effective_date_basis=None,
+            effective_timezone=None,
+            decision_authority="provider",
+            confidence="provisional",
+            assumption_code="provider_cash_classification_unresolved",
+            methodology_version="provider-api-v1",
+            decision_payload_sha256="0" * 64,
+            approved_at=captured_at,
+        )
+        decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+        session.add_all([provider_event, decision])
+        session.commit()
+        decision_payload_sha256 = decision.decision_payload_sha256
+    engine.dispose()
+    return source_row_sha256, decision_key, decision_payload_sha256
+
+
+def _mark_provider_decision_resolved(database: Path) -> None:
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        transaction = session.get(
+            InvestmentTransaction,
+            "private-provider-transaction-0",
+        )
+        decision = session.get(CashFlowReconciliationDecision, "d" * 64)
+        assert transaction is not None
+        assert decision is not None
+        decision.target_transaction_id = transaction.plaid_investment_transaction_id
+        decision.resolution_kind = "provider_exact"
+        decision.classification = "external_in"
+        decision.signed_external_amount = abs(transaction.amount)
+        decision.effective_date = transaction.date
+        decision.effective_date_basis = "provider_posting"
+        decision.effective_timezone = "provider-date"
+        decision.decision_authority = "provider"
+        decision.confidence = "exact"
+        decision.assumption_code = "provider_cash_deposit"
+        decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+        session.commit()
+    engine.dispose()
+
+
 def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     tmp_path: Path,
 ) -> None:
@@ -252,7 +358,8 @@ def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     assert len(manifests) == 1
     assert os.stat(manifests[0]).st_mode & 0o777 == 0o600
     payload = json.loads(manifests[0].read_text(encoding="utf-8"))
-    assert payload["schema_version"] == "3"
+    assert payload["schema_version"] == "4"
+    assert payload["provider_unresolved_resolutions"] == []
     assert payload["requested_return_start"] == _RETURN_START.isoformat()
     assert payload["requested_return_end"] == _RETURN_END.isoformat()
     assert payload["coverage_start"] == "2025-01-01"
@@ -266,6 +373,168 @@ def test_builds_68_explicit_one_to_one_resolutions_without_mutating_database(
     assert "private-provider-transaction" not in serialized
     assert "Private Account Name" not in serialized
     assert "private-credential" not in serialized
+
+
+def test_emits_digest_bound_provider_unresolved_resolution_deterministically(
+    tmp_path: Path,
+) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    source_row_sha256, decision_key, decision_payload_sha256 = _add_provider_unresolved(database)
+    before = _sha256(database)
+
+    first_output = tmp_path / "first-output"
+    second_output = tmp_path / "second-output"
+    first_result = _build(database, inventory, csv_path, first_output)
+    second_result = _build(database, inventory, csv_path, second_output)
+
+    assert _sha256(database) == before
+    assert first_result.output_digest == second_result.output_digest
+    first = json.loads(next(first_output.glob("*.json")).read_text(encoding="utf-8"))
+    second = json.loads(next(second_output.glob("*.json")).read_text(encoding="utf-8"))
+    assert first == second
+    assert first["schema_version"] == "4"
+    assert first["provider_unresolved_resolutions"] == [
+        {
+            "evidence_source_row_ordinal": 1,
+            "provider_source_event_id": "e" * 64,
+            "expected_provider_source_row_sha256": source_row_sha256,
+            "expected_current_decision_key": decision_key,
+            "expected_current_decision_payload_sha256": decision_payload_sha256,
+        }
+    ]
+
+
+def test_ambiguous_provider_source_event_lineage_fails_closed(tmp_path: Path) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    _add_provider_unresolved(database)
+    _add_provider_unresolved(database, source_event_id="f" * 64, decision_key="c" * 64)
+
+    with pytest.raises(builder.BuildError, match="provider_source_event_ambiguous"):
+        _build(database, inventory, csv_path, tmp_path / "output")
+
+    assert not (tmp_path / "output").exists()
+
+
+def test_corrupt_provider_current_decision_lineage_fails_closed(tmp_path: Path) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    _add_provider_unresolved(database)
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        decision = session.get(CashFlowReconciliationDecision, "d" * 64)
+        assert decision is not None
+        decision.decision_payload_sha256 = "0" * 64
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(builder.BuildError, match="provider_current_decision_digest_mismatch"):
+        _build(database, inventory, csv_path, tmp_path / "output")
+
+    assert not (tmp_path / "output").exists()
+
+
+def test_shifted_statement_corroboration_applies_as_exactly_one_provider_dated_flow(
+    tmp_path: Path,
+) -> None:
+    events = _events(1)
+    database, inventory, csv_path = _inputs(tmp_path, events)
+    provider_date = date.fromisoformat(str(events[0]["date"])) + timedelta(days=7)
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        transaction = session.get(
+            InvestmentTransaction,
+            "private-provider-transaction-0",
+        )
+        assert transaction is not None
+        transaction.date = provider_date
+        session.commit()
+    engine.dispose()
+    _add_provider_unresolved(database)
+    _mark_provider_decision_resolved(database)
+    output = tmp_path / "output"
+
+    _build(database, inventory, csv_path, output)
+
+    manifest_path = next(output.glob("*.json"))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert payload["provider_unresolved_resolutions"] == []
+    assert payload["events"][0]["ledger_effective_date"] == provider_date.isoformat()
+    assert payload["events"][0]["effective_date_basis"] == "owner_resolved"
+    assert payload["events"][0]["decision_authority"] == "owner_approved"
+    assert (
+        payload["events"][0]["assumption_code"]
+        == "corroborating_evidence_confirms_provider_resolved"
+    )
+
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        source = builder.ManifestSource(manifest_path, csv_path)
+        plan = builder.build_reconciliation_plan(session, [source])
+        assert plan.conflict_count == 0
+        builder_result = apply_reconciliation_plan(
+            session,
+            plan,
+            expected_plan_digest=plan.plan_digest,
+            approved_at=datetime(2026, 1, 2, tzinfo=UTC),
+            software_revision="a" * 40,
+            backup_reference="private:backup:test",
+            preview_reference="private:preview:test",
+        )
+        assert builder_result.committed is True
+        ledger = build_external_flow_ledger(
+            session,
+            _RETURN_START,
+            _RETURN_END,
+            account_ids=frozenset({plan.entries[0].account_id}),
+        )
+        assert ledger.issues == ()
+        assert len(ledger.entries) == 1
+        assert ledger.entries[0].date == provider_date
+        assert ledger.entries[0].signed_external_amount == Decimal("1.00")
+        assert len(ledger.entries[0].source_event_ids) == 2
+    engine.dispose()
+
+
+def test_provider_resolved_economics_disagreement_fails_closed(tmp_path: Path) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    _add_provider_unresolved(database)
+    _mark_provider_decision_resolved(database)
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        decision = session.get(CashFlowReconciliationDecision, "d" * 64)
+        assert decision is not None
+        decision.signed_external_amount = Decimal("2.00")
+        decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(builder.BuildError, match="provider_resolved_economics_mismatch"):
+        _build(database, inventory, csv_path, tmp_path / "output")
+
+    assert not (tmp_path / "output").exists()
+
+
+def test_provider_corroboration_date_must_equal_exact_target_date(tmp_path: Path) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    _add_provider_unresolved(database)
+    _mark_provider_decision_resolved(database)
+    output = tmp_path / "output"
+    _build(database, inventory, csv_path, output)
+    manifest_path = next(output.glob("*.json"))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["events"][0]["ledger_effective_date"] = "2025-01-03"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    engine = create_engine(f"sqlite:///{database}", future=True)
+    with Session(engine) as session:
+        plan = builder.build_reconciliation_plan(
+            session,
+            [builder.ManifestSource(manifest_path, csv_path)],
+        )
+        assert plan.conflict_count == 1
+        assert plan.entries[0].reason_code == (
+            "provider_corroboration_date_does_not_match_target_date"
+        )
+    engine.dispose()
 
 
 def test_multiple_same_account_candidates_fail_closed_without_output(tmp_path: Path) -> None:

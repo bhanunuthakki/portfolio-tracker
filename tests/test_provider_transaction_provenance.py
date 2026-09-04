@@ -22,7 +22,10 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.plaid_client import PlaidInvestmentTransaction
 from portfolio_tracker.provider_delivery import build_provider_delivery_metadata
-from portfolio_tracker.services.cashflow_source_coverage import assess_cashflow_source_coverage
+from portfolio_tracker.services.cashflow_source_coverage import (
+    assess_cashflow_source_coverage,
+    canonical_decision_payload_sha256,
+)
 from portfolio_tracker.services.external_flow_ledger import build_external_flow_ledger
 from portfolio_tracker.services.provider_transaction_provenance import (
     ProviderAccountTransactionCapture,
@@ -139,6 +142,47 @@ def _capture(
         provider_history_gaps=provider_history_gaps,
         broker_archive_coverage_basis=broker_archive_coverage_basis,
     )
+
+
+def _supersede_provider_unresolved_with_owner_resolution(
+    session: Session,
+    event: CashFlowSourceEvent,
+    original: CashFlowReconciliationDecision,
+    transaction: PlaidInvestmentTransaction,
+) -> CashFlowReconciliationDecision:
+    approved_at = _CAPTURED + timedelta(hours=1)
+    replacement = CashFlowReconciliationDecision(
+        decision_key="0" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id=transaction.plaid_investment_transaction_id,
+        resolution_kind="provider_exact",
+        classification="external_in",
+        signed_external_amount=abs(transaction.amount),
+        effective_date=transaction.date,
+        effective_date_basis="owner_resolved",
+        effective_timezone="America/New_York",
+        decision_authority="owner_approved",
+        confidence="exact",
+        assumption_code="corroborating_evidence_resolves_provider_unresolved",
+        methodology_version="2",
+        decision_payload_sha256="0" * 64,
+        approved_at=approved_at,
+        superseded_at=None,
+        superseded_by_decision_key=None,
+    )
+    replacement.decision_payload_sha256 = canonical_decision_payload_sha256(replacement)
+    replacement.decision_key = _digest(
+        {
+            "identity_version": "cashflow_reconciliation_decision.v1",
+            "source_event_id": replacement.source_event_id,
+            "decision_payload_sha256": replacement.decision_payload_sha256,
+        }
+    )
+    original.superseded_at = approved_at
+    original.superseded_by_decision_key = replacement.decision_key
+    session.add(replacement)
+    session.flush()
+    return replacement
 
 
 def test_provider_deposit_persists_certifying_event_and_approved_decision(session: Session):
@@ -378,6 +422,94 @@ def test_provider_attestation_retry_is_idempotent(session: Session):
     assert len(tuple(session.scalars(select(CashFlowSourceAttestation)))) == 1
     assert len(tuple(session.scalars(select(CashFlowSourceEvent)))) == 1
     assert len(tuple(session.scalars(select(CashFlowReconciliationDecision)))) == 1
+
+
+def test_exact_provider_recapture_preserves_schema_v4_owner_resolution(session: Session):
+    account = _account(session, "owner-resolution-retry")
+    transaction = _source_transaction(
+        account,
+        tx_id="owner-resolved-provider-tx",
+        subtype="provider_specific_cash",
+        amount=Decimal("100"),
+    )
+    _store_transaction(session, account, transaction)
+    first = persist_provider_account_attestation(session, _capture(account, (transaction,)))
+    session.flush()
+    event = session.scalar(select(CashFlowSourceEvent))
+    original = session.scalar(
+        select(CashFlowReconciliationDecision).where(
+            CashFlowReconciliationDecision.superseded_at.is_(None)
+        )
+    )
+    assert event is not None and original is not None
+    assert original.resolution_kind == "unresolved"
+    replacement = _supersede_provider_unresolved_with_owner_resolution(
+        session, event, original, transaction
+    )
+
+    exact_retry = persist_provider_account_attestation(
+        session,
+        _capture(account, (transaction,), captured_at=_CAPTURED + timedelta(hours=2)),
+    )
+    overlapping_retry = persist_provider_account_attestation(
+        session,
+        _capture(
+            account,
+            (transaction,),
+            captured_at=_CAPTURED + timedelta(hours=3),
+            coverage_start=date(2025, 1, 5),
+            coverage_end=date(2025, 2, 5),
+        ),
+    )
+    session.flush()
+
+    assert exact_retry.attestation_key == first.attestation_key
+    assert exact_retry.created is False
+    assert overlapping_retry.created is True
+    current = session.scalar(
+        select(CashFlowReconciliationDecision).where(
+            CashFlowReconciliationDecision.superseded_at.is_(None)
+        )
+    )
+    assert current is not None
+    assert current.decision_key == replacement.decision_key
+    assert len(tuple(session.scalars(select(CashFlowReconciliationDecision)))) == 2
+    assert len(tuple(session.scalars(select(CashFlowSourceAttestationEventLink)))) == 2
+
+
+def test_provider_recapture_rejects_broken_owner_supersession_lineage(session: Session):
+    account = _account(session, "owner-resolution-drift")
+    transaction = _source_transaction(
+        account,
+        tx_id="owner-resolved-provider-drift",
+        subtype="provider_specific_cash",
+        amount=Decimal("100"),
+    )
+    _store_transaction(session, account, transaction)
+    persist_provider_account_attestation(session, _capture(account, (transaction,)))
+    session.flush()
+    event = session.scalar(select(CashFlowSourceEvent))
+    original = session.scalar(
+        select(CashFlowReconciliationDecision).where(
+            CashFlowReconciliationDecision.superseded_at.is_(None)
+        )
+    )
+    assert event is not None and original is not None
+    replacement = _supersede_provider_unresolved_with_owner_resolution(
+        session, event, original, transaction
+    )
+    assert replacement.approved_at is not None
+    original.superseded_at = replacement.approved_at + timedelta(seconds=1)
+    session.flush()
+
+    with pytest.raises(
+        ProviderTransactionConflictError,
+        match="stored provider attestation has drifted",
+    ):
+        persist_provider_account_attestation(
+            session,
+            _capture(account, (transaction,), captured_at=_CAPTURED + timedelta(hours=2)),
+        )
 
 
 def test_provider_disclosed_history_gap_prevents_source_coverage_certification(
