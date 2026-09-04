@@ -332,6 +332,41 @@ when the active-account universe lacks evidence, and a formerly active account
 that has since been removed still requires explicit lifecycle evidence before
 the relevant historical window can be certified.
 
+## Canonical return retrieval
+
+Application consumers and agent answers use
+`GET /api/v1/analytics/performance` as the sole canonical return calculation.
+They do not independently rebuild a headline return from holdings,
+transactions, or a prior report.
+
+For a reproducible fixed-window request, callers always supply all calculation
+parameters explicitly:
+
+```text
+start_date=YYYY-MM-DD
+end_date=YYYY-MM-DD
+include_backfill=true
+reserve_amount=0
+exclude_index_etfs=false
+```
+
+For a "latest" 3-month, 6-month, 1-year, or 2-year lookback, the caller first
+requests the endpoint with `include_backfill=true` to obtain the resolved
+`series.end_date`, which is the latest complete broker observation. It then
+subtracts exactly 90, 180, 365, or 730 calendar days and repeats the request
+with both dates and all parameters explicit. The returned dates, methodology,
+methodology version, calculation status, certification, and reason codes are
+part of the answer.
+
+For an unchanged database, two identical explicit requests produce the same
+`series`. `meta.generated_at` is response-envelope timing metadata and is not
+part of calculation identity. When the result is available,
+`equation_receipt.calculation_id` is the deterministic identifier for its
+valuation, flow-ledger, benchmark-price, option, and boundary inputs. When it
+is unavailable, callers retain the stable failure reason codes and do not
+substitute an offline estimate as the canonical result. Any separately useful
+estimate must be labeled as such and must state its methodology and uncertainty.
+
 ## Safe writes and recovery
 
 Reconciliation is preview-first. A private preview names the exact source

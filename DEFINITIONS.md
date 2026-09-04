@@ -122,3 +122,23 @@ it is not the return value itself.
 receipt.
 **Not to be confused with.** A mathematically balanced equation or an approved
 source date range alone does not certify the underlying reconstruction.
+
+## Canonical Portfolio Return
+
+**Definition.** The whole-portfolio result produced only by
+`performance.modified_dietz` methodology version `2` over an explicit
+`(start_date, end_date]` window, the dated account universe, the canonical
+Effective external flow ledger, and cash-flow-matched benchmark books. For a
+"latest" lookback, `end_date` is first resolved to the latest complete broker
+observation and the requested 90-, 180-, 365-, or 730-day opening date is then
+calculated from that returned date. Identical explicit parameters against an
+unchanged database must produce the same `series` and, when available, the same
+input-derived `equation_receipt.calculation_id`.
+**Lives in.** `services/performance.py` and
+`GET /api/v1/analytics/performance`; the versioned API is the canonical fetch
+for application consumers and agent answers.
+**Not to be confused with.** An offline estimate, a current-holdings backcast,
+position-level alpha, or an unversioned verbal calculation. If the endpoint
+returns `calculation_status=unavailable`, consumers preserve that result and
+its reason codes rather than substituting another number as the Canonical
+portfolio return. A separately disclosed estimate remains an estimate.
