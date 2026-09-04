@@ -19,7 +19,8 @@ the profile so re-runs are idempotent: `local-{profile}-snaptrade`.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from collections.abc import Mapping
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated
 
@@ -34,11 +35,27 @@ from portfolio_tracker.db import get_session
 from portfolio_tracker.jobs._helpers import upsert_account, upsert_security
 from portfolio_tracker.models import (
     INVESTMENT_ACCOUNT_TYPES,
+    AccountValuationSourceKind,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
     ItemSource,
     SnapTradeUser,
+)
+from portfolio_tracker.plaid_client import PlaidAccount
+from portfolio_tracker.provider_delivery import ProviderPayloadError
+from portfolio_tracker.services.account_valuations import (
+    NewAccountValuationObservation,
+    canonical_account_balance_source_sha256,
+    record_account_valuation_observation,
+)
+from portfolio_tracker.services.provider_transaction_corrections import (
+    ProviderTransactionCorrectionApproval,
+)
+from portfolio_tracker.services.provider_transaction_provenance import (
+    ProviderAccountTransactionCapture,
+    ProviderHistoryGap,
+    persist_provider_account_attestation_with_correction_approvals,
 )
 from portfolio_tracker.snaptrade_client import (
     SnapTradeNotConfiguredError,
@@ -106,6 +123,26 @@ def sync(
         ),
     ] = 730,
 ) -> SyncResultOut:
+    return sync_with_transaction_correction_approvals(
+        session,
+        profile,
+        lookback_days,
+    )
+
+
+def sync_with_transaction_correction_approvals(
+    session: Session,
+    profile: SnapTradeProfile = SnapTradeProfile.PRIMARY,
+    lookback_days: int = 730,
+    *,
+    transaction_correction_approvals: Mapping[str, ProviderTransactionCorrectionApproval]
+    | None = None,
+) -> SyncResultOut:
+    """Run the sync with optional exact plan-digest correction approvals.
+
+    The public HTTP route never supplies this mapping. It is reserved for the
+    local preview/backup/owner-approval workflow.
+    """
     creds = _load_credentials(session, profile)
     if creds is None:
         raise HTTPException(
@@ -133,6 +170,80 @@ def sync(
             accounts_synced += 1
 
             holdings_resp = snaptrade_client.get_holdings(creds, snaptrade_account_id)
+            fetched_at = datetime.now(UTC)
+            holdings_available = _holdings_are_available(auth, plaid_shaped_account)
+            holdings_account = next(
+                (
+                    provider_account
+                    for provider_account in holdings_resp.accounts
+                    if provider_account.plaid_account_id == snaptrade_account_id
+                ),
+                None,
+            )
+            # In the pinned SDK, list_user_accounts owns account.balance.total;
+            # get_user_holdings owns same-currency balances[].cash. Its nested
+            # account object has no balance total, so combine the two direct
+            # provider fields rather than choosing one response wholesale.
+            total_value = plaid_shaped_account.provider_total_value
+            if total_value is not None:
+                cash_value = (
+                    holdings_account.provider_available_cash
+                    if holdings_account is not None
+                    and holdings_account.provider_available_cash is not None
+                    else plaid_shaped_account.provider_available_cash
+                )
+                source_reference = "account_information.list_user_accounts[].balance.total"
+                if cash_value is not None:
+                    source_reference += "+get_user_holdings.balances[].cash"
+                balance_as_of = plaid_shaped_account.provider_holdings_last_successful_sync
+                valuation_date = balance_as_of.date() if balance_as_of is not None else today
+                if balance_as_of is not None:
+                    source_reference += ";as_of=sync_status.holdings.last_successful_sync"
+                else:
+                    # SnapTrade can return cached state without a reliable
+                    # holdings timestamp. Fetch time is retained separately and
+                    # must not be described as the broker-data as-of time.
+                    source_reference += ";cached_as_fetched_no_provider_as_of"
+                if not holdings_available:
+                    source_reference += ";provider_state_unavailable"
+                is_empty = (
+                    holdings_available
+                    and total_value == 0
+                    and (cash_value is None or cash_value == 0)
+                    and not holdings_resp.holdings
+                )
+                currency = plaid_shaped_account.currency.upper()
+                record_account_valuation_observation(
+                    session,
+                    NewAccountValuationObservation(
+                        account_id=account.account_id,
+                        as_of_date=valuation_date,
+                        as_of_at=balance_as_of,
+                        total_value=total_value,
+                        cash_value=cash_value,
+                        currency=currency,
+                        source_kind=AccountValuationSourceKind.PROVIDER_API,
+                        source_provider="snaptrade",
+                        source_reference=source_reference,
+                        source_record_id=snaptrade_account_id,
+                        source_payload_sha256=canonical_account_balance_source_sha256(
+                            source_provider="snaptrade",
+                            provider_account_id=snaptrade_account_id,
+                            source_reference=source_reference,
+                            as_of_date=valuation_date,
+                            total_value=total_value,
+                            cash_value=cash_value,
+                            currency=currency,
+                        ),
+                        fetched_at=fetched_at,
+                        # A direct total is structurally complete when the
+                        # provider account/holdings state is available. A
+                        # missing provider timestamp remains explicit through
+                        # as_of_at=None and the capture-date source marker.
+                        is_complete=holdings_available,
+                        is_empty=is_empty,
+                    ),
+                )
             for sec in holdings_resp.securities:
                 upsert_security(session, sec)
             session.flush()
@@ -142,13 +253,14 @@ def sync(
             # leave a phantom row for any position the user fully exited
             # between two same-day syncs — the new response never names it, so
             # the stale row would survive and inflate today's value.
-            session.execute(
-                delete(HoldingSnapshot)
-                .where(HoldingSnapshot.snapshot_date == today)
-                .where(HoldingSnapshot.account_id == account.account_id)
-            )
+            if holdings_available:
+                session.execute(
+                    delete(HoldingSnapshot)
+                    .where(HoldingSnapshot.snapshot_date == today)
+                    .where(HoldingSnapshot.account_id == account.account_id)
+                )
 
-            for h in holdings_resp.holdings:
+            for h in holdings_resp.holdings if holdings_available else ():
                 security = next(
                     (
                         s
@@ -180,8 +292,13 @@ def sync(
             activities = snaptrade_client.get_account_activities(
                 creds, snaptrade_account_id, backfill_start, today
             )
+            activities_captured_at = datetime.now(UTC)
+            if activities.delivery is None:
+                raise ProviderPayloadError("SnapTrade activity delivery receipt is missing")
+            snaptrade_security_to_id: dict[str, int] = {}
             for sec in activities.securities:
-                upsert_security(session, sec)
+                stored_security = upsert_security(session, sec)
+                snaptrade_security_to_id[sec.plaid_security_id] = stored_security.security_id
             session.flush()
             for tx in activities.transactions:
                 from portfolio_tracker.models import Security as Sec
@@ -213,6 +330,26 @@ def sync(
                     )
                 )
                 transactions_written += 1
+            persist_provider_account_attestation_with_correction_approvals(
+                session,
+                ProviderAccountTransactionCapture(
+                    account_id=account.account_id,
+                    provider_account_id=snaptrade_account_id,
+                    coverage_start=backfill_start,
+                    coverage_end=today,
+                    delivery=activities.delivery,
+                    transactions=tuple(activities.transactions),
+                    security_ids_by_provider_id=snaptrade_security_to_id,
+                    captured_at=activities_captured_at,
+                    provider_history_gaps=_transaction_history_gaps(
+                        auth,
+                        plaid_shaped_account,
+                        coverage_start=backfill_start,
+                        coverage_end=today,
+                    ),
+                ),
+                transaction_correction_approvals,
+            )
 
     session.commit()
 
@@ -306,3 +443,65 @@ def _upsert_item(
     session.add(item)
     session.flush()
     return item
+
+
+def _holdings_are_available(
+    auth: snaptrade_client.SnapTradeBrokerageAuthorization,
+    account: PlaidAccount,
+) -> bool:
+    """Use only explicit provider failure states; do not invent staleness cutoffs."""
+
+    return (
+        auth.disabled is not True
+        and account.provider_account_status != "unavailable"
+        and account.provider_holdings_initial_sync_completed is not False
+    )
+
+
+def _transaction_history_gaps(
+    auth: snaptrade_client.SnapTradeBrokerageAuthorization,
+    account: PlaidAccount,
+    *,
+    coverage_start: date,
+    coverage_end: date,
+) -> tuple[ProviderHistoryGap, ...]:
+    """Translate only documented SnapTrade sync facts into coverage gaps."""
+
+    if (
+        auth.disabled is True
+        or account.provider_account_status == "unavailable"
+        or account.provider_transactions_initial_sync_completed is False
+    ):
+        return (ProviderHistoryGap(coverage_start, coverage_end),)
+
+    gaps: list[ProviderHistoryGap] = []
+    first_known = account.provider_first_transaction_date
+    if first_known is not None and first_known > coverage_start:
+        gaps.append(
+            ProviderHistoryGap(
+                coverage_start,
+                min(coverage_end, first_known - timedelta(days=1)),
+            )
+        )
+    last_sync = account.provider_transactions_last_successful_sync
+    if last_sync is not None and last_sync < coverage_end:
+        gaps.append(
+            ProviderHistoryGap(
+                max(coverage_start, last_sync + timedelta(days=1)),
+                coverage_end,
+            )
+        )
+    return _coalesce_history_gaps(tuple(gap for gap in gaps if gap.start <= gap.end))
+
+
+def _coalesce_history_gaps(
+    gaps: tuple[ProviderHistoryGap, ...],
+) -> tuple[ProviderHistoryGap, ...]:
+    merged: list[ProviderHistoryGap] = []
+    for gap in sorted(gaps, key=lambda value: (value.start, value.end)):
+        if not merged or gap.start > merged[-1].end + timedelta(days=1):
+            merged.append(gap)
+            continue
+        previous = merged[-1]
+        merged[-1] = ProviderHistoryGap(previous.start, max(previous.end, gap.end))
+    return tuple(merged)

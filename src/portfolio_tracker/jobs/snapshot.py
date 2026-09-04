@@ -14,6 +14,7 @@ Run manually:
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -26,7 +27,12 @@ from portfolio_tracker.jobs._helpers import (
     upsert_account,
     upsert_security,
 )
-from portfolio_tracker.models import HoldingSnapshot, Item, ItemSource
+from portfolio_tracker.models import AccountValuationSourceKind, HoldingSnapshot, Item, ItemSource
+from portfolio_tracker.services.account_valuations import (
+    NewAccountValuationObservation,
+    canonical_account_balance_source_sha256,
+    record_account_valuation_observation,
+)
 
 
 def run() -> int:
@@ -58,6 +64,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         return 0
     access_token = decrypt_token(item.plaid_access_token_encrypted)
     response = plaid_client.get_holdings(access_token)
+    fetched_at = datetime.now(UTC)
 
     plaid_account_to_id: dict[str, int] = {}
     for plaid_account in response.accounts:
@@ -65,6 +72,65 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
             continue
         account = upsert_account(session, item.item_id, plaid_account)
         plaid_account_to_id[plaid_account.plaid_account_id] = account.account_id
+
+    holding_account_ids = {holding.plaid_account_id for holding in response.holdings}
+    for plaid_account in response.accounts:
+        account_id = plaid_account_to_id.get(plaid_account.plaid_account_id)
+        total_value = plaid_account.provider_total_value
+        if account_id is None or total_value is None:
+            continue
+        cash_value = plaid_account.provider_available_cash
+        balance_currency = plaid_account.provider_balance_currency
+        if balance_currency is None:
+            # The account compatibility currency can default to USD, but a
+            # provider total without its own ISO currency is not certifiable.
+            continue
+        balance_as_of = plaid_account.provider_balance_as_of
+        valuation_date = balance_as_of.date() if balance_as_of is not None else snapshot_date
+        source_reference = "investments/holdings/get.accounts[].balances"
+        if balance_as_of is not None:
+            source_reference += ".last_updated_datetime"
+        else:
+            # Plaid documents holdings balances as potentially cached. The
+            # fetch timestamp is evidence of receipt, not a fabricated balance
+            # as-of timestamp when the provider omits last_updated_datetime.
+            source_reference += ";cached_as_fetched_no_provider_as_of"
+        is_empty = (
+            total_value == 0
+            and (cash_value is None or cash_value == 0)
+            and plaid_account.plaid_account_id not in holding_account_ids
+        )
+        record_account_valuation_observation(
+            session,
+            NewAccountValuationObservation(
+                account_id=account_id,
+                as_of_date=valuation_date,
+                as_of_at=balance_as_of,
+                total_value=total_value,
+                cash_value=cash_value,
+                currency=balance_currency,
+                source_kind=AccountValuationSourceKind.PROVIDER_API,
+                source_provider="plaid",
+                source_reference=source_reference,
+                source_record_id=plaid_account.plaid_account_id,
+                source_payload_sha256=canonical_account_balance_source_sha256(
+                    source_provider="plaid",
+                    provider_account_id=plaid_account.plaid_account_id,
+                    source_reference=source_reference,
+                    as_of_date=valuation_date,
+                    total_value=total_value,
+                    cash_value=cash_value,
+                    currency=balance_currency,
+                ),
+                fetched_at=fetched_at,
+                # Completeness describes the delivered account total, not the
+                # precision of its effective time. When Plaid omits the
+                # provider timestamp, the capture date and source marker keep
+                # that temporal uncertainty explicit for certification.
+                is_complete=True,
+                is_empty=is_empty,
+            ),
+        )
 
     plaid_security_to_id: dict[str, int] = {}
     for plaid_security in response.securities:
@@ -87,7 +153,10 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
             continue
         institution_value = holding.institution_value
         if institution_value is None and holding.institution_price is not None:
-            institution_value = holding.quantity * holding.institution_price
+            institution_value = plaid_client.normalize_provider_decimal(
+                holding.quantity * holding.institution_price,
+                quantum=Decimal("0.000001"),
+            )
         session.add(
             HoldingSnapshot(
                 snapshot_date=snapshot_date,
@@ -102,7 +171,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         )
         rows_written += 1
 
-    item.last_refreshed_at = datetime.now(UTC)
+    item.last_refreshed_at = fetched_at
     return rows_written
 
 

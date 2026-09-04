@@ -8,9 +8,24 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+CashFlowTransactionOrigin: TypeAlias = Literal[
+    "aggregator_transaction", "statement_supplement", "derived_share_transfer"
+]
+CashFlowDecisionAuthorityOut: TypeAlias = Literal[
+    "provider", "brokerage_statement", "owner_approved"
+]
+CashFlowDecisionConfidenceOut: TypeAlias = Literal["exact", "high", "provisional"]
+CashFlowEffectiveDateBasisOut: TypeAlias = Literal[
+    "source_activity",
+    "source_process",
+    "source_settlement",
+    "provider_posting",
+    "owner_resolved",
+]
 
 
 class LinkTokenOut(BaseModel):
@@ -108,7 +123,7 @@ class ConsolidatedHoldingOut(BaseModel):
     the actual blended per-share cost across the user's accounts. None when
     we don't have cost basis from any account or when total_quantity is 0.
 
-    Returns / TWR continue to be computed at the per-account level inside
+    Returns continue to be computed at the per-account level inside
     the `services/performance.py` pipeline; this consolidation is a
     presentation-layer rollup only.
     """
@@ -148,10 +163,10 @@ class InvestmentTransactionOut(BaseModel):
     # User-set override (None if no override). One of:
     #   external_in / external_out / internal
     override_classification: str | None = None
-    # The classification actually used by the cashflow / TWR pipeline.
-    # Same as override_classification when set; otherwise derived from
-    # type+subtype heuristics. Useful for the UI to show "what's the
-    # pipeline doing with this row right now."
+    # The classification actually used by the Modified Dietz cash-flow
+    # pipeline. A current provenance decision wins; otherwise this is the
+    # owner override or deterministic name/type/subtype classification.
+    # `excluded` is possible for a provenance-managed non-flow event.
     effective_classification: str | None = None
 
 
@@ -162,7 +177,7 @@ class PerformancePoint(BaseModel):
     # Start at 0 on `start_date`, rise/fall thereafter.
     # Same denominator structure for all four so the gap between lines
     # = pure relative performance, V_start-independent in spirit.
-    portfolio_return_pct: Decimal
+    portfolio_return_pct: Decimal | None
     spy_return_pct: Decimal | None
     qqq_return_pct: Decimal | None
     policy_return_pct: Decimal | None
@@ -173,22 +188,312 @@ class PerformancePoint(BaseModel):
     policy_equivalent_value: Decimal | None
 
 
+class SourceCoverageRangeOut(BaseModel):
+    start_date: date
+    end_date: date
+
+
+class CashFlowSourceGapOut(BaseModel):
+    start_date: date
+    end_date: date
+    reason_code: str
+
+
+class CashFlowSourceAttestationOut(BaseModel):
+    attestation_key: str
+    account_id: int
+    coverage_start: date
+    coverage_end: date
+    source_type: str
+    broker_archive_coverage: Literal[
+        "unasserted", "provider_asserted", "statement_attested", "owner_asserted"
+    ]
+    source_reference: str
+    source_sha256: str
+    captured_at: datetime
+    approved_at: datetime | None
+    lifecycle_status: str
+    superseded_at: datetime | None
+    superseded_by_attestation_key: str | None
+    methodology_version: str
+    account_identity_sha256: str | None = None
+    account_mapping_basis: str | None = None
+    account_mapping_confidence: str | None = None
+    source_format: str | None = None
+    parser_version: str | None = None
+    source_timezone: str | None = None
+    source_row_count: int | None = None
+    cashflow_candidate_count: int | None = None
+    persisted_source_event_count: int = 0
+    source_event_set_sha256: str | None = None
+    manifest_sha256: str | None = None
+    gaps: list[CashFlowSourceGapOut]
+    validation_reason_codes: list[str]
+
+
+class CashFlowAccountSourceCoverageOut(BaseModel):
+    account_id: int
+    status: str
+    covered_ranges: list[SourceCoverageRangeOut]
+    uncovered_ranges: list[SourceCoverageRangeOut]
+    attestation_keys: list[str]
+    broker_archive_status: Literal["complete", "partial", "unasserted"]
+    broker_archive_covered_ranges: list[SourceCoverageRangeOut]
+    broker_archive_uncovered_ranges: list[SourceCoverageRangeOut]
+
+
+class CashFlowSourceCoverageOut(BaseModel):
+    status: str
+    is_complete: bool
+    broker_archive_status: Literal["complete", "partial", "unasserted"]
+    broker_archive_is_complete: bool
+    requested_start_date: date
+    requested_end_date: date
+    required_start_date: date | None
+    required_end_date: date | None
+    accounts: list[CashFlowAccountSourceCoverageOut]
+    attestations: list[CashFlowSourceAttestationOut]
+
+
+class PerformanceDatedCashflow(BaseModel):
+    """One net external flow used by the whole-portfolio return window."""
+
+    date: date
+    amount: Decimal
+    flow_ids: list[str] = Field(default_factory=list)
+
+
+class PerformanceOperativeCashflow(BaseModel):
+    """One operative ledger row and its immutable reconciliation lineage."""
+
+    flow_id: str
+    date: date
+    amount: Decimal
+    transaction_id: str | None
+    transaction_origin: CashFlowTransactionOrigin | Literal["calculation_adjustment"]
+    source_event_ids: list[str]
+    source_attestation_keys: list[str]
+    active_decision_keys: list[str]
+    decision_authorities: list[CashFlowDecisionAuthorityOut]
+    decision_confidences: list[CashFlowDecisionConfidenceOut]
+    assumption_codes: list[str]
+    effective_date_bases: list[CashFlowEffectiveDateBasisOut]
+
+
+class PerformanceBenchmarkPriceInput(BaseModel):
+    """A benchmark close resolved for one valuation or flow-deployment date."""
+
+    ticker: str
+    target_date: date
+    source_date: date
+    close: Decimal
+    resolution: Literal["same_day_close", "previous_market_close"]
+    return_basis: Literal["total_return_adjusted", "raw_price_fallback"] = "raw_price_fallback"
+
+
+class PerformanceBenchmarkEquation(BaseModel):
+    """One cash-flow-matched counterfactual under the shared Dietz basis."""
+
+    benchmark: str
+    ending_value: Decimal
+    investment_gain: Decimal
+    return_pct: Decimal
+    dollar_alpha: Decimal
+    percentage_point_alpha: Decimal
+    equation_residual: Decimal
+    price_input_id: str
+    price_inputs: list[PerformanceBenchmarkPriceInput]
+
+
+class AccountValuationProvenanceOut(BaseModel):
+    """Sanitized source metadata for one immutable valuation observation.
+
+    Provider account locators and raw balance values remain out of this lookup;
+    the performance receipt already carries the value used by the equation.
+    """
+
+    observation_key: str
+    account_id: int
+    as_of_date: date
+    as_of_at: datetime | None
+    currency: str
+    source_kind: Literal["provider_api", "brokerage_statement", "provider_export"]
+    source_provider: str
+    has_source_record_id: bool
+    source_payload_sha256: str | None
+    fetched_at: datetime
+    is_complete: bool
+    is_empty: bool
+
+
+class PerformanceEquationReceipt(BaseModel):
+    """Atomic, reproducible bridge for one whole-portfolio calculation."""
+
+    calculation_id: str
+    external_flow_ledger_id: str
+    portfolio_valuation_input_id: str
+    opening_valuation_observation_keys: list[str] = Field(default_factory=list[str])
+    ending_valuation_observation_keys: list[str] = Field(default_factory=list[str])
+    included_account_ids: list[int]
+    requested_start_date: date
+    requested_end_date: date
+    benchmark_price_resolution_policy: Literal["same_day_or_previous_us_market_close"]
+    opening_value: Decimal
+    dated_external_cashflows: list[PerformanceDatedCashflow]
+    # Added in v1.2. Older v1 payloads omit this field, so it must remain
+    # optional-on-input under the additive compatibility policy. The current
+    # producer always supplies it; when supplied, the validator below enforces
+    # the complete row-level lineage bridge.
+    operative_external_cashflows: list[PerformanceOperativeCashflow] = Field(
+        default_factory=list[PerformanceOperativeCashflow]
+    )
+    net_external_cashflow_in: Decimal
+    ending_value: Decimal
+    investment_gain: Decimal
+    modified_dietz_denominator: Decimal
+    portfolio_return_pct: Decimal
+    portfolio_equation_residual: Decimal
+    spy: PerformanceBenchmarkEquation
+    qqq: PerformanceBenchmarkEquation
+    policy: PerformanceBenchmarkEquation | None
+
+    @model_validator(mode="after")
+    def validate_exact_identities(self) -> PerformanceEquationReceipt:
+        for keys in (
+            self.opening_valuation_observation_keys,
+            self.ending_valuation_observation_keys,
+        ):
+            if len(keys) != len(set(keys)):
+                raise ValueError("valuation observation keys must be unique")
+        net_flow = sum((flow.amount for flow in self.dated_external_cashflows), Decimal(0))
+        if net_flow != self.net_external_cashflow_in:
+            raise ValueError("dated external cashflows do not reconcile to net flow")
+        dated_dates = [flow.date for flow in self.dated_external_cashflows]
+        if len(dated_dates) != len(set(dated_dates)):
+            raise ValueError("dated external cashflow dates must be unique")
+        if "operative_external_cashflows" in self.model_fields_set:
+            operative_ids = [flow.flow_id for flow in self.operative_external_cashflows]
+            if len(operative_ids) != len(set(operative_ids)):
+                raise ValueError("operative external cashflow IDs must be unique")
+            operative_by_date: dict[date, Decimal] = {}
+            for flow in self.operative_external_cashflows:
+                operative_by_date[flow.date] = (
+                    operative_by_date.get(flow.date, Decimal(0)) + flow.amount
+                )
+            nonzero_operative_dates = {
+                flow_date for flow_date, amount in operative_by_date.items() if amount != 0
+            }
+            if set(dated_dates) != nonzero_operative_dates:
+                raise ValueError("dated external cashflows must cover every nonzero operative date")
+            for dated_flow in self.dated_external_cashflows:
+                if operative_by_date.get(dated_flow.date, Decimal(0)) != dated_flow.amount:
+                    raise ValueError("operative external cashflows do not reconcile by date")
+                if set(dated_flow.flow_ids) != {
+                    flow.flow_id
+                    for flow in self.operative_external_cashflows
+                    if flow.date == dated_flow.date
+                }:
+                    raise ValueError("dated external cashflow IDs do not match operative rows")
+        if self.ending_value - self.opening_value - net_flow != self.investment_gain:
+            raise ValueError("whole-portfolio value bridge does not reconcile")
+        if self.portfolio_equation_residual != 0:
+            raise ValueError("whole-portfolio equation residual must be zero")
+        expected_return = (self.investment_gain / self.modified_dietz_denominator) * Decimal(100)
+        if self.portfolio_return_pct != expected_return:
+            raise ValueError("whole-portfolio return does not reconcile to Dietz capital")
+        for benchmark in (self.spy, self.qqq, self.policy):
+            if benchmark is None:
+                continue
+            if not benchmark.price_inputs:
+                raise ValueError(f"{benchmark.benchmark} price inputs must not be empty")
+            for price_input in benchmark.price_inputs:
+                if price_input.close <= 0:
+                    raise ValueError(
+                        f"{benchmark.benchmark} price inputs must contain positive closes"
+                    )
+                if (
+                    price_input.resolution == "same_day_close"
+                    and price_input.source_date != price_input.target_date
+                ):
+                    raise ValueError(
+                        f"{benchmark.benchmark} same-day price input dates do not match"
+                    )
+                if (
+                    price_input.resolution == "previous_market_close"
+                    and price_input.source_date >= price_input.target_date
+                ):
+                    raise ValueError(f"{benchmark.benchmark} prior-close price input is not prior")
+            if benchmark.ending_value - self.opening_value - net_flow != benchmark.investment_gain:
+                raise ValueError(f"{benchmark.benchmark} value bridge does not reconcile")
+            if benchmark.equation_residual != 0:
+                raise ValueError(f"{benchmark.benchmark} equation residual must be zero")
+            benchmark_return = (
+                benchmark.investment_gain / self.modified_dietz_denominator
+            ) * Decimal(100)
+            if benchmark.return_pct != benchmark_return:
+                raise ValueError(
+                    f"{benchmark.benchmark} return does not reconcile to Dietz capital"
+                )
+            if benchmark.dollar_alpha != self.investment_gain - benchmark.investment_gain:
+                raise ValueError(f"{benchmark.benchmark} dollar alpha does not reconcile")
+            if benchmark.percentage_point_alpha != self.portfolio_return_pct - benchmark.return_pct:
+                raise ValueError(f"{benchmark.benchmark} percentage-point alpha does not reconcile")
+        return self
+
+
 class PerformanceSeries(BaseModel):
+    methodology: Literal["performance.modified_dietz"]
+    methodology_version: Literal["2"]
+    calculation_status: Literal["available", "unavailable"]
+    reconstruction_certification: Literal[
+        "observed_certified", "source_provisional", "modeled_provisional", "unavailable"
+    ] = "unavailable"
+    calculation_reason_codes: list[str]
     start_date: date
     end_date: date
     base_value: Decimal
     points: list[PerformancePoint]
-    # The earliest date in the window that's an OBSERVED forward snapshot
-    # (not a transaction-walk reconstruction). Anything before this is
-    # modeled. None when the entire window is reconstructed.
+    # The earliest date in the window with an observed complete holdings or
+    # whole-account valuation boundary (not transaction-walk reconstruction).
+    # Anything before this is modeled. None when the window is reconstructed.
     earliest_observed_date: date | None = None
     # Net external cashflow into the portfolio over the window (positive = in).
     # Surfaced so the UI can show contributions alongside total return.
-    net_external_cashflow_in: Decimal = Decimal(0)
+    net_external_cashflow_in: Decimal | None
+    # Separate from structural ledger validity: approved source evidence must
+    # cover every valuation account over the exact (start, end] flow window.
+    source_coverage: CashFlowSourceCoverageOut
     # Whether the start value is suspiciously low vs the end value (suggests
     # the backfill is missing pre-existing positions). Frontend renders a
     # warning when true.
-    backfill_start_unreliable: bool = False
+    backfill_start_unreliable: bool
+    # Boundary lineage is explicit because a transaction-walk value is an
+    # estimate, not broker-observed evidence. `None` means the requested
+    # boundary could not be supported and the calculation is unavailable.
+    opening_value_provenance: (
+        Literal[
+            "observed_complete_snapshot",
+            "observed_account_valuation",
+            "modeled_transaction_walkback",
+        ]
+        | None
+    )
+    ending_value_provenance: (
+        Literal[
+            "observed_complete_snapshot",
+            "observed_account_valuation",
+            "modeled_transaction_walkback",
+        ]
+        | None
+    )
+    opening_valuation_observation_keys: list[str] = Field(default_factory=list[str])
+    ending_valuation_observation_keys: list[str] = Field(default_factory=list[str])
+    # Exact account universe whose value and flows were paired by the return
+    # engine. Empty only when no valued account universe could be established.
+    valuation_account_ids: list[int]
+    # Present only when every prerequisite is available. All headline dollar
+    # and percentage values are derived atomically from this exact input set.
+    equation_receipt: PerformanceEquationReceipt | None
 
 
 class CashflowGroupOut(BaseModel):
@@ -215,7 +520,7 @@ class DataQualityFindingOut(BaseModel):
     `severity` ranks user attention:
       * `info`    — known limitation, no action required (e.g., SoFi
                     doesn't expose cost basis through Plaid).
-      * `warning` — affects accuracy of derived metrics (TWR, P&L)
+      * `warning` — affects accuracy of derived metrics (returns, P&L)
                     but the rest of the data is fine.
       * `error`   — broken contract; something needs fixing.
 

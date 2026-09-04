@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
     Benchmark,
     HoldingSnapshot,
+    InvestmentTransaction,
     Item,
+    Price,
+    PriceAdjustmentBasis,
+    PriceSource,
     Security,
     SecurityClassification,
 )
@@ -50,6 +54,27 @@ def _seed(session) -> None:
             ),
         ]
     )
+    current = _START + timedelta(days=7)
+    while current < _END:
+        session.add_all(
+            [
+                Price(
+                    security_id=nvda.security_id,
+                    date=current,
+                    close=Decimal(100),
+                    source=PriceSource.YFINANCE.value,
+                    adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+                ),
+                Price(
+                    security_id=jpm.security_id,
+                    date=current,
+                    close=Decimal(100),
+                    source=PriceSource.YFINANCE.value,
+                    adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+                ),
+            ]
+        )
+        current += timedelta(days=7)
 
     def snap(sec: Security, d: date, value: str) -> HoldingSnapshot:
         return HoldingSnapshot(
@@ -67,6 +92,34 @@ def _seed(session) -> None:
             snap(nvda, _END, "1300"),
             snap(jpm, _START, "1000"),
             snap(jpm, _END, "1050"),
+            Price(
+                security_id=nvda.security_id,
+                date=_START,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+            Price(
+                security_id=nvda.security_id,
+                date=_END,
+                close=Decimal(130),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+            Price(
+                security_id=jpm.security_id,
+                date=_START,
+                close=Decimal(100),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+            Price(
+                security_id=jpm.security_id,
+                date=_END,
+                close=Decimal(105),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
         ]
     )
 
@@ -85,6 +138,10 @@ def _seed(session) -> None:
         bench("XLF", _START, "100"),
         bench("XLF", _END, "110"),
     ]
+    current = _START + timedelta(days=7)
+    while current < _END:
+        rows.append(bench("SPY", current, "100"))
+        current += timedelta(days=7)
     seeded = {"XLK", "XLF"}
     for s in _SECTORS:
         if s.etf in seeded:
@@ -146,3 +203,29 @@ def test_brinson_empty_book(client):
     assert data["portfolio_return_pct"] is None
     assert float(data["classified_value"]) == 0.0
     assert any("No classifiable equity positions" in n for n in data["notes"])
+
+
+def test_brinson_propagates_unmatched_share_movement_unavailable(client, session):
+    _seed(session)
+    account = session.query(Account).one()
+    security = session.query(Security).filter(Security.ticker == "NVDA").one()
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-unmatched-transfer",
+            account_id=account.account_id,
+            security_id=security.security_id,
+            date=date(2025, 5, 15),
+            type="transfer",
+            quantity=Decimal(1),
+            amount=Decimal(0),
+        )
+    )
+    session.commit()
+
+    data = client.get(f"/api/portfolio/brinson?start_date={_START}&end_date={_END}").json()
+
+    assert data["calculation_status"] == "unavailable"
+    assert "share_movement_unmatched" in data["calculation_reason_codes"]
+    assert data["portfolio_return_pct"] is None
+    assert data["total_active_return_pct"] is None
+    assert data["sectors"] == []

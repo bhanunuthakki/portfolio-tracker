@@ -20,7 +20,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio_tracker.models import Account, Item
+from portfolio_tracker.models import Account, HoldingSnapshot, Item
 
 
 def active_account_ids(session: Session) -> frozenset[int]:
@@ -30,6 +30,29 @@ def active_account_ids(session: Session) -> frozenset[int]:
             select(Account.account_id)
             .join(Item, Item.item_id == Account.item_id)
             .where(Item.is_data_active.is_(True))
+        )
+        .scalars()
+        .all()
+    )
+    return frozenset(rows)
+
+
+def valued_account_ids(session: Session) -> frozenset[int]:
+    """Active accounts that have contributed evidence to portfolio value.
+
+    A return denominator cannot include flows from an account that never
+    contributes to the value series: that would record saving as a loss. The
+    omission remains visible in account/data-quality inventory; this narrower
+    universe exists only for computations that pair value and cash flow.
+    """
+    active = active_account_ids(session)
+    if not active:
+        return frozenset()
+    rows = (
+        session.execute(
+            select(HoldingSnapshot.account_id)
+            .where(HoldingSnapshot.account_id.in_(active))
+            .distinct()
         )
         .scalars()
         .all()

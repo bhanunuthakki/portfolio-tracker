@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 # Bump per the compatibility policy: patch = additive doc/field clarification,
 # minor = additive fields, major = breaking (consumers must fail closed).
-V1_SCHEMA_VERSION: Final[str] = "1.0.0"
+V1_SCHEMA_VERSION: Final[str] = "1.4.0"
 
 # Holdings older than this many calendar days are stale. Five days covers a
 # long weekend + one missed refresh; anything older means the daily snapshot

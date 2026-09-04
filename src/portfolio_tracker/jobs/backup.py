@@ -12,11 +12,13 @@ Why this matters for a Plaid-backed tracker:
 
 The DB itself is durable on disk (SQLite file), but a single accidental
 `rm portfolio.db` or disk failure wipes everything. This job creates an
-atomic, transactionally-consistent copy in `backups/portfolio_<date>.db`
+atomic, transactionally-consistent copy in
+`backups/portfolio_<UTC timestamp>.db`
 using SQLite's online backup API (works while the API server is running).
 
-Idempotent per-day: re-running on the same day overwrites that day's file.
-Old backups beyond `--keep` days are NOT auto-pruned — your call.
+Every run gets a distinct filename, so a pre-migration backup cannot overwrite
+an earlier backup from the same day. Old backups beyond `--keep` days are NOT
+auto-pruned — your call.
 
 Run manually:
     python -m portfolio_tracker.jobs.backup
@@ -26,7 +28,7 @@ Run manually:
 from __future__ import annotations
 
 import sqlite3
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import typer
@@ -42,7 +44,8 @@ def run(keep_days: int | None = None) -> Path:
 
     backups_dir = PROJECT_ROOT / "backups"
     backups_dir.mkdir(exist_ok=True)
-    target = backups_dir / f"portfolio_{date.today().isoformat()}.db"
+    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%S.%fZ")
+    target = backups_dir / f"portfolio_{timestamp}.db"
 
     # SQLite's online backup API: copies the DB even while connections are open.
     # Equivalent to `VACUUM INTO`, but works on older SQLite versions too.
@@ -75,7 +78,7 @@ def _prune(backups_dir: Path, keep_days: int) -> None:
     today = date.today()
     for path in sorted(backups_dir.glob("portfolio_*.db")):
         try:
-            iso_part = path.stem.removeprefix("portfolio_")
+            iso_part = path.stem.removeprefix("portfolio_")[:10]
             backup_date = date.fromisoformat(iso_part)
         except ValueError:
             continue

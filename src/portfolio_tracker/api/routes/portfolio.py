@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -40,11 +40,11 @@ from portfolio_tracker.services import position_alpha as position_alpha_service
 from portfolio_tracker.services import positioning as positioning_service
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import BetaResult
-from portfolio_tracker.services.performance import (
-    _is_external_cashflow,  # pyright: ignore[reportPrivateUsage]
-    _load_transaction_overrides,  # pyright: ignore[reportPrivateUsage]
-    _signed_cashflow,  # pyright: ignore[reportPrivateUsage]
-    effective_classification,
+from portfolio_tracker.services.cashflow_source_coverage import assess_cashflow_source_coverage
+from portfolio_tracker.services.external_flow_ledger import (
+    build_external_flow_ledger,
+    effective_transaction_classifications,
+    load_transaction_overrides,
 )
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
@@ -283,7 +283,13 @@ def transactions(
         .limit(limit)
     ).all()
 
-    overrides = _load_transaction_overrides(session)
+    overrides = load_transaction_overrides(session)
+    transaction_rows = tuple(t for t, _a, _s in rows)
+    effective_classifications = effective_transaction_classifications(
+        session,
+        transaction_rows,
+        account_ids=accts,
+    )
     return [
         InvestmentTransactionOut(
             plaid_investment_transaction_id=t.plaid_investment_transaction_id,
@@ -301,12 +307,8 @@ def transactions(
             subtype=t.subtype,
             currency=t.currency,
             override_classification=overrides.get(t.plaid_investment_transaction_id),
-            effective_classification=effective_classification(
-                t.type,
-                t.subtype,
-                overrides.get(t.plaid_investment_transaction_id),
-                amount=Decimal(t.amount) if t.amount is not None else None,
-                name=t.name,
+            effective_classification=effective_classifications.get(
+                t.plaid_investment_transaction_id
             ),
         )
         for t, a, s in rows
@@ -327,7 +329,7 @@ def position_alpha(
         ),
     ),
 ) -> position_alpha_service.PositionAlphaResult:
-    """Per-ticker dollar alpha vs SPY/QQQ/POLICY for the chosen window.
+    """Split-normalized price/trade alpha vs SPY/QQQ/POLICY.
 
     Methodology — start of window is a fresh balance sheet. Each ticker's
     starting capital is `qty_at_start × price_at_start`. Each benchmark
@@ -339,7 +341,9 @@ def position_alpha(
     cash). Set `exclude_broad_index=true` to also drop broad-market ETFs.
 
     Returns both the per-ticker breakdown AND a daily time series across
-    SPY, QQQ, and POLICY counterfactuals.
+    SPY, QQQ, and POLICY counterfactuals. Derived metrics fail closed when a
+    non-trade share movement cannot be exactly paired by date and normalized
+    ticker; whole-account Modified Dietz remains the fallback.
     """
     if end_date is None:
         end_date = date.today()
@@ -389,10 +393,12 @@ def performance_series(
         ),
     ),
 ) -> PerformanceSeries:
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = _default_start_date(session, end_date, include_backfill)
+    start_date, end_date = performance.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=include_backfill,
+    )
     return performance.compute_performance_series(
         session,
         start_date,
@@ -400,52 +406,6 @@ def performance_series(
         Decimal(str(reserve_amount)),
         exclude_index_etfs,
     )
-
-
-# Forward snapshots needed before the default chart drops the 365-day
-# backfill fallback. Below this, the chart isn't useful on its own — we
-# blend in a year of transaction-walk reconstruction to give context.
-_MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT = 7
-
-
-def _default_start_date(session: Session, end_date: date, include_backfill: bool) -> date:
-    """Default chart window — chosen to balance "useful on day one" against
-    "doesn't silently show modeled values as observed".
-
-    Behavior:
-      * `include_backfill=True` → anchor on the earliest transaction date,
-        capped at ~2 years (Plaid investment-tx retention).
-      * Else, if you have ≥ N distinct forward snapshot dates → start at
-        the earliest snapshot. Extends naturally as the snapshotter runs.
-      * Else (fresh install or just a few snapshots) → fall back to 365-day
-        transaction-walk backfill so the chart isn't a single dot. The UI
-        shows the backfill caveat in the chart caption either way.
-    """
-    accts = active_account_ids(session)
-    if not accts:
-        return end_date - timedelta(days=365)
-    earliest_snap = session.execute(
-        select(func.min(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
-    ).scalar_one_or_none()
-    earliest_tx = session.execute(
-        select(func.min(InvestmentTransaction.date)).where(
-            InvestmentTransaction.account_id.in_(accts)
-        )
-    ).scalar_one_or_none()
-
-    if include_backfill and earliest_tx is not None:
-        candidates = [d for d in (earliest_snap, earliest_tx) if d is not None]
-        return max(min(candidates), end_date - timedelta(days=730))
-
-    snap_count = session.execute(
-        select(func.count(func.distinct(HoldingSnapshot.snapshot_date))).where(
-            HoldingSnapshot.account_id.in_(accts)
-        )
-    ).scalar_one()
-    if snap_count >= _MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT and earliest_snap is not None:
-        return earliest_snap
-
-    return end_date - timedelta(days=365)
 
 
 @router.get("/drawdown", response_model=drawdown_service.DrawdownResult)
@@ -459,10 +419,12 @@ def drawdown_metrics(
     """Loss-shaped risk over the cashflow-neutral return index: max drawdown,
     underwater curve, time-to-recovery, and Calmar (annualized return / |maxDD|).
     Same windowing as /performance; defaults to a snapshot-derived window."""
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = _default_start_date(session, end_date, include_backfill=False)
+    start_date, end_date = performance.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     return drawdown_service.compute_drawdown(
         session,
         start_date,
@@ -524,54 +486,94 @@ def cashflow_audit(
     """
     if end_date is None:
         end_date = date.today()
-    accts = active_account_ids(session)
+    active_accts = active_account_ids(session)
     if start_date is None:
         # For diagnostics, always go as far back as the data goes (24 months
         # by Plaid's retention) so the user sees every external cashflow.
         earliest_tx = (
             session.execute(
                 select(func.min(InvestmentTransaction.date)).where(
-                    InvestmentTransaction.account_id.in_(accts)
+                    InvestmentTransaction.account_id.in_(active_accts)
                 )
             ).scalar_one_or_none()
-            if accts
+            if active_accts
             else None
         )
-        start_date = earliest_tx or (end_date - timedelta(days=730))
-
-    rows: list[Any] = []
-    if accts:
-        rows = list(
-            session.execute(
-                select(
-                    InvestmentTransaction.type,
-                    InvestmentTransaction.subtype,
-                    func.count(InvestmentTransaction.plaid_investment_transaction_id),
-                    func.sum(InvestmentTransaction.amount),
-                )
-                .where(InvestmentTransaction.date >= start_date)
-                .where(InvestmentTransaction.date <= end_date)
-                .where(InvestmentTransaction.account_id.in_(accts))
-                .group_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-                .order_by(InvestmentTransaction.type, InvestmentTransaction.subtype)
-            ).all()
+        # The canonical ledger is open on the left because the opening value
+        # already contains same-day flows. Move the implicit boundary back one
+        # day so the legacy "all available history" default still includes the
+        # earliest transaction.
+        start_date = (
+            earliest_tx - timedelta(days=1)
+            if earliest_tx is not None
+            else end_date - timedelta(days=730)
         )
 
+    accts = performance.performance_account_ids(session, start_date, end_date)
+    source_coverage = assess_cashflow_source_coverage(
+        session,
+        start_date,
+        end_date,
+        account_ids=accts,
+    )
+    ledger = build_external_flow_ledger(
+        session,
+        start_date,
+        end_date,
+        account_ids=accts,
+    )
+    if ledger.issues or not source_coverage.is_complete:
+        # The legacy schema requires a non-null total. Returning 409 is the
+        # only fail-closed representation that preserves that response shape;
+        # the replacement v1 endpoint exposes the detailed issue/coverage
+        # packet and a null total in this state.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "cash-flow audit unavailable: canonical ledger or source coverage is incomplete",
+        )
+
+    grouped: dict[tuple[str, str | None, bool], tuple[int, Decimal]] = {}
+    represented_transaction_ids: set[str] = set()
+    for entry in ledger.entries:
+        is_external = entry.classification != "internal"
+        key = (entry.type, entry.subtype, is_external)
+        count, total_amount = grouped.get(key, (0, Decimal(0)))
+        grouped[key] = (count + 1, total_amount + entry.amount)
+        if entry.transaction_id is not None:
+            represented_transaction_ids.add(entry.transaction_id)
+        represented_transaction_ids.update(entry.component_transaction_ids)
+
+    # Retain the legacy endpoint's diagnostic rows for trades and other
+    # non-cashflow-shaped transactions. Every row that can affect performance
+    # is represented by the canonical ledger above; these remaining rows are
+    # informational and always classified as non-external.
+    if accts:
+        unrepresented_rows = session.scalars(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.account_id.in_(accts))
+            .where(InvestmentTransaction.date > start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(
+                InvestmentTransaction.plaid_investment_transaction_id.notin_(
+                    represented_transaction_ids
+                )
+            )
+        )
+        for transaction in unrepresented_rows:
+            key = (transaction.type, transaction.subtype, False)
+            count, total_amount = grouped.get(key, (0, Decimal(0)))
+            grouped[key] = (count + 1, total_amount + Decimal(transaction.amount or 0))
+
     groups: list[CashflowGroupOut] = []
-    net_in = Decimal(0)
-    for tx_type, tx_subtype, count, total_amount in rows:
-        is_external = _is_external_cashflow(tx_type, tx_subtype)
-        if is_external:
-            # Use the same signed-cashflow logic as TWR so the audit total
-            # exactly matches what the chart sees. `_signed_cashflow` handles
-            # the sign-convention inconsistencies across brokers per subtype.
-            net_in += _signed_cashflow(tx_type, tx_subtype, Decimal(total_amount or 0))
+    for (tx_type, tx_subtype, is_external), (count, total_amount) in sorted(
+        grouped.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2])
+    ):
         groups.append(
             CashflowGroupOut(
-                type=str(tx_type),
+                type=tx_type,
                 subtype=tx_subtype,
-                count=int(count),
-                sum_amount=Decimal(total_amount or 0),
+                count=count,
+                sum_amount=total_amount,
                 classified_as_external_cashflow=is_external,
             )
         )
@@ -580,8 +582,10 @@ def cashflow_audit(
         "Direction by subtype: `contribution`/`deposit`/`rollover`/`wire`/`ach` "
         "are inflows; `withdrawal` is outflow; `transfer` follows Plaid's signed "
         "amount because brokers use it for both directions.",
+        "Rows and the net total come from the same canonical external-flow ledger "
+        "as performance, including owner overrides and reconciliation provenance.",
         "Trades, dividends, interest, and fees are intentionally excluded — they "
-        "affect value but not basis.",
+        "affect value but are not external cash flows.",
         "`transfer/assignment` and other corporate-action subtypes are treated as INTERNAL.",
     ]
 
@@ -589,7 +593,7 @@ def cashflow_audit(
         start_date=start_date,
         end_date=end_date,
         groups=groups,
-        net_external_cashflow_in=net_in,
+        net_external_cashflow_in=ledger.net_external_cashflow_in,
         notes=notes,
     )
 
@@ -638,10 +642,12 @@ def beta_endpoint(
     risk metrics reflect real tail risk, and only >50% single-day moves —
     suspected price-data errors — are excluded and enumerated in `notes`.
     """
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = end_date - timedelta(days=365)
+    start_date, end_date = performance.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     return beta_service.compute_beta(
         session,
         start_date,

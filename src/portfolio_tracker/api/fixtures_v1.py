@@ -47,10 +47,18 @@ from sqlalchemy.pool import StaticPool
 from portfolio_tracker.models import (
     Account,
     Base,
+    Benchmark,
+    CashFlowSourceAttestation,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
+    Price,
+    PriceAdjustmentBasis,
+    PriceSource,
     Security,
+)
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_source_event_set_sha256,
 )
 
 FIXTURES_DIR = Path(__file__).resolve().parents[3] / "docs" / "api" / "fixtures" / "v1"
@@ -127,6 +135,32 @@ def _seed(
     )
     session.add_all([roth, hsa, brokerage, retired])
     session.flush()
+    for index, account in enumerate((roth, hsa, brokerage), start=1):
+        session.add(
+            CashFlowSourceAttestation(
+                attestation_key=f"fixture-source-coverage-{index}",
+                account_id=account.account_id,
+                coverage_start=FIXTURE_TODAY - timedelta(days=729),
+                coverage_end=FIXTURE_TODAY,
+                source_type="provider_export",
+                broker_archive_coverage="provider_asserted",
+                source_reference=f"synthetic:fixture-export-{index}",
+                source_sha256=str(index) * 64,
+                captured_at=_SYNC_AT,
+                approved_at=_SYNC_AT,
+                methodology_version="2",
+                account_identity_sha256=str(index + 3) * 64,
+                account_mapping_basis="provider_account_id",
+                account_mapping_confidence="exact",
+                source_format="synthetic",
+                parser_version="test-v1",
+                source_timezone="UTC",
+                source_row_count=0,
+                cashflow_candidate_count=0,
+                source_event_set_sha256=canonical_source_event_set_sha256(()),
+                manifest_sha256=str(index + 6) * 64,
+            )
+        )
 
     stock_a = Security(plaid_security_id="fx-s1", ticker="AAAA", name="Alpha Corp", type="cs")
     stock_b = Security(plaid_security_id="fx-s2", ticker="BBBB", name="Beta Corp", type="cs")
@@ -168,6 +202,8 @@ def _seed(
         name: str | None,
         security: Security | None = None,
         qty: str = "0",
+        price: str | None = None,
+        fees: str | None = None,
     ) -> None:
         session.add(
             InvestmentTransaction(
@@ -178,6 +214,8 @@ def _seed(
                 name=name,
                 quantity=Decimal(qty),
                 amount=Decimal(amount),
+                price=Decimal(price) if price is not None else None,
+                fees=Decimal(fees) if fees is not None else None,
                 type=type_,
                 subtype=subtype,
                 currency="USD",
@@ -203,6 +241,60 @@ def _seed(
         "Buy Beta Corp",
         security=stock_b,
         qty="5",
+        price="116",
+        fees="0",
+    )
+
+    # Canonical analytics fixture: a complete, synthetic split-normalized
+    # price/trade basis. Position calculations accept only named yfinance
+    # split-adjusted closes; legacy/unknown rows intentionally fail closed.
+    analytics_start = FIXTURE_TODAY - timedelta(days=365)
+    trade_date = holdings_date - timedelta(days=7)
+
+    def position_price(sec: Security, d: date, close: str) -> Price:
+        return Price(
+            security_id=sec.security_id,
+            date=d,
+            close=Decimal(close),
+            source=PriceSource.YFINANCE.value,
+            adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+        )
+
+    from portfolio_tracker.services.performance import (
+        _is_us_market_session,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    position_dates = {analytics_start + timedelta(days=offset) for offset in range(0, 366, 7)} | {
+        trade_date,
+        FIXTURE_TODAY,
+    }
+    benchmark_dates = {
+        analytics_start + timedelta(days=offset)
+        for offset in range(366)
+        if _is_us_market_session(analytics_start + timedelta(days=offset))
+    }
+
+    def stepped_benchmark(symbol: str, d: date) -> Benchmark:
+        if symbol == "SPY":
+            close = "110" if d == FIXTURE_TODAY else "108" if d >= trade_date else "100"
+        else:
+            close = "112" if d == FIXTURE_TODAY else "110" if d >= trade_date else "100"
+        return Benchmark(symbol=symbol, date=d, close=Decimal(close))
+
+    def stepped_position(sec: Security, d: date) -> Price:
+        if sec is stock_a:
+            close = "120" if d == FIXTURE_TODAY else "100"
+        else:
+            close = "116" if d >= trade_date else "100"
+        return position_price(sec, d, close)
+
+    session.add_all(
+        [
+            *(stepped_position(stock_a, d) for d in sorted(position_dates)),
+            *(stepped_position(stock_b, d) for d in sorted(position_dates)),
+            *(stepped_benchmark("SPY", d) for d in sorted(benchmark_dates)),
+            *(stepped_benchmark("QQQ", d) for d in sorted(benchmark_dates)),
+        ]
     )
     session.commit()
 
@@ -301,14 +393,14 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         """The remaining focused resources + the enveloped analytics endpoints.
 
         Positions / position-snapshots / data-quality are populated from the
-        holdings+transaction seed. The four analytics fixtures exercise the
-        shared envelope + methodology contract; their inner series are sparse
-        because the seed carries no price/benchmark history (the documented
-        "insufficient history" degradation path), so a consumer's contract
-        test validates deserialization + envelope, not populated return rows.
+        holdings+transaction seed. The analytics fixtures include synthetic,
+        provenance-eligible position prices and price-return benchmarks so the
+        canonical position-performance sample exercises the available path;
+        focused tests separately pin every unavailable reason.
         """
         _seed(session, holdings_date=_FRESH)
         window_start = FIXTURE_TODAY - timedelta(days=365)
+        analytics_end = _FRESH
 
         rows = _latest_holding_rows(session)
         if rows:
@@ -348,22 +440,28 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             report=report,
         )
 
+        performance_series = compute_performance_series(
+            session, window_start, analytics_end, Decimal(0), False
+        )
         performance = PerformanceV1Result(
-            meta=performance_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
-            series=compute_performance_series(
-                session, window_start, FIXTURE_TODAY, Decimal(0), False
+            meta=performance_meta(
+                session,
+                series=performance_series,
+                today=FIXTURE_TODAY,
+                generated_at=FIXTURE_GENERATED_AT,
             ),
+            series=performance_series,
         )
         position_performance = PositionPerformanceV1Result(
             meta=position_performance_meta(
                 session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
             ),
-            result=compute_position_alpha(session, window_start, FIXTURE_TODAY),
+            result=compute_position_alpha(session, window_start, analytics_end),
         )
         beta_result = compute_beta(
-            session, window_start, FIXTURE_TODAY, "SPY", None, False, Decimal(0)
+            session, window_start, analytics_end, "SPY", None, False, Decimal(0)
         )
-        drawdown_result = compute_drawdown(session, window_start, FIXTURE_TODAY, Decimal(0), False)
+        drawdown_result = compute_drawdown(session, window_start, analytics_end, Decimal(0), False)
         risk = RiskV1Result(
             meta=risk_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
             beta=beta_result,
@@ -379,7 +477,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         )
         exit_quality = ExitQualityV1Result(
             meta=exit_quality_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
-            result=compute_exit_quality(session, window_start, FIXTURE_TODAY),
+            result=compute_exit_quality(session, window_start, analytics_end),
         )
 
         return {

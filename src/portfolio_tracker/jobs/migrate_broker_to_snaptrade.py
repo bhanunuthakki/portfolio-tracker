@@ -12,15 +12,19 @@ Sequence
 The script assumes you've already linked the same broker via SnapTrade's
 connection portal (`/api/snaptrade/connection-portal-url`). It then:
 
-  1. Runs a *deep* SnapTrade sync (default 10-year lookback) so SnapTrade
-     has data BEFORE we destroy the Plaid copy.
-  2. Verifies every Plaid account on the target item has a SnapTrade
+  1. Preflights the Plaid rows and refuses any cash-flow provenance that
+     cannot safely be inferred onto a replacement feed.
+  2. On commit only, runs a *deep* SnapTrade sync (default 10-year lookback)
+     so SnapTrade has data BEFORE we destroy the Plaid copy. Dry-run never
+     invokes this committing endpoint.
+  3. Verifies every Plaid account on the target item has a SnapTrade
      counterpart matched by mask. If any are missing, bails before
      touching anything.
-  3. Backs up the Plaid item, accounts, snapshots, and transactions to
-     `backups/migration_<item>_<ts>.json` so the operation is reversible.
-  4. Deletes Plaid-sourced rows in FK-safe order.
-  5. Re-bootstraps `portfolio_values_daily` so the chart picks up the
+  4. Backs up the Plaid item, accounts, snapshots, transactions, and immutable
+     account-valuation evidence to `backups/migration_<item>_<ts>.json` so the
+     operation is reversible.
+  5. Deletes Plaid-sourced rows in FK-safe order.
+  6. Re-bootstraps `portfolio_values_daily` so the chart picks up the
      longer history.
 
 Defaults to dry-run. Pass `--commit` to actually mutate the database.
@@ -45,6 +49,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,15 +61,41 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import (
     Account,
+    AccountValuationObservation,
+    CashFlowReconciliationDecision,
+    CashFlowReconciliationRunTransactionMutation,
+    CashFlowSourceAttestation,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
     ItemSource,
+    TransactionOverride,
 )
 
 _BACKUP_DIR = Path(__file__).resolve().parents[3] / "backups"
 _DEFAULT_LOOKBACK_DAYS = 3650  # 10 years
 _BACKUP_LIMIT_BYTES = 100 * 1024 * 1024  # 100 MB sanity cap
+
+
+class MigrationProvenanceBlockerError(RuntimeError):
+    """Retiring the old rows would break or erase cash-flow provenance."""
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationProvenanceBlockers:
+    source_attestations: int
+    reconciliation_decisions: int
+    reconciliation_run_mutations: int
+    transaction_overrides: int
+
+    @property
+    def total(self) -> int:
+        return (
+            self.source_attestations
+            + self.reconciliation_decisions
+            + self.reconciliation_run_mutations
+            + self.transaction_overrides
+        )
 
 
 def run(
@@ -110,18 +142,45 @@ def run(
                 "Bailing — investigate manually."
             )
 
-        # ---- 2. Deep SnapTrade sync ----------------------------------
-        print(
-            f"\nRunning deep SnapTrade sync (profile={profile_enum.value}, "
-            f"lookback={lookback_days}d)..."
+        # ---- 2. Fail closed before the sync route can commit ----------
+        plaid_account_ids = [a.account_id for a in plaid_accounts]
+        plaid_transaction_ids = tuple(
+            session.scalars(
+                select(InvestmentTransaction.plaid_investment_transaction_id).where(
+                    InvestmentTransaction.account_id.in_(plaid_account_ids)
+                )
+            ).all()
         )
-        result = snaptrade_sync(session, profile_enum, lookback_days=lookback_days)
-        print(
-            f"  items_synced={result.items_synced} "
-            f"accounts={result.accounts_synced} "
-            f"holdings={result.holdings_written} "
-            f"txs={result.transactions_written}"
+        blockers = _migration_provenance_blockers(
+            session,
+            account_ids=plaid_account_ids,
+            transaction_ids=plaid_transaction_ids,
         )
+        print("\nCash-flow provenance dependency check:")
+        print(f"  - {blockers.source_attestations} source attestations")
+        print(f"  - {blockers.reconciliation_decisions} reconciliation decisions")
+        print(f"  - {blockers.reconciliation_run_mutations} run mutation receipts")
+        print(f"  - {blockers.transaction_overrides} transaction overrides")
+        _require_no_migration_provenance_blockers(blockers)
+
+        # The sync endpoint commits its own transaction. Never invoke it from
+        # a dry-run, and never invoke it until all old-feed provenance blockers
+        # have been rejected. This keeps preview genuinely read-only and a
+        # blocked migration leaves both feeds untouched.
+        if commit:
+            print(
+                f"\nRunning deep SnapTrade sync (profile={profile_enum.value}, "
+                f"lookback={lookback_days}d)..."
+            )
+            result = snaptrade_sync(session, profile_enum, lookback_days=lookback_days)
+            print(
+                f"  items_synced={result.items_synced} "
+                f"accounts={result.accounts_synced} "
+                f"holdings={result.holdings_written} "
+                f"txs={result.transactions_written}"
+            )
+        else:
+            print("\nDry-run: deep SnapTrade sync skipped (it commits provider data).")
 
         # ---- 3. Verify mask coverage on SnapTrade --------------------
         snaptrade_account_rows = (
@@ -151,7 +210,6 @@ def run(
             print(f'  mask {m}: snaptrade acct {ms_acct.account_id} "{ms_acct.name}"')
 
         # ---- 4. Show deletion plan -----------------------------------
-        plaid_account_ids = [a.account_id for a in plaid_accounts]
         n_snaps = (
             session.execute(
                 select(func.count())
@@ -168,9 +226,18 @@ def run(
             ).scalar()
             or 0
         )
+        n_valuations = (
+            session.execute(
+                select(func.count())
+                .select_from(AccountValuationObservation)
+                .where(AccountValuationObservation.account_id.in_(plaid_account_ids))
+            ).scalar()
+            or 0
+        )
         print("\nWill delete:")
         print(f"  - {n_snaps} holdings_snapshots rows")
         print(f"  - {n_txs} investment_transactions rows")
+        print(f"  - {n_valuations} account_valuation_observations rows")
         print(f"  - {len(plaid_accounts)} accounts")
         print(f"  - 1 item (item_id={item.item_id})")
 
@@ -190,6 +257,11 @@ def run(
         session.execute(
             delete(InvestmentTransaction).where(
                 InvestmentTransaction.account_id.in_(plaid_account_ids)
+            )
+        )
+        session.execute(
+            delete(AccountValuationObservation).where(
+                AccountValuationObservation.account_id.in_(plaid_account_ids)
             )
         )
         session.execute(delete(Account).where(Account.item_id == item.item_id))
@@ -242,6 +314,73 @@ def _normalize_mask(s: str | None) -> str | None:
     return digits[-4:]
 
 
+def _migration_provenance_blockers(
+    session: Session,
+    *,
+    account_ids: list[int],
+    transaction_ids: tuple[str, ...],
+) -> MigrationProvenanceBlockers:
+    """Count rows that cannot be safely inferred onto a replacement feed."""
+    source_attestations = (
+        session.scalar(
+            select(func.count())
+            .select_from(CashFlowSourceAttestation)
+            .where(CashFlowSourceAttestation.account_id.in_(account_ids))
+        )
+        or 0
+    )
+    if transaction_ids:
+        reconciliation_decisions = (
+            session.scalar(
+                select(func.count())
+                .select_from(CashFlowReconciliationDecision)
+                .where(CashFlowReconciliationDecision.target_transaction_id.in_(transaction_ids))
+            )
+            or 0
+        )
+        reconciliation_run_mutations = (
+            session.scalar(
+                select(func.count())
+                .select_from(CashFlowReconciliationRunTransactionMutation)
+                .where(
+                    CashFlowReconciliationRunTransactionMutation.target_transaction_id.in_(
+                        transaction_ids
+                    )
+                )
+            )
+            or 0
+        )
+        transaction_overrides = (
+            session.scalar(
+                select(func.count())
+                .select_from(TransactionOverride)
+                .where(TransactionOverride.plaid_investment_transaction_id.in_(transaction_ids))
+            )
+            or 0
+        )
+    else:
+        reconciliation_decisions = 0
+        reconciliation_run_mutations = 0
+        transaction_overrides = 0
+    return MigrationProvenanceBlockers(
+        source_attestations=source_attestations,
+        reconciliation_decisions=reconciliation_decisions,
+        reconciliation_run_mutations=reconciliation_run_mutations,
+        transaction_overrides=transaction_overrides,
+    )
+
+
+def _require_no_migration_provenance_blockers(
+    blockers: MigrationProvenanceBlockers,
+) -> None:
+    if blockers.total:
+        raise MigrationProvenanceBlockerError(
+            "migration refused: cash-flow provenance is linked to the Plaid account or "
+            "transactions; an owner-approved mapping to replacement SnapTrade rows is "
+            "required before retiring the old records"
+        )
+
+
 def _backup_plaid_data(
     session: Session,
     item: Item,
@@ -250,11 +389,26 @@ def _backup_plaid_data(
 ) -> Path:
     """Dump everything we're about to delete to a JSON file.
 
-    Restoration is manual (load JSON, INSERT rows back) but the data is
-    preserved so we can recover from a bad migration. Sanity-caps backup
-    size at 100 MB — anything bigger probably indicates a bug, e.g.,
-    account_ids that accidentally include too much.
+    Restoration is manual (load JSON, INSERT rows back) but every deleted row,
+    including immutable valuation provenance, is preserved. Sanity-caps backup
+    size at 100 MB — anything bigger probably indicates a bug, e.g., account_ids
+    that accidentally include too much. The private artifact is owner-readable
+    only because it contains account and transaction details.
     """
+    transaction_ids = tuple(
+        session.scalars(
+            select(InvestmentTransaction.plaid_investment_transaction_id).where(
+                InvestmentTransaction.account_id.in_(account_ids)
+            )
+        ).all()
+    )
+    _require_no_migration_provenance_blockers(
+        _migration_provenance_blockers(
+            session,
+            account_ids=account_ids,
+            transaction_ids=transaction_ids,
+        )
+    )
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     path = _BACKUP_DIR / f"migration_item{item.item_id}_{timestamp}.json"
@@ -271,6 +425,15 @@ def _backup_plaid_data(
         .scalars()
         .all()
     )
+    valuations = (
+        session.execute(
+            select(AccountValuationObservation).where(
+                AccountValuationObservation.account_id.in_(account_ids)
+            )
+        )
+        .scalars()
+        .all()
+    )
 
     payload = {
         "exported_at_utc": timestamp,
@@ -279,6 +442,7 @@ def _backup_plaid_data(
         "accounts": [_row_to_dict(a) for a in accounts],
         "holdings_snapshots": [_row_to_dict(s) for s in snaps],
         "investment_transactions": [_row_to_dict(t) for t in txs],
+        "account_valuation_observations": [_row_to_dict(row) for row in valuations],
     }
     serialized = json.dumps(payload, indent=2, default=str)
     if len(serialized.encode("utf-8")) > _BACKUP_LIMIT_BYTES:
@@ -286,7 +450,11 @@ def _backup_plaid_data(
             f"Backup size exceeds {_BACKUP_LIMIT_BYTES // (1024 * 1024)} MB — "
             f"refusing to write. Investigate the row counts above."
         )
-    path.write_text(serialized, encoding="utf-8")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as backup_file:
+        backup_file.write(serialized)
+        backup_file.flush()
+        os.fsync(backup_file.fileno())
     return path
 
 

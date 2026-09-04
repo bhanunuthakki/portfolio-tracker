@@ -13,6 +13,10 @@ To accept an intentional change:
 from __future__ import annotations
 
 import json
+from decimal import Decimal
+
+import pytest
+from pydantic import ValidationError
 
 from portfolio_tracker.api.fixtures_v1 import FIXTURES_DIR, build_fixture_payloads, render
 from portfolio_tracker.api.openapi_v1 import ARTIFACT_PATH, render_v1_openapi
@@ -110,6 +114,57 @@ def test_fixtures_parse_into_response_models():
     ExitQualityV1Result.model_validate(
         json.loads((FIXTURES_DIR / "exit-quality.json").read_text(encoding="utf-8"))
     )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "net_external_cashflow_in",
+        "backfill_start_unreliable",
+        "opening_value_provenance",
+        "ending_value_provenance",
+        "valuation_account_ids",
+        "equation_receipt",
+    ],
+)
+def test_performance_contract_requires_financial_provenance_fields(field: str):
+    payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    payload["series"].pop(field)
+
+    with pytest.raises(ValidationError):
+        PerformanceV1Result.model_validate(payload)
+
+
+def test_performance_receipt_rejects_a_non_reconciling_decimal_identity():
+    payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    receipt = payload["series"]["equation_receipt"]
+    assert receipt is not None
+    receipt["investment_gain"] = str(Decimal(receipt["investment_gain"]) + Decimal("0.01"))
+
+    with pytest.raises(ValidationError, match="whole-portfolio value bridge"):
+        PerformanceV1Result.model_validate(payload)
+
+
+def test_performance_receipt_lineage_is_additive_and_validated_when_present():
+    payload = json.loads((FIXTURES_DIR / "performance.json").read_text(encoding="utf-8"))
+    receipt = payload["series"]["equation_receipt"]
+    assert receipt is not None
+
+    # A v1.1 payload predates row-level lineage. It remains valid under the
+    # v1 additive-field compatibility contract.
+    receipt.pop("operative_external_cashflows")
+    parsed = PerformanceV1Result.model_validate(payload)
+    assert parsed.series.equation_receipt is not None
+    assert parsed.series.equation_receipt.operative_external_cashflows == []
+
+    # A v1.2 producer that explicitly emits lineage cannot bypass the exact
+    # row/date reconciliation checks by supplying an empty list.
+    receipt["operative_external_cashflows"] = []
+    with pytest.raises(
+        ValidationError,
+        match="dated external cashflows must cover every nonzero operative date",
+    ):
+        PerformanceV1Result.model_validate(payload)
 
 
 def test_fixture_scenarios_express_their_states():

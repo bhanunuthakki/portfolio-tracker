@@ -23,14 +23,14 @@ Inputs, and the approximations each carries (also surfaced in the response
     its summed P&L ÷ summed beginning value. Only names that map to one of the
     11 GICS sectors are included — cash, crypto, broad-index ETFs, funds, and
     unclassified names are excluded (reported as the uncovered sleeve).
-  * **Benchmark sector returns** — the 11 SPDR Select Sector ETFs
-    (XLK/XLF/…/XLC) over the window, total-return where available.
+  * **Benchmark sector returns** — price returns for the 11 SPDR Select Sector
+    ETFs (XLK/XLF/…/XLC) over the window.
   * **Benchmark sector weights** — there is no live S&P 500 sector-weight feed,
     so a documented STATIC, approximate weight map is used (renormalized to sum
     to 1). Only the relative sizes matter for the attribution.
-  * **Benchmark total return r_b** — reconstructed as Σ_s w_b,s·r_b,s (the model
+  * **Benchmark price return r_b** — reconstructed as Σ_s w_b,s·r_b,s (the model
     benchmark implied by the static weights × sector-ETF returns), so the
-    decomposition identity holds. The ACTUAL SPY total return is reported
+    decomposition identity holds. The ACTUAL SPY price return is reported
     separately (`spy_actual_return_pct`) and differs because the sector weights
     are approximate.
 
@@ -45,6 +45,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -285,6 +286,8 @@ class BrinsonSectorRow(BaseModel):
 
 
 class BrinsonResult(BaseModel):
+    calculation_status: Literal["available", "unavailable"]
+    calculation_reason_codes: list[str]
     start_date: date
     end_date: date
     benchmark: str
@@ -356,11 +359,50 @@ def compute_brinson(session: Session, start_date: date, end_date: date) -> Brins
             excluded_value += row.value_at_start
             continue
         vstart_by_sector[gics] += row.value_at_start
-        pnl_by_sector[gics] += row.actual_pl
         classified_value += row.value_at_start
+        if row.actual_pl is not None:
+            pnl_by_sector[gics] += row.actual_pl
+
+    classified_weight_pct = (
+        (classified_value / (classified_value + excluded_value) * Decimal(100)).quantize(_PCT_QUANT)
+        if (classified_value + excluded_value) > 0
+        else None
+    )
+    if pa.calculation_status == "unavailable":
+        unavailable_notes = [
+            "Brinson attribution is unavailable because the underlying "
+            "invested-position price/trade calculation failed closed. Use "
+            "whole-account Modified Dietz performance as the fallback."
+        ]
+        if classified_value + excluded_value == 0:
+            unavailable_notes.append(
+                "No classifiable equity positions have beginning value in this window."
+            )
+        return BrinsonResult(
+            calculation_status="unavailable",
+            calculation_reason_codes=pa.calculation_reason_codes,
+            start_date=start_date,
+            end_date=end_date,
+            benchmark="SPY",
+            benchmark_return_pct=None,
+            spy_actual_return_pct=None,
+            portfolio_return_pct=None,
+            allocation_effect_pct=None,
+            selection_effect_pct=None,
+            interaction_effect_pct=None,
+            total_active_return_pct=None,
+            sectors=[],
+            classified_value=classified_value.quantize(Decimal("0.01")),
+            excluded_value=excluded_value.quantize(Decimal("0.01")),
+            classified_weight_pct=classified_weight_pct,
+            benchmark_weights_source=_SPY_WEIGHTS_SOURCE,
+            notes=unavailable_notes,
+        )
 
     bench_weights = benchmark_sector_weights()
-    spy_closes = _benchmark_closes_with_lookback(session, "SPY", start_date, end_date)
+    spy_closes = _benchmark_closes_with_lookback(
+        session, "SPY", start_date, end_date, total_return=False
+    )
     spy_actual = _window_return(spy_closes, start_date, end_date)
 
     covered = classified_value > 0
@@ -371,7 +413,9 @@ def compute_brinson(session: Session, start_date: date, end_date: date) -> Brins
         v_start_s = vstart_by_sector.get(s.gics, Decimal(0))
         w_p = (v_start_s / classified_value) if covered else Decimal(0)
         r_p = (pnl_by_sector[s.gics] / v_start_s) if v_start_s > 0 else None
-        etf_closes = _benchmark_closes_with_lookback(session, s.etf, start_date, end_date)
+        etf_closes = _benchmark_closes_with_lookback(
+            session, s.etf, start_date, end_date, total_return=False
+        )
         r_b = _window_return(etf_closes, start_date, end_date)
         if r_b is None:
             sectors_missing_etf.append(s.etf)
@@ -396,15 +440,11 @@ def compute_brinson(session: Session, start_date: date, end_date: date) -> Brins
     ]
     sector_rows.sort(key=lambda r: (-r.benchmark_weight_pct, r.sector))
 
-    classified_weight_pct = (
-        (classified_value / (classified_value + excluded_value) * Decimal(100)).quantize(_PCT_QUANT)
-        if (classified_value + excluded_value) > 0
-        else None
-    )
-
     notes = _brinson_notes(covered, excluded_value, sectors_missing_etf, attribution)
 
     return BrinsonResult(
+        calculation_status="available",
+        calculation_reason_codes=[],
         start_date=start_date,
         end_date=end_date,
         benchmark="SPY",
@@ -434,17 +474,17 @@ def _brinson_notes(
         "Brinson-Fachler attribution vs the S&P 500 (SPY). Allocation = "
         "Σ(w_p−w_b)(r_b,s−r_b); selection = Σ w_b(r_p,s−r_b,s); interaction = "
         "Σ(w_p−w_b)(r_p,s−r_b,s). The three sum to portfolio − benchmark return.",
-        "Benchmark total return is reconstructed as Σ(benchmark sector weight × "
+        "Benchmark price return is reconstructed as Σ(benchmark sector weight × "
         "sector-ETF return) so the decomposition is exact; it differs from the "
-        "actual SPY total return (spy_actual_return_pct) because the sector "
+        "actual SPY price return (spy_actual_return_pct) because the sector "
         "weights are a static approximation.",
         _SPY_WEIGHTS_SOURCE,
         "Portfolio sector weights are beginning-of-window (each name's "
         "value_at_start); a sector's return is its summed P&L ÷ summed beginning "
         "value. Names opened mid-window contribute P&L but no beginning weight, "
         "slightly biasing that sector's return.",
-        "Benchmark sector returns use the 11 SPDR Select Sector ETFs as GICS "
-        "sector proxies — total-return where available.",
+        "Benchmark sector returns use raw closes for the 11 SPDR Select Sector "
+        "ETFs as GICS sector proxies, matching the portfolio price/trade basis.",
     ]
     if not covered:
         notes.append(

@@ -10,24 +10,23 @@ this series is **money-weighted (Modified Dietz)**, NOT a chained daily TWR.
 At each observation date `d` it computes a single-window return-since-start
 with a contribution-weighted denominator:
 
-    return_pct(d) = (V(d) − V_start − Σ_{i: d_i≤d} C_i)
-                    / (V_start + Σ_{i: d_i≤d} C_i · (d − d_i)/(d − d_0))
+    return_pct(d) = (V(d) − V_start − Σ_{i: d_0<d_i≤d} C_i)
+                    / (V_start + Σ_{i: d_0<d_i≤d} C_i · (d − d_i)/(d − d_0))
 
-(see `_modified_dietz_series`). `C_i` is an *external* cashflow on day `d_i`
+(see `modified_dietz_series`). `C_i` is an *external* cashflow on day `d_i`
 — deposits, withdrawals, ACATS transfers; trades, dividends, fees, and
 interest are internal events that move V but not the cashflow term. The
 contribution-weighted denominator makes the % sensitive to cashflow timing
-on a heavy-contribution book — which is exactly why the dollar-legible
-`position_alpha` engine is canonical for the headline; this series is kept
-for the /performance endpoint (consumed by the companion earnings-summary
-project) and as the matched-flow benchmark source for the Risk Metrics card.
+on a heavy-contribution book. This whole-portfolio series is the canonical
+headline comparison; position-level results are supporting attribution.
 
 Two-stage construction:
 
-  1. **Daily portfolio value** is sourced from `holdings_snapshots` going
-     forward; for dates predating the first snapshot, it's reconstructed by
-     walking `investment_transactions` backward and valuing each position
-     against `prices` (yfinance backfill).
+  1. **Daily portfolio value** uses one matched basis per calculation. Complete
+     whole-account totals are used only when both exact boundaries cover the
+     same full account universe. Otherwise complete `holdings_snapshots` are
+     used, with earlier dates reconstructed by walking
+     `investment_transactions` backward against historical `prices`.
 
   2. **Modified Dietz** is evaluated per date over the window via the formula
      above; the result is rebased to an index for the chart.
@@ -39,23 +38,45 @@ underlying dollar series alongside the rebased index if it wants.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
+from hashlib import sha256
+from typing import Literal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
+    INVESTMENT_ACCOUNT_TYPES,
+    Account,
+    AccountValuationObservation,
     Benchmark,
     HoldingSnapshot,
     InvestmentTransaction,
     InvestmentTransactionType,
-    PortfolioValueDaily,
     Price,
     Security,
 )
-from portfolio_tracker.schemas import PerformancePoint, PerformanceSeries
-from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.schemas import (
+    PerformanceBenchmarkEquation,
+    PerformanceBenchmarkPriceInput,
+    PerformanceDatedCashflow,
+    PerformanceEquationReceipt,
+    PerformanceOperativeCashflow,
+    PerformancePoint,
+    PerformanceSeries,
+)
+from portfolio_tracker.services import external_flow_ledger
+from portfolio_tracker.services.account_valuations import (
+    stored_account_valuation_observation_payload,
+)
+from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
+from portfolio_tracker.services.cashflow_source_coverage import (
+    assess_cashflow_source_coverage,
+    source_coverage_out,
+)
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -64,6 +85,157 @@ from portfolio_tracker.services.splits import load_split_factors
 # stock, etc.) rather than real market moves. Surfaced via the data-quality
 # report so the user can investigate the underlying transactions.
 _ABNORMAL_DAILY_RETURN: Decimal = Decimal("0.30")
+
+_NO_PORTFOLIO_VALUES = "no_portfolio_values"
+_EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY = "external_share_movement_missing_security"
+_EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER = "external_share_movement_missing_ticker"
+_EXTERNAL_SHARE_MOVEMENT_PRICE_UNAVAILABLE = "external_share_movement_price_unavailable"
+_NONPOSITIVE_DIETZ_DENOMINATOR = "nonpositive_dietz_denominator"
+_PORTFOLIO_START_VALUE_UNAVAILABLE = "portfolio_start_value_unavailable"
+_PORTFOLIO_END_VALUE_UNAVAILABLE = "portfolio_end_value_unavailable"
+_PARTIAL_SNAPSHOT_START_DATE = "partial_snapshot_start_date"
+_PARTIAL_SNAPSHOT_END_DATE = "partial_snapshot_end_date"
+_PARTIAL_ACCOUNT_VALUATION_START_DATE = "partial_account_valuation_start_date"
+_PARTIAL_ACCOUNT_VALUATION_END_DATE = "partial_account_valuation_end_date"
+_ACCOUNT_VALUATION_INTEGRITY_INVALID = "account_valuation_integrity_invalid"
+_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE = "modeled_opening_account_coverage_incomplete"
+_MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE = "modeled_opening_valuation_coverage_incomplete"
+_UNPRICEABLE_HOLDING_SNAPSHOT = "unpriceable_holding_snapshot"
+_ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE = "portfolio_account_universe_coverage_incomplete"
+_ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED = "account_valuation_index_exclusion_unsupported"
+_PROVIDER_VALUATION_AS_OF_UNASSERTED = "provider_valuation_as_of_unasserted"
+_PERFORMANCE_WINDOW_TOO_SHORT = "performance_window_too_short"
+
+_ValueProvenance = Literal[
+    "observed_complete_snapshot",
+    "observed_account_valuation",
+    "modeled_transaction_walkback",
+]
+_OBSERVED_VALUE: _ValueProvenance = "observed_complete_snapshot"
+_ACCOUNT_VALUATION_OBSERVED: _ValueProvenance = "observed_account_valuation"
+_MODELED_VALUE: _ValueProvenance = "modeled_transaction_walkback"
+_SPY_BENCHMARK_PRICE_UNAVAILABLE = "spy_benchmark_price_unavailable"
+_QQQ_BENCHMARK_PRICE_UNAVAILABLE = "qqq_benchmark_price_unavailable"
+_POLICY_BENCHMARK_PRICE_UNAVAILABLE = "policy_benchmark_price_unavailable"
+
+# Query cushion only. Resolution below accepts exactly the target market close
+# or, for a weekend/known US-market holiday, the immediately preceding close.
+_BENCHMARK_QUERY_LOOKBACK_DAYS = 7
+_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE = "external_flow_source_coverage_incomplete"
+_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE = "broker_archive_coverage_not_complete"
+
+
+@dataclass(frozen=True)
+class _CashflowAssessment:
+    cashflows: dict[date, Decimal]
+    calculation_reason_codes: tuple[str, ...]
+    external_flow_ledger_id: str | None = None
+    account_ids: tuple[int, ...] = ()
+    entries: tuple[external_flow_ledger.ExternalFlowEntry, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PortfolioValueAssessment:
+    values: dict[date, Decimal]
+    provenance: dict[date, _ValueProvenance]
+    valuation_account_ids: tuple[int, ...]
+    calculation_reason_codes: tuple[str, ...]
+    certification_reason_codes: tuple[str, ...] = ()
+    observation_keys: dict[date, tuple[str, ...]] = field(
+        default_factory=lambda: dict[date, tuple[str, ...]]()
+    )
+
+
+def latest_complete_portfolio_observation_date(session: Session) -> date | None:
+    """Latest date with a structurally complete whole-portfolio observation.
+
+    A provider API total observed on its capture date can qualify even when
+    the provider omitted an effective timestamp. Downstream certification
+    retains that temporal limitation separately.
+    """
+    valuation_universe = performance_account_ids(session, date.min, date.max)
+    account_valuations = _complete_account_valuations_by_date(
+        session, date.min, date.max, account_ids=valuation_universe
+    )
+    snapshot_candidates = _snapshot_dates(
+        session, date.min, date.max, account_ids=valuation_universe
+    )
+    snapshot_dates = _complete_snapshot_dates(
+        session, snapshot_candidates, account_ids=valuation_universe
+    )
+    candidates = set(snapshot_dates) | set(account_valuations)
+    return max(candidates) if candidates else None
+
+
+def resolve_performance_window(
+    session: Session,
+    start_date: date | None,
+    end_date: date | None,
+    *,
+    include_backfill: bool,
+) -> tuple[date, date]:
+    """Resolve omitted performance boundaries without changing explicit ones.
+
+    An omitted end uses the latest complete broker observation when available,
+    preventing a stale-but-valid portfolio from being compared with a future
+    ``date.today()`` boundary that has no valuation. ``date.today()`` remains
+    only the empty-dataset fallback.
+    """
+    latest_observation = latest_complete_portfolio_observation_date(session)
+    resolved_end = end_date or latest_observation or date.today()
+    account_ids = performance_account_ids(session, date.min, resolved_end)
+    snapshot_candidates = _snapshot_dates(session, date.min, resolved_end, account_ids=account_ids)
+    complete_snapshots = _complete_snapshot_dates(
+        session, snapshot_candidates, account_ids=account_ids
+    )
+    account_valuations = _complete_account_valuations_by_date(
+        session, date.min, resolved_end, account_ids=account_ids
+    )
+    snapshot_dates = set(complete_snapshots)
+    valuation_dates = set(account_valuations)
+
+    if start_date is not None:
+        if end_date is not None:
+            return start_date, resolved_end
+        # Preserve the caller's exact opening and choose the latest closing
+        # boundary that can use the same valuation basis when one exists.
+        matching_ends: list[date] = []
+        if start_date in snapshot_dates:
+            matching_ends.extend(day for day in snapshot_dates if day >= start_date)
+        if start_date in valuation_dates:
+            matching_ends.extend(day for day in valuation_dates if day >= start_date)
+        modeled_default_end = max(snapshot_dates) if snapshot_dates else resolved_end
+        return start_date, max(matching_ends, default=modeled_default_end)
+
+    if not account_ids:
+        return resolved_end - timedelta(days=365), resolved_end
+
+    if include_backfill and snapshot_dates:
+        latest_snapshot = max(snapshot_dates)
+        earliest_transaction = session.scalar(
+            select(func.min(InvestmentTransaction.date)).where(
+                InvestmentTransaction.account_id.in_(account_ids),
+                InvestmentTransaction.date <= latest_snapshot,
+            )
+        )
+        if earliest_transaction is not None:
+            earliest_candidate = min(min(snapshot_dates), earliest_transaction)
+            return max(earliest_candidate, latest_snapshot - timedelta(days=730)), latest_snapshot
+
+    # Choose one observed basis end-to-end. A union can accidentally pair an
+    # old account total with a newer holdings snapshot (or vice versa), which
+    # is precisely the mixed-basis calculation the evaluator rejects.
+    candidate_windows = [
+        (min(days), max(days)) for days in (snapshot_dates, valuation_dates) if days
+    ]
+    if candidate_windows:
+        return max(
+            candidate_windows,
+            key=lambda window: ((window[1] - window[0]).days, window[1]),
+        )
+
+    return resolved_end - timedelta(days=365), resolved_end
+
 
 # `transfer` is Plaid's catch-all for asset movements. EXTERNAL transfers
 # (ACATS in/out, ACH deposits, wires) are TWR cashflow. INTERNAL transfers
@@ -163,11 +335,12 @@ def compute_performance_series(
     Modified Dietz return at every observation date:
 
         return_pct(d) = (V(d) - V_start - cumulative_C(d))
-                        / (V_start + sum_{i: d_i<=d} C_i * (d-d_i)/(d-d_0))
+                        / (V_start + sum_{i: d_0<d_i<=d} C_i * (d-d_i)/(d-d_0))
 
-    Both portfolio and benchmark series share the SAME denominator on each
-    day, so even when V_start is unreliable (transaction-walk reconstruction
-    misses cash), the GAP between the lines is the true relative performance.
+    Both portfolio and benchmark series share the SAME denominator and dated
+    external-flow set on each day, so percentage-point and dollar differences
+    reconcile. Any warning about reconstructed V_start still applies to both
+    the absolute returns and their comparison.
 
     `reserve_amount` carves a fixed dollar amount off the top of both the
     actual portfolio's V and the synthetic-benchmark starting capital. The
@@ -190,17 +363,109 @@ def compute_performance_series(
     and add them to the cashflow series used for both Modified Dietz on
     V_active and for the synthetic benchmarks.
     """
-    daily_value = _daily_portfolio_value(session, start_date, end_date)
+    value_assessment = _daily_portfolio_value_assessment(
+        session, start_date, end_date, exclude_index_etfs
+    )
+    account_ids = frozenset(value_assessment.valuation_account_ids)
+    source_coverage = assess_cashflow_source_coverage(
+        session,
+        start_date,
+        end_date,
+        account_ids=account_ids,
+    )
+    source_coverage_read = source_coverage_out(source_coverage)
+    daily_value = value_assessment.values
+    opening_provenance = value_assessment.provenance.get(start_date)
+    ending_provenance = value_assessment.provenance.get(end_date)
+    cashflow_assessment = _daily_external_cashflow_assessment(
+        session, start_date, end_date, account_ids
+    )
+    daily_cashflow = cashflow_assessment.cashflows
+    benchmark_series = _benchmark_series(session, start_date, end_date)
+    benchmark_return_basis = _benchmark_return_basis(session, start_date, end_date)
+    policy_weights = load_policy_weights(session)
+
+    # Gather every independently assessable prerequisite before returning for
+    # an unsupported valuation boundary. This gives reconciliation one closure
+    # packet instead of revealing ledger and benchmark gaps one retry at a time.
+    boundary_reason_codes = set(value_assessment.calculation_reason_codes)
+    boundary_reason_codes.update(value_assessment.certification_reason_codes)
+    boundary_reason_codes.update(cashflow_assessment.calculation_reason_codes)
+    if start_date >= end_date:
+        boundary_reason_codes.add(_PERFORMANCE_WINDOW_TOO_SHORT)
     if not daily_value:
+        boundary_reason_codes.add(_NO_PORTFOLIO_VALUES)
+    if start_date not in daily_value:
+        boundary_reason_codes.add(_PORTFOLIO_START_VALUE_UNAVAILABLE)
+    if end_date not in daily_value:
+        boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
+    if daily_value and not _is_observed_value(ending_provenance):
+        boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
+    if not source_coverage.is_complete:
+        boundary_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
+
+    preliminary_price_dates = sorted(
+        {start_date, end_date, *daily_value}
+        | {flow_date for flow_date in daily_cashflow if start_date < flow_date <= end_date}
+    )
+    if _resolved_price_inputs(benchmark_series.get("SPY", {}), preliminary_price_dates) is None:
+        boundary_reason_codes.add(_SPY_BENCHMARK_PRICE_UNAVAILABLE)
+    if _resolved_price_inputs(benchmark_series.get("QQQ", {}), preliminary_price_dates) is None:
+        boundary_reason_codes.add(_QQQ_BENCHMARK_PRICE_UNAVAILABLE)
+    required_policy_tickers = {ticker for ticker, weight in policy_weights.items() if weight > 0}
+    if any(
+        _resolved_price_inputs(benchmark_series.get(ticker, {}), preliminary_price_dates) is None
+        for ticker in required_policy_tickers
+    ):
+        boundary_reason_codes.add(_POLICY_BENCHMARK_PRICE_UNAVAILABLE)
+
+    has_valuation_boundary_failure = (
+        start_date >= end_date
+        or not daily_value
+        or start_date not in daily_value
+        or end_date not in daily_value
+        or not _is_observed_value(ending_provenance)
+        or bool(value_assessment.calculation_reason_codes)
+    )
+    if has_valuation_boundary_failure:
         return PerformanceSeries(
+            methodology="performance.modified_dietz",
+            methodology_version="2",
+            calculation_status="unavailable",
+            reconstruction_certification="unavailable",
+            calculation_reason_codes=sorted(boundary_reason_codes),
             start_date=start_date,
             end_date=end_date,
-            base_value=Decimal(0),
-            points=[],
+            base_value=daily_value.get(start_date, Decimal(0)),
+            points=[
+                PerformancePoint(
+                    date=current_date,
+                    portfolio_value=daily_value[current_date],
+                    portfolio_return_pct=None,
+                    spy_return_pct=None,
+                    qqq_return_pct=None,
+                    policy_return_pct=None,
+                    spy_equivalent_value=None,
+                    qqq_equivalent_value=None,
+                    policy_equivalent_value=None,
+                )
+                for current_date in sorted(daily_value)
+            ],
+            earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
+            net_external_cashflow_in=None,
+            backfill_start_unreliable=(not _is_observed_value(opening_provenance)),
+            opening_value_provenance=opening_provenance,
+            ending_value_provenance=ending_provenance,
+            opening_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(start_date, ())
+            ),
+            ending_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(end_date, ())
+            ),
+            valuation_account_ids=list(value_assessment.valuation_account_ids),
+            equation_receipt=None,
+            source_coverage=source_coverage_read,
         )
-
-    daily_cashflow = _daily_external_cashflows(session, start_date, end_date)
-    benchmark_series = _benchmark_series(session, start_date, end_date)
 
     sorted_dates = sorted(daily_value.keys())
 
@@ -219,6 +484,11 @@ def compute_performance_series(
             for d, c in internal_flows.items():
                 daily_cashflow[d] = daily_cashflow.get(d, Decimal(0)) + c
 
+    # The opening value is end-of-day, so activity on that date is already
+    # represented in V_start. Keep one canonical (start, end] flow set for
+    # the portfolio return, synthetic books, and reported four-part bridge.
+    daily_cashflow = _cashflows_within_valuation_period(sorted_dates, daily_cashflow)
+
     # Reserve adjustment: shift V_start, V[d], and synthetic bases down by
     # `reserve_amount`. The cashflow series is left intact. Clamp to zero
     # so a too-large reserve doesn't produce a negative denominator.
@@ -234,36 +504,128 @@ def compute_performance_series(
         else daily_value_active
     )
 
-    spy_equivalent = _money_flow_matched_value(
-        sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("SPY", {})
+    required_price_dates = sorted(set(sorted_dates) | set(daily_cashflow))
+    spy_price_inputs = _resolved_price_inputs(benchmark_series.get("SPY", {}), required_price_dates)
+    qqq_price_inputs = _resolved_price_inputs(benchmark_series.get("QQQ", {}), required_price_dates)
+    policy_price_inputs: dict[str, dict[date, tuple[date, Decimal]]] = {}
+    for ticker, weight in policy_weights.items():
+        if weight <= 0:
+            continue
+        resolved = _resolved_price_inputs(benchmark_series.get(ticker, {}), required_price_dates)
+        if resolved is not None:
+            policy_price_inputs[ticker] = resolved
+
+    calculation_reason_codes = set(cashflow_assessment.calculation_reason_codes)
+    if spy_price_inputs is None:
+        calculation_reason_codes.add(_SPY_BENCHMARK_PRICE_UNAVAILABLE)
+    if qqq_price_inputs is None:
+        calculation_reason_codes.add(_QQQ_BENCHMARK_PRICE_UNAVAILABLE)
+    required_policy_tickers = {ticker for ticker, weight in policy_weights.items() if weight > 0}
+    if required_policy_tickers and set(policy_price_inputs) != required_policy_tickers:
+        calculation_reason_codes.add(_POLICY_BENCHMARK_PRICE_UNAVAILABLE)
+    if not source_coverage.is_complete:
+        calculation_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
+    if (
+        not cashflow_assessment.calculation_reason_codes
+        and not modified_dietz_denominators_are_positive(
+            sorted_dates, daily_cashflow, base_value_adj
+        )
+    ):
+        calculation_reason_codes.add(_NONPOSITIVE_DIETZ_DENOMINATOR)
+
+    spy_equivalent = (
+        _money_flow_matched_value(
+            sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("SPY", {})
+        )
+        if spy_price_inputs is not None
+        else {}
     )
-    qqq_equivalent = _money_flow_matched_value(
-        sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("QQQ", {})
+    qqq_equivalent = (
+        _money_flow_matched_value(
+            sorted_dates, base_value_adj, daily_cashflow, benchmark_series.get("QQQ", {})
+        )
+        if qqq_price_inputs is not None
+        else {}
     )
-    policy_weights = load_policy_weights(session)
     policy_equivalent = (
         _policy_matched_value(
             sorted_dates, base_value_adj, daily_cashflow, benchmark_series, policy_weights
         )
-        if policy_weights
+        if policy_weights and not (required_policy_tickers - set(policy_price_inputs))
         else {}
     )
 
-    portfolio_returns = _modified_dietz_series(
+    if calculation_reason_codes:
+        points = [
+            PerformancePoint(
+                date=current_date,
+                portfolio_value=daily_value_adj[current_date],
+                portfolio_return_pct=None,
+                spy_return_pct=None,
+                qqq_return_pct=None,
+                policy_return_pct=None,
+                spy_equivalent_value=None,
+                qqq_equivalent_value=None,
+                policy_equivalent_value=None,
+            )
+            for current_date in sorted_dates
+        ]
+        return PerformanceSeries(
+            methodology="performance.modified_dietz",
+            methodology_version="2",
+            calculation_status="unavailable",
+            reconstruction_certification="unavailable",
+            calculation_reason_codes=sorted(
+                calculation_reason_codes | set(value_assessment.certification_reason_codes)
+            ),
+            start_date=start_date,
+            end_date=end_date,
+            base_value=base_value_adj,
+            points=points,
+            earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
+            net_external_cashflow_in=None,
+            source_coverage=source_coverage_read,
+            backfill_start_unreliable=(
+                not _is_observed_value(opening_provenance)
+                or _is_start_value_unreliable(base_value, end_value)
+            ),
+            opening_value_provenance=(
+                opening_provenance
+                if opening_provenance
+                in {_OBSERVED_VALUE, _ACCOUNT_VALUATION_OBSERVED, _MODELED_VALUE}
+                else None
+            ),
+            ending_value_provenance=(
+                ending_provenance
+                if ending_provenance
+                in {_OBSERVED_VALUE, _ACCOUNT_VALUATION_OBSERVED, _MODELED_VALUE}
+                else None
+            ),
+            opening_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(start_date, ())
+            ),
+            ending_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(end_date, ())
+            ),
+            valuation_account_ids=list(value_assessment.valuation_account_ids),
+            equation_receipt=None,
+        )
+
+    portfolio_returns = modified_dietz_series(
         sorted_dates, daily_value_adj, daily_cashflow, base_value_adj
     )
     spy_returns = (
-        _modified_dietz_series(sorted_dates, spy_equivalent, daily_cashflow, base_value_adj)
+        modified_dietz_series(sorted_dates, spy_equivalent, daily_cashflow, base_value_adj)
         if spy_equivalent
         else {}
     )
     qqq_returns = (
-        _modified_dietz_series(sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj)
+        modified_dietz_series(sorted_dates, qqq_equivalent, daily_cashflow, base_value_adj)
         if qqq_equivalent
         else {}
     )
     policy_returns = (
-        _modified_dietz_series(sorted_dates, policy_equivalent, daily_cashflow, base_value_adj)
+        modified_dietz_series(sorted_dates, policy_equivalent, daily_cashflow, base_value_adj)
         if policy_equivalent
         else {}
     )
@@ -284,14 +646,364 @@ def compute_performance_series(
             )
         )
 
+    assert spy_price_inputs is not None
+    assert qqq_price_inputs is not None
+    equation_receipt = _build_equation_receipt(
+        start_date=start_date,
+        end_date=end_date,
+        sorted_dates=sorted_dates,
+        daily_value=daily_value_adj,
+        daily_cashflow=daily_cashflow,
+        base_value=base_value_adj,
+        portfolio_return_pct=portfolio_returns[end_date],
+        spy_equivalent=spy_equivalent,
+        spy_return_pct=spy_returns[end_date],
+        spy_price_inputs=spy_price_inputs,
+        qqq_equivalent=qqq_equivalent,
+        qqq_return_pct=qqq_returns[end_date],
+        qqq_price_inputs=qqq_price_inputs,
+        policy_equivalent=policy_equivalent,
+        policy_return_pct=policy_returns.get(end_date),
+        policy_price_inputs=policy_price_inputs,
+        cashflow_assessment=cashflow_assessment,
+        valuation_observation_keys=value_assessment.observation_keys,
+        benchmark_return_basis=benchmark_return_basis,
+        reserve=reserve,
+        exclude_index_etfs=exclude_index_etfs,
+    )
+
+    opening_is_observed = _is_observed_value(opening_provenance)
+    certification_reason_codes = set(value_assessment.certification_reason_codes)
+    if not source_coverage.broker_archive_is_complete:
+        certification_reason_codes.add(_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE)
+    reconstruction_certification = (
+        "modeled_provisional"
+        if not opening_is_observed
+        else ("observed_certified" if not certification_reason_codes else "source_provisional")
+    )
+    calculation_reason_codes = sorted(certification_reason_codes)
     return PerformanceSeries(
+        methodology="performance.modified_dietz",
+        methodology_version="2",
+        calculation_status="available",
+        reconstruction_certification=reconstruction_certification,
+        calculation_reason_codes=calculation_reason_codes,
         start_date=start_date,
         end_date=end_date,
         base_value=base_value_adj,
         points=points,
         earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
-        backfill_start_unreliable=_is_start_value_unreliable(base_value, end_value),
+        source_coverage=source_coverage_read,
+        backfill_start_unreliable=(
+            not _is_observed_value(opening_provenance)
+            or _is_start_value_unreliable(base_value, end_value)
+        ),
+        opening_value_provenance=opening_provenance,
+        ending_value_provenance=ending_provenance,
+        opening_valuation_observation_keys=list(
+            value_assessment.observation_keys.get(start_date, ())
+        ),
+        ending_valuation_observation_keys=list(value_assessment.observation_keys.get(end_date, ())),
+        valuation_account_ids=list(value_assessment.valuation_account_ids),
+        equation_receipt=equation_receipt,
+    )
+
+
+def _stable_input_id(namespace: str, rows: Iterable[tuple[object, ...]]) -> str:
+    """Return a deterministic opaque identifier without exposing input data."""
+    digest = sha256(namespace.encode("utf-8"))
+    for row in rows:
+        digest.update(b"\x1e")
+        for value in row:
+            encoded = str(value).encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _is_observed_value(provenance: _ValueProvenance | None) -> bool:
+    return provenance in {_OBSERVED_VALUE, _ACCOUNT_VALUATION_OBSERVED}
+
+
+def _price_input_id(
+    benchmark: str,
+    resolved_prices: dict[date, tuple[date, Decimal]],
+    basis_by_date: dict[date, str] | None = None,
+) -> str:
+    return _stable_input_id(
+        f"performance-benchmark-price:{benchmark}",
+        (
+            (
+                target_date,
+                source_date,
+                price,
+                (basis_by_date or {}).get(source_date, "raw_price_fallback"),
+            )
+            for target_date, (source_date, price) in sorted(resolved_prices.items())
+        ),
+    )
+
+
+def _price_input_rows(
+    ticker: str,
+    resolved_prices: dict[date, tuple[date, Decimal]],
+    basis_by_date: dict[date, str] | None = None,
+) -> list[PerformanceBenchmarkPriceInput]:
+    return [
+        PerformanceBenchmarkPriceInput(
+            ticker=ticker,
+            target_date=target_date,
+            source_date=source_date,
+            close=price,
+            resolution=(
+                "same_day_close" if target_date == source_date else "previous_market_close"
+            ),
+            return_basis=(
+                "total_return_adjusted"
+                if (basis_by_date or {}).get(source_date) == "total_return_adjusted"
+                else "raw_price_fallback"
+            ),
+        )
+        for target_date, (source_date, price) in sorted(resolved_prices.items())
+    ]
+
+
+def _build_benchmark_equation(
+    *,
+    benchmark: str,
+    ending_value: Decimal,
+    opening_value: Decimal,
+    net_external_cashflow: Decimal,
+    portfolio_gain: Decimal,
+    portfolio_return_pct: Decimal,
+    return_pct: Decimal,
+    price_input_id: str,
+    price_inputs: list[PerformanceBenchmarkPriceInput],
+) -> PerformanceBenchmarkEquation:
+    investment_gain = ending_value - opening_value - net_external_cashflow
+    return PerformanceBenchmarkEquation(
+        benchmark=benchmark,
+        ending_value=ending_value,
+        investment_gain=investment_gain,
+        return_pct=return_pct,
+        dollar_alpha=portfolio_gain - investment_gain,
+        percentage_point_alpha=portfolio_return_pct - return_pct,
+        equation_residual=(ending_value - opening_value - net_external_cashflow - investment_gain),
+        price_input_id=price_input_id,
+        price_inputs=price_inputs,
+    )
+
+
+def _build_equation_receipt(
+    *,
+    start_date: date,
+    end_date: date,
+    sorted_dates: list[date],
+    daily_value: dict[date, Decimal],
+    daily_cashflow: dict[date, Decimal],
+    base_value: Decimal,
+    portfolio_return_pct: Decimal,
+    spy_equivalent: dict[date, Decimal],
+    spy_return_pct: Decimal,
+    spy_price_inputs: dict[date, tuple[date, Decimal]],
+    qqq_equivalent: dict[date, Decimal],
+    qqq_return_pct: Decimal,
+    qqq_price_inputs: dict[date, tuple[date, Decimal]],
+    policy_equivalent: dict[date, Decimal],
+    policy_return_pct: Decimal | None,
+    policy_price_inputs: dict[str, dict[date, tuple[date, Decimal]]],
+    cashflow_assessment: _CashflowAssessment,
+    valuation_observation_keys: dict[date, tuple[str, ...]],
+    benchmark_return_basis: dict[str, dict[date, str]],
+    reserve: Decimal,
+    exclude_index_etfs: bool,
+) -> PerformanceEquationReceipt:
+    """Freeze every headline value and its input lineage into one response."""
+    net_external_cashflow = sum(daily_cashflow.values(), Decimal(0))
+    ending_value = daily_value[end_date]
+    portfolio_gain = ending_value - base_value - net_external_cashflow
+    denominator = _modified_dietz_denominator_at(start_date, end_date, daily_cashflow, base_value)
+    portfolio_value_input_id = _stable_input_id(
+        "performance-portfolio-valuations",
+        (
+            (
+                value_date,
+                daily_value[value_date],
+                *valuation_observation_keys.get(value_date, ()),
+            )
+            for value_date in sorted_dates
+        ),
+    )
+    flow_ledger_id = _stable_input_id(
+        "performance-external-flow-window",
+        [
+            (
+                cashflow_assessment.external_flow_ledger_id or "derived-daily-flow-projection",
+                reserve,
+                exclude_index_etfs,
+            ),
+            *((flow_date, amount) for flow_date, amount in sorted(daily_cashflow.items())),
+        ],
+    )
+    spy = _build_benchmark_equation(
+        benchmark="SPY",
+        ending_value=spy_equivalent[end_date],
+        opening_value=base_value,
+        net_external_cashflow=net_external_cashflow,
+        portfolio_gain=portfolio_gain,
+        portfolio_return_pct=portfolio_return_pct,
+        return_pct=spy_return_pct,
+        price_input_id=_price_input_id(
+            "SPY", spy_price_inputs, benchmark_return_basis.get("SPY", {})
+        ),
+        price_inputs=_price_input_rows(
+            "SPY", spy_price_inputs, benchmark_return_basis.get("SPY", {})
+        ),
+    )
+    qqq = _build_benchmark_equation(
+        benchmark="QQQ",
+        ending_value=qqq_equivalent[end_date],
+        opening_value=base_value,
+        net_external_cashflow=net_external_cashflow,
+        portfolio_gain=portfolio_gain,
+        portfolio_return_pct=portfolio_return_pct,
+        return_pct=qqq_return_pct,
+        price_input_id=_price_input_id(
+            "QQQ", qqq_price_inputs, benchmark_return_basis.get("QQQ", {})
+        ),
+        price_inputs=_price_input_rows(
+            "QQQ", qqq_price_inputs, benchmark_return_basis.get("QQQ", {})
+        ),
+    )
+    policy: PerformanceBenchmarkEquation | None = None
+    if policy_equivalent and policy_return_pct is not None:
+        policy_input_id = _stable_input_id(
+            "performance-benchmark-price:policy",
+            (
+                (
+                    ticker,
+                    target_date,
+                    source_date,
+                    price,
+                    benchmark_return_basis.get(ticker, {}).get(source_date, "raw_price_fallback"),
+                )
+                for ticker, resolved in sorted(policy_price_inputs.items())
+                for target_date, (source_date, price) in sorted(resolved.items())
+            ),
+        )
+        policy = _build_benchmark_equation(
+            benchmark="policy",
+            ending_value=policy_equivalent[end_date],
+            opening_value=base_value,
+            net_external_cashflow=net_external_cashflow,
+            portfolio_gain=portfolio_gain,
+            portfolio_return_pct=portfolio_return_pct,
+            return_pct=policy_return_pct,
+            price_input_id=policy_input_id,
+            price_inputs=[
+                row
+                for ticker, resolved in sorted(policy_price_inputs.items())
+                for row in _price_input_rows(
+                    ticker, resolved, benchmark_return_basis.get(ticker, {})
+                )
+            ],
+        )
+    operative_flows = [
+        PerformanceOperativeCashflow(
+            flow_id=entry.flow_id,
+            date=entry.date,
+            amount=entry.signed_external_amount,
+            transaction_id=entry.transaction_id,
+            transaction_origin=entry.transaction_origin,
+            source_event_ids=list(entry.source_event_ids),
+            source_attestation_keys=list(entry.source_attestation_keys),
+            active_decision_keys=list(entry.active_decision_keys),
+            decision_authorities=list(entry.decision_authorities),
+            decision_confidences=list(entry.decision_confidences),
+            assumption_codes=list(entry.assumption_codes),
+            effective_date_bases=list(entry.effective_date_bases),
+        )
+        for entry in sorted(cashflow_assessment.entries, key=lambda item: (item.date, item.flow_id))
+        if entry.classification != "internal" and entry.signed_external_amount != 0
+    ]
+    operative_by_date: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
+    for flow in operative_flows:
+        operative_by_date[flow.date] += flow.amount
+    for flow_date, amount in sorted(daily_cashflow.items()):
+        residual = amount - operative_by_date[flow_date]
+        if residual == 0:
+            continue
+        operative_flows.append(
+            PerformanceOperativeCashflow(
+                flow_id=f"calculation-adjustment:index-etf-carve:{flow_date.isoformat()}",
+                date=flow_date,
+                amount=residual,
+                transaction_id=None,
+                transaction_origin="calculation_adjustment",
+                source_event_ids=[],
+                source_attestation_keys=[],
+                active_decision_keys=[],
+                decision_authorities=[],
+                decision_confidences=[],
+                assumption_codes=["exclude_index_etfs_internal_flow"],
+                effective_date_bases=["provider_posting"],
+            )
+        )
+    flow_ids_by_date: dict[date, list[str]] = defaultdict(list)
+    for flow in operative_flows:
+        flow_ids_by_date[flow.date].append(flow.flow_id)
+    calculation_id = _stable_input_id(
+        "performance-equation-receipt-v2",
+        [
+            (
+                start_date,
+                end_date,
+                flow_ledger_id,
+                portfolio_value_input_id,
+                spy.price_input_id,
+                qqq.price_input_id,
+                policy.price_input_id if policy is not None else "no-policy",
+                base_value,
+                net_external_cashflow,
+                ending_value,
+                portfolio_gain,
+                denominator,
+                portfolio_return_pct,
+            )
+        ],
+    )
+    return PerformanceEquationReceipt(
+        calculation_id=calculation_id,
+        external_flow_ledger_id=flow_ledger_id,
+        portfolio_valuation_input_id=portfolio_value_input_id,
+        opening_valuation_observation_keys=list(valuation_observation_keys.get(start_date, ())),
+        ending_valuation_observation_keys=list(valuation_observation_keys.get(end_date, ())),
+        included_account_ids=list(cashflow_assessment.account_ids),
+        requested_start_date=start_date,
+        requested_end_date=end_date,
+        benchmark_price_resolution_policy="same_day_or_previous_us_market_close",
+        opening_value=base_value,
+        dated_external_cashflows=[
+            PerformanceDatedCashflow(
+                date=flow_date,
+                amount=amount,
+                flow_ids=sorted(flow_ids_by_date[flow_date]),
+            )
+            for flow_date, amount in sorted(daily_cashflow.items())
+        ],
+        operative_external_cashflows=operative_flows,
+        net_external_cashflow_in=net_external_cashflow,
+        ending_value=ending_value,
+        investment_gain=portfolio_gain,
+        modified_dietz_denominator=denominator,
+        portfolio_return_pct=portfolio_return_pct,
+        portfolio_equation_residual=(
+            ending_value - base_value - net_external_cashflow - portfolio_gain
+        ),
+        spy=spy,
+        qqq=qqq,
+        policy=policy,
     )
 
 
@@ -347,7 +1059,7 @@ def _forward_subset_values(
     end_date: date,
     security_ids: frozenset[int],
 ) -> dict[date, Decimal]:
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -383,7 +1095,7 @@ def _backfill_subset_values(
     price` summed across the listed securities, which is what we want for
     "value of the index-ETF portion."
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     anchor_date = session.execute(
@@ -507,7 +1219,7 @@ def _daily_internal_index_cashflows(
     """
     if not security_ids:
         return {}
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
         return {}
     rows = (
@@ -543,24 +1255,15 @@ def _policy_matched_value(
     """Synthetic value of a multi-ticker policy portfolio over time.
 
     Same logic as `_money_flow_matched_value` but for a basket: every
-    purchase (initial + each cashflow) is split across the policy tickers
-    in their target weights. Each lot is valued at today's prices for
-    every component.
+    purchase (initial + each cashflow after the end-of-day opening value)
+    is split across the policy tickers in their target weights. Cashflow
+    dates need not also be displayed valuation dates. Each lot is valued
+    at today's prices for every component.
 
-    Missing-data handling: when a policy ticker has no benchmark price on
-    the deployment date, we **renormalize** the remaining weights so the
-    full lot still gets invested. Pre-fix behavior dropped the missing
-    ticker silently and only invested the surviving fraction of capital,
-    which manifested as a hard −70% drop on day 1 if (e.g.) VTI/VWO had
-    no pulled benchmark data and only QQQ/SGOV did. The chart line was
-    "sit at full capital but only invest 30% of it" — a meaningless
-    portfolio that's not the user's policy at all.
-
-    The renormalized version answers the right hypothetical: "what would
-    your full capital have done invested in the *priceable* portion of
-    your policy mix in the same proportions?" The data-quality report
-    surfaces the missing-data condition separately so the user knows the
-    line is approximated.
+    The public performance path validates every configured component at every
+    displayed and flow-deployment date before calling this helper. The local
+    renormalization remains defensive for private callers, but an incomplete
+    policy basket is never returned as an available whole-portfolio result.
     """
     if not sorted_dates or not weights:
         return {}
@@ -572,20 +1275,29 @@ def _policy_matched_value(
     if not initial_lot:
         return {}
     lots: list[dict[str, Decimal]] = [initial_lot]
+    cashflow_events = sorted(
+        _cashflows_within_valuation_period(sorted_dates, daily_cashflow).items()
+    )
+    cashflow_index = 0
 
     out: dict[date, Decimal] = {}
     for current_date in sorted_dates:
-        cf = daily_cashflow.get(current_date, Decimal(0))
-        if cf != 0:
-            cf_lot = _build_lot_renormalized(cf, weights, benchmark_series, current_date)
-            if cf_lot:
-                lots.append(cf_lot)
+        while (
+            cashflow_index < len(cashflow_events)
+            and cashflow_events[cashflow_index][0] <= current_date
+        ):
+            cashflow_date, cf = cashflow_events[cashflow_index]
+            cf_lot = _build_lot_renormalized(cf, weights, benchmark_series, cashflow_date)
+            if not cf_lot:
+                return {}
+            lots.append(cf_lot)
+            cashflow_index += 1
 
         # Value all lots at today's prices for every component.
         total = Decimal(0)
         for lot in lots:
             for ticker, qty in lot.items():
-                price_today = _last_known_price(benchmark_series.get(ticker, {}), current_date)
+                price_today = _benchmark_price(benchmark_series.get(ticker, {}), current_date)
                 if price_today is None:
                     continue
                 total += qty * price_today
@@ -610,8 +1322,8 @@ def _build_lot_renormalized(
     surviving_weight = Decimal(0)
     for ticker, weight in weights.items():
         closes = benchmark_series.get(ticker, {})
-        price = _last_known_price(closes, on_date)
-        if price is None or price == 0:
+        price = _benchmark_price(closes, on_date)
+        if price is None:
             continue
         priceable.append((ticker, weight, price))
         surviving_weight += weight
@@ -631,9 +1343,10 @@ def _money_flow_matched_value(
     benchmark_closes: dict[date, Decimal],
 ) -> dict[date, Decimal]:
     """Build a synthetic value series: V_start invested in the benchmark at
-    `sorted_dates[0]`, plus each daily cashflow `cf` invested in the
-    benchmark at that day's close, all valued at the benchmark's close on
-    each day in `sorted_dates`.
+    `sorted_dates[0]`, plus each subsequent daily cashflow `cf` invested in
+    the benchmark at that day's close, all valued at the benchmark's close
+    on each day in `sorted_dates`. A cashflow date does not need to be a
+    displayed valuation date.
 
     Returns an empty dict when the benchmark series doesn't cover the start
     (we can't anchor the synthetic portfolio without a base price).
@@ -641,23 +1354,36 @@ def _money_flow_matched_value(
     if not sorted_dates:
         return {}
     start_date = sorted_dates[0]
-    base_price = _last_known_price(benchmark_closes, start_date)
-    if base_price is None or base_price == 0:
+    if any(
+        _benchmark_price(benchmark_closes, current_date) is None for current_date in sorted_dates
+    ):
+        return {}
+    base_price = _benchmark_price(benchmark_closes, start_date)
+    if base_price is None:
         return {}
 
     # Each "lot" in the synthetic portfolio: a quantity of benchmark shares
     # purchased at the lot's date. Today's value = sum(qty * price_today).
     initial_shares = base_value / base_price
     lots: list[tuple[date, Decimal]] = [(start_date, initial_shares)]
+    cashflow_events = sorted(
+        _cashflows_within_valuation_period(sorted_dates, daily_cashflow).items()
+    )
+    cashflow_index = 0
 
     out: dict[date, Decimal] = {}
     for current_date in sorted_dates:
-        cf = daily_cashflow.get(current_date, Decimal(0))
-        if cf != 0:
-            cf_price = _last_known_price(benchmark_closes, current_date)
-            if cf_price is not None and cf_price != 0:
-                lots.append((current_date, cf / cf_price))
-        price_today = _last_known_price(benchmark_closes, current_date)
+        while (
+            cashflow_index < len(cashflow_events)
+            and cashflow_events[cashflow_index][0] <= current_date
+        ):
+            cashflow_date, cf = cashflow_events[cashflow_index]
+            cf_price = _benchmark_price(benchmark_closes, cashflow_date)
+            if cf_price is None:
+                return {}
+            lots.append((cashflow_date, cf / cf_price))
+            cashflow_index += 1
+        price_today = _benchmark_price(benchmark_closes, current_date)
         if price_today is None:
             continue
         total_shares = sum((qty for _, qty in lots), Decimal(0))
@@ -665,7 +1391,28 @@ def _money_flow_matched_value(
     return out
 
 
-def _modified_dietz_series(
+def _cashflows_within_valuation_period(
+    sorted_dates: list[date], daily_cashflow: dict[date, Decimal]
+) -> dict[date, Decimal]:
+    """Return the canonical end-of-day cashflow set for a valuation window.
+
+    The first value is an end-of-day opening balance, so same-day flows are
+    already inside it. The ending value includes activity through its date.
+    Restricting once to ``(first valuation date, last valuation date]`` keeps
+    the actual return, benchmark lot walks, and reported net flow reconciled.
+    """
+    if not sorted_dates:
+        return {}
+    first_date = sorted_dates[0]
+    last_date = sorted_dates[-1]
+    return {
+        flow_date: amount
+        for flow_date, amount in daily_cashflow.items()
+        if first_date < flow_date <= last_date and amount != 0
+    }
+
+
+def modified_dietz_series(
     sorted_dates: list[date],
     daily_value: dict[date, Decimal],
     daily_cashflow: dict[date, Decimal],
@@ -718,18 +1465,72 @@ def _modified_dietz_series(
     return out
 
 
-def _earliest_observed_date(session: Session, start_date: date, end_date: date) -> date | None:
-    """First date in the window with an actual `holdings_snapshots` row.
+def modified_dietz_denominators_are_positive(
+    sorted_dates: list[date],
+    daily_cashflow: dict[date, Decimal],
+    base_value: Decimal,
+) -> bool:
+    """Whether every cumulative Modified-Dietz denominator is defined."""
+    if not sorted_dates or base_value <= 0:
+        return False
+    start_date = sorted_dates[0]
+    cashflows = sorted(
+        ((d, c) for d, c in daily_cashflow.items() if c != 0 and d > start_date),
+        key=lambda item: item[0],
+    )
+    for current_date in sorted_dates[1:]:
+        if (
+            _modified_dietz_denominator_at(start_date, current_date, dict(cashflows), base_value)
+            <= 0
+        ):
+            return False
+    return True
 
-    Earlier values (if any) come from transaction-walk reconstruction, which
-    is what we warn about. Returns None if no forward snapshot lives in the
-    window — the entire chart is then modeled.
+
+def _modified_dietz_denominator_at(
+    start_date: date,
+    end_date: date,
+    daily_cashflow: dict[date, Decimal],
+    base_value: Decimal,
+) -> Decimal:
+    """Exact shared capital base for one cumulative Modified-Dietz window."""
+    period_days = (end_date - start_date).days
+    if period_days <= 0:
+        return Decimal(0)
+    weighted_cashflow = sum(
+        (
+            amount * (Decimal((end_date - flow_date).days) / Decimal(period_days))
+            for flow_date, amount in sorted(daily_cashflow.items())
+            if start_date < flow_date <= end_date and amount != 0
+        ),
+        Decimal(0),
+    )
+    return base_value + weighted_cashflow
+
+
+# Backward-compatible private name for older internal callers and focused unit
+# tests. New cross-service consumers use the public pure-math helper above.
+_modified_dietz_series = modified_dietz_series
+
+
+def _earliest_observed_date(session: Session, start_date: date, end_date: date) -> date | None:
+    """First date in the window with complete valued-account snapshots.
+
+    A partial broker sync is not observed portfolio value. Earlier values (if
+    any) come from transaction-walk reconstruction. Returns None if no complete
+    full-book snapshot lives in the window.
     """
-    return session.execute(
-        select(func.min(HoldingSnapshot.snapshot_date))
-        .where(HoldingSnapshot.snapshot_date >= start_date)
-        .where(HoldingSnapshot.snapshot_date <= end_date)
-    ).scalar_one_or_none()
+    account_ids = performance_account_ids(session, start_date, end_date)
+    complete_snapshots = _complete_snapshot_dates(
+        session,
+        _snapshot_dates(session, start_date, end_date, account_ids=account_ids),
+        account_ids=account_ids,
+    )
+    complete_account_valuations = _complete_account_valuations_by_date(
+        session, start_date, end_date, account_ids=account_ids
+    )
+    complete = set(complete_snapshots) | set(complete_account_valuations)
+    return min(complete) if complete else None
 
 
 def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
@@ -745,9 +1546,63 @@ def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
     return (base_value / end_value) < Decimal("0.25")
 
 
-def _daily_external_cashflows(
+def _daily_external_cashflow_assessment(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    account_ids: frozenset[int] | None = None,
+) -> _CashflowAssessment:
+    """Project the canonical ledger into the performance calculation contract."""
+    ledger = external_flow_ledger.build_external_flow_ledger(
+        session, start_date, end_date, account_ids=account_ids
+    )
+    issue_reason_codes = {
+        "share_transfer_missing_security": _EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY,
+        "share_transfer_missing_ticker": _EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER,
+        "share_transfer_price_unavailable": _EXTERNAL_SHARE_MOVEMENT_PRICE_UNAVAILABLE,
+    }
+    reason_codes = tuple(
+        sorted(
+            {
+                issue_reason_codes.get(issue.code, f"external_flow_{issue.code}")
+                for issue in ledger.issues
+            }
+        )
+    )
+    ledger_input_id = _stable_input_id(
+        "performance-external-flow-ledger",
+        [
+            (ledger.start_date, ledger.end_date, *sorted(ledger.account_ids)),
+            *(
+                (
+                    entry.flow_id,
+                    entry.date,
+                    entry.signed_external_amount,
+                    entry.classification,
+                    entry.classification_source,
+                    entry.classification_rule,
+                    entry.valuation_price,
+                    entry.valuation_price_date,
+                    entry.transaction_origin,
+                    *entry.source_event_ids,
+                    *entry.active_decision_keys,
+                )
+                for entry in sorted(ledger.entries, key=lambda item: (item.date, item.flow_id))
+            ),
+        ],
+    )
+    return _CashflowAssessment(
+        cashflows=(ledger.daily_external_cashflows if not reason_codes else {}),
+        calculation_reason_codes=reason_codes,
+        external_flow_ledger_id=ledger_input_id,
+        account_ids=tuple(sorted(ledger.account_ids)),
+        entries=ledger.entries,
+    )
+
+
+def _legacy_daily_external_cashflow_assessment(  # pyright: ignore[reportUnusedFunction]
     session: Session, start_date: date, end_date: date
-) -> dict[date, Decimal]:
+) -> _CashflowAssessment:
     """Sum signed external cashflows per day (positive = INTO portfolio).
 
     Direction handling:
@@ -759,9 +1614,9 @@ def _daily_external_cashflows(
         type), we trust Plaid's standard sign convention: negative amount
         = cash going INTO the account = inflow, so cashflow_in = -amount.
     """
-    accts = active_account_ids(session)
+    accts = valued_account_ids(session)
     if not accts:
-        return {}
+        return _CashflowAssessment(cashflows={}, calculation_reason_codes=())
     rows = session.execute(
         select(
             InvestmentTransaction.plaid_investment_transaction_id,
@@ -803,66 +1658,135 @@ def _daily_external_cashflows(
     # netted to zero means an internal move between two of the user's
     # linked accounts; we skip those. Anything left over is a true
     # external flow.
-    transfer_flows = _share_transfer_external_cashflows(session, start_date, end_date, accts)
-    for d, c in transfer_flows.items():
+    transfer_assessment = _assess_share_transfer_external_cashflows(
+        session, start_date, end_date, accts
+    )
+    for d, c in transfer_assessment.cashflows.items():
         totals[d] = totals.get(d, Decimal(0)) + c
 
-    return dict(totals)
+    return _CashflowAssessment(
+        cashflows=dict(totals),
+        calculation_reason_codes=transfer_assessment.calculation_reason_codes,
+    )
 
 
-def _share_transfer_external_cashflows(
+def _daily_external_cashflows(  # pyright: ignore[reportUnusedFunction]
+    session: Session, start_date: date, end_date: date
+) -> dict[date, Decimal]:
+    """Compatibility/raw-fact view of all deterministically known cashflows."""
+    return _daily_external_cashflow_assessment(session, start_date, end_date).cashflows
+
+
+def _share_transfer_external_cashflows(  # pyright: ignore[reportUnusedFunction]
     session: Session,
     start_date: date,
     end_date: date,
     accts: frozenset[int],
 ) -> dict[date, Decimal]:
+    """Compatibility view of deterministically valued in-kind cashflows."""
+    return _assess_share_transfer_external_cashflows(session, start_date, end_date, accts).cashflows
+
+
+def _assess_share_transfer_external_cashflows(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    accts: frozenset[int],
+) -> _CashflowAssessment:
     """Net dollar-valued cashflow from unmatched share-side ACATS events.
 
-    For each (date, security_id), sum signed share quantities across
-    `cash/external_asset_transfer_*` events. Net != 0 means the user
-    moved shares to/from an account our DB doesn't see, which from the
-    portfolio's frame is an external dollar inflow (in) or outflow (out).
+    For each (date, normalized ticker), sum split-normalized quantities for
+    zero-dollar plain TRANSFER rows and `cash/external_asset_transfer_*`
+    events. Net != 0 means shares crossed the tracked portfolio boundary.
 
     We value at close price on the transfer date and contribute the
     signed dollar to the cashflow series:
       net_qty > 0 (more in than out) → inflow → cf += +value
       net_qty < 0 (more out than in) → outflow → cf += -value
     """
-    rows = session.execute(
-        select(
-            InvestmentTransaction.date,
-            InvestmentTransaction.security_id,
-            InvestmentTransaction.quantity,
+    transactions = list(
+        session.execute(
+            select(InvestmentTransaction)
+            .where(InvestmentTransaction.date >= start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .where(InvestmentTransaction.account_id.in_(accts))
         )
-        .where(InvestmentTransaction.date >= start_date)
-        .where(InvestmentTransaction.date <= end_date)
-        .where(InvestmentTransaction.account_id.in_(accts))
-        .where(InvestmentTransaction.type == InvestmentTransactionType.CASH.value)
-        .where(
-            InvestmentTransaction.subtype.in_(
-                ["external_asset_transfer_in", "external_asset_transfer_out"]
-            )
-        )
-    ).all()
-    if not rows:
-        return {}
-
-    # Net signed qty per (date, sid)
-    net_by: dict[tuple[date, int], Decimal] = defaultdict(lambda: Decimal(0))
-    for tx_date, sid, qty in rows:
-        if sid is None:
+        .scalars()
+        .all()
+    )
+    overrides = _load_transaction_overrides(session)
+    candidates: list[tuple[InvestmentTransaction, Decimal]] = []
+    reasons: set[str] = set()
+    for tx in transactions:
+        quantity = Decimal(tx.quantity or 0)
+        if quantity == 0:
             continue
-        net_by[(tx_date, sid)] += Decimal(qty or 0)
+        subtype = (tx.subtype or "").lower().strip()
+        is_external_cash_transfer = tx.type == InvestmentTransactionType.CASH.value and subtype in {
+            "external_asset_transfer_in",
+            "external_asset_transfer_out",
+        }
+        is_zero_amount_plain_transfer = (
+            tx.type == InvestmentTransactionType.TRANSFER.value
+            and Decimal(tx.amount or 0) == 0
+            and subtype not in _INTERNAL_TRANSFER_SUBTYPES
+        )
+        if not is_external_cash_transfer and not is_zero_amount_plain_transfer:
+            continue
 
-    sids_needed = frozenset(sid for (_, sid) in net_by)
-    if not sids_needed:
-        return {}
+        override = overrides.get(tx.plaid_investment_transaction_id)
+        name_hint = _classify_by_name(tx.name)
+        if override == "internal" or name_hint == "internal":
+            continue
+        if override == "external_in" or name_hint == "external_in":
+            quantity = abs(quantity)
+        elif override == "external_out" or name_hint == "external_out":
+            quantity = -abs(quantity)
+        elif subtype == "external_asset_transfer_in":
+            quantity = abs(quantity)
+        elif subtype == "external_asset_transfer_out":
+            quantity = -abs(quantity)
+        candidates.append((tx, quantity))
+
+    if not candidates:
+        return _CashflowAssessment(cashflows={}, calculation_reason_codes=())
+
+    sids = frozenset(tx.security_id for tx, _ in candidates if tx.security_id is not None)
+    security_by_id = {
+        sid: ticker
+        for sid, ticker in session.execute(
+            select(Security.security_id, Security.ticker).where(Security.security_id.in_(sids))
+        ).all()
+    }
+    split_factors = load_split_factors(session, sids)
+
+    # Net split-normalized quantity per (date, ticker), so provider-specific
+    # security IDs for the same asset can cancel as an internal transfer.
+    net_by: dict[tuple[date, str], Decimal] = defaultdict(lambda: Decimal(0))
+    sids_by_ticker: dict[str, set[int]] = defaultdict(set)
+    for tx, quantity in candidates:
+        sid = tx.security_id
+        if sid is None or sid not in security_by_id:
+            reasons.add(_EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY)
+            continue
+        ticker = security_by_id[sid]
+        if ticker is None or not ticker.strip():
+            reasons.add(_EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER)
+            continue
+        ticker_norm = ticker.strip().upper()
+        net_by[(tx.date, ticker_norm)] += quantity * split_factors.factor_after(sid, tx.date)
+        sids_by_ticker[ticker_norm].add(sid)
+
+    sids_needed = frozenset(sid for ticker_sids in sids_by_ticker.values() for sid in ticker_sids)
+    if not net_by or not sids_needed:
+        return _CashflowAssessment(cashflows={}, calculation_reason_codes=tuple(sorted(reasons)))
     # Pull a window of prices around the transfer dates so we can
     # forward-fill if the exact date is a non-trading day.
     earliest_d = min(d for (d, _) in net_by) - timedelta(days=14)
     price_rows = session.execute(
         select(Price.security_id, Price.date, Price.close)
         .where(Price.security_id.in_(sids_needed))
+        .where(Price.position_price_trade_eligibility_clause())
         .where(Price.date >= earliest_d)
         .where(Price.date <= end_date)
     ).all()
@@ -871,25 +1795,32 @@ def _share_transfer_external_cashflows(
         price_lookup[sid][d] = Decimal(c)
 
     out: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for (tx_date, sid), net_qty in net_by.items():
+    for (tx_date, ticker), net_qty in net_by.items():
         if net_qty == 0:
             continue
-        close = _last_known_price(price_lookup.get(sid, {}), tx_date)
-        if close is None:
-            # Last-resort fallback to today's institution_price. Better
-            # than skipping — that would leave a phantom V step.
-            sp_row = session.execute(
-                select(HoldingSnapshot.institution_price)
-                .where(HoldingSnapshot.security_id == sid)
-                .where(HoldingSnapshot.institution_price.is_not(None))
-                .order_by(HoldingSnapshot.snapshot_date.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-            if sp_row is None:
+        freshest: tuple[date, int, Decimal] | None = None
+        earliest = tx_date - timedelta(days=14)
+        for sid in sorted(sids_by_ticker[ticker]):
+            series = price_lookup.get(sid, {})
+            price_dates = [
+                d for d, price in series.items() if earliest <= d <= tx_date and price > 0
+            ]
+            if not price_dates:
                 continue
-            close = Decimal(sp_row)
+            price_date = max(price_dates)
+            candidate = (price_date, sid, series[price_date])
+            if (
+                freshest is None
+                or price_date > freshest[0]
+                or (price_date == freshest[0] and sid < freshest[1])
+            ):
+                freshest = candidate
+        close = freshest[2] if freshest is not None else None
+        if close is None:
+            reasons.add(_EXTERNAL_SHARE_MOVEMENT_PRICE_UNAVAILABLE)
+            continue
         out[tx_date] += net_qty * close
-    return dict(out)
+    return _CashflowAssessment(cashflows=dict(out), calculation_reason_codes=tuple(sorted(reasons)))
 
 
 def _classify_by_name(name: str | None) -> str | None:
@@ -915,37 +1846,7 @@ def _classify_by_name(name: str | None) -> str | None:
     Returning None means "no name-based opinion; fall through to the
     subtype heuristic."
     """
-    if not name:
-        return None
-    n = name.lower()
-    # Income earned inside the portfolio (NOT external cashflow), even if
-    # the subtype mis-tags them as withdrawal.
-    if "reinvestment" in n or "drip" in n:
-        return "internal"
-    if "dividend" in n or "interest payment" in n or "credit interest" in n:
-        return "internal"
-    # Direction markers — used when type/subtype is ambiguous
-    # (typically `transfer/transfer`). "deposit" and "withdrawal" are
-    # cross-aggregator-safe because they make the direction explicit
-    # regardless of which sign convention the source uses.
-    if "outgoing" in n or "withdrawal" in n:
-        return "external_out"
-    if "incoming" in n or "deposit" in n:
-        return "external_in"
-    return None
-
-
-def _is_cashflow_eligible_type(tx_type: str) -> bool:
-    """Only `cash` and `transfer` rows can be external cashflow events.
-    Buys/sells/fees/dividends-as-CASH-subtype are never cashflow regardless
-    of what their `name` field happens to contain (e.g. a sell of a fund
-    named "Vanguard Dividend Appreciation ETF" should NOT trigger the
-    'dividend' name-hint — name hints only apply to cash/transfer rows
-    where the subtype is the actually-ambiguous one)."""
-    return tx_type in (
-        InvestmentTransactionType.CASH.value,
-        InvestmentTransactionType.TRANSFER.value,
-    )
+    return external_flow_ledger.classify_by_name(name)
 
 
 def _signed_cashflow(
@@ -966,80 +1867,14 @@ def _signed_cashflow(
          for cash/transfer types, never for buy/sell/fee
       3. (type, subtype) heuristic with aggregator sign convention
     """
-    if override == "internal":
-        return Decimal(0)
-    if override == "external_in":
-        return abs(amount)
-    if override == "external_out":
-        return -abs(amount)
-
-    if _is_cashflow_eligible_type(tx_type):
-        name_hint = _classify_by_name(name)
-        if name_hint == "internal":
-            return Decimal(0)
-        if name_hint == "external_in":
-            return abs(amount)
-        if name_hint == "external_out":
-            return -abs(amount)
-
-    subtype_norm = (tx_subtype or "").lower().strip()
-
-    if tx_type == InvestmentTransactionType.TRANSFER.value:
-        if subtype_norm in _INTERNAL_TRANSFER_SUBTYPES:
-            return Decimal(0)
-        return -amount  # Plaid sign convention
-
-    if tx_type == InvestmentTransactionType.CASH.value:
-        if subtype_norm in _INFLOW_CASH_SUBTYPES:
-            return abs(amount)
-        if subtype_norm in _OUTFLOW_CASH_SUBTYPES:
-            return -abs(amount)
-        if subtype_norm in _AMBIGUOUS_CASH_SUBTYPES:
-            return -amount
-
-    return Decimal(0)
-
-
-def _is_external_cashflow(
-    tx_type: str,
-    tx_subtype: str | None,
-    override: str | None = None,
-    name: str | None = None,
-) -> bool:
-    """Boolean version of `_signed_cashflow` used by the audit endpoint."""
-    if override == "internal":
-        return False
-    if override in ("external_in", "external_out"):
-        return True
-    if _is_cashflow_eligible_type(tx_type):
-        name_hint = _classify_by_name(name)
-        if name_hint == "internal":
-            return False
-        if name_hint in ("external_in", "external_out"):
-            return True
-    subtype_norm = (tx_subtype or "").lower().strip()
-    if tx_type == InvestmentTransactionType.TRANSFER.value:
-        return subtype_norm not in _INTERNAL_TRANSFER_SUBTYPES
-    if tx_type == InvestmentTransactionType.CASH.value:
-        return (
-            subtype_norm in _INFLOW_CASH_SUBTYPES
-            or subtype_norm in _OUTFLOW_CASH_SUBTYPES
-            or subtype_norm in _AMBIGUOUS_CASH_SUBTYPES
-        )
-    return False
+    return external_flow_ledger.signed_cashflow(
+        tx_type, tx_subtype, amount, override=override, name=name
+    )
 
 
 def _load_transaction_overrides(session: Session) -> dict[str, str]:
     """Map tx_id -> classification for every row in transaction_overrides."""
-    from portfolio_tracker.models import TransactionOverride
-
-    rows = session.execute(
-        select(
-            TransactionOverride.plaid_investment_transaction_id,
-            TransactionOverride.classification,
-        )
-    ).all()
-    return {tx_id: cls for tx_id, cls in rows}
+    return external_flow_ledger.load_transaction_overrides(session)
 
 
 def effective_classification(
@@ -1067,95 +1902,440 @@ def effective_classification(
 
     `override` short-circuits the heuristic when supplied.
     """
-    if override is not None:
-        return override
-    # Name hints apply ONLY to cash/transfer rows where the subtype is
-    # ambiguous. Buys/sells of a security whose name happens to contain
-    # "dividend" or "reinvestment" should NOT be reclassified.
-    if _is_cashflow_eligible_type(tx_type):
-        name_hint = _classify_by_name(name)
-        if name_hint is not None:
-            return name_hint
-    if not _is_external_cashflow(tx_type, tx_subtype):
-        # Distinguish "internal transfer/cash event" (still cashflow-related,
-        # just zeroed) from "completely unrelated to cashflow."
-        subtype_norm = (tx_subtype or "").lower().strip()
-        is_transfer_or_cash = tx_type in (
-            InvestmentTransactionType.TRANSFER.value,
-            InvestmentTransactionType.CASH.value,
-        )
-        if is_transfer_or_cash and subtype_norm in _INTERNAL_TRANSFER_SUBTYPES:
-            return "internal"
-        return None
-    # Use the actual tx amount when available so ambiguous subtypes (where
-    # direction depends on Plaid's sign) resolve correctly. Falling back to
-    # Decimal("1") gives the heuristic's "default direction" for the subtype.
-    probe = amount if amount is not None else Decimal("1")
-    cf = _signed_cashflow(tx_type, tx_subtype, probe, name=name)
-    if cf > 0:
-        return "external_in"
-    if cf < 0:
-        return "external_out"
-    return "internal"
+    return external_flow_ledger.effective_classification(
+        tx_type, tx_subtype, override, amount=amount, name=name
+    )
 
 
-def _daily_portfolio_value(
+def _daily_portfolio_value(  # pyright: ignore[reportUnusedFunction]
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    """Daily total portfolio value across three sources, in priority order:
+    """Daily total portfolio value across three certified sources:
 
-    1. **`holdings_snapshots`** (forward) — real broker data for the date.
-       Authoritative whenever it exists. Includes the day's late-arriving
-       SnapTrade pulls if the daily-refresh cron has run.
-    2. **`portfolio_values_daily`** (cache) — pre-baked from earlier runs.
-       Used only for dates with no forward snapshot. Avoids re-walking
-       transactions for old dates that are otherwise stable.
+    1. **Whole-account observations** — immutable broker totals, including
+       cash and explicitly empty accounts. Accepted only as an exact-date,
+       complete set across the account universe.
+    2. **`holdings_snapshots`** (forward) — real broker data for the date.
+       Used when no complete whole-account set exists for the date. Includes
+       the day's late-arriving SnapTrade pulls if the daily-refresh cron ran.
     3. **Transaction walk-back** — reconstructs anything still missing
        before the earliest snapshot, with cash adjustment so V_start
        doesn't collapse on net deployment.
 
-    Cache must NEVER override forward snapshots. Earlier versions of this
-    function did `merged.update(cached)` which clobbered fresh snapshot
-    data with stale cached values — every time the SnapTrade leg of the
-    daily refresh wrote new rows for "today," the next chart load would
-    show the older mid-morning V instead of the post-sync V, manifesting
-    as a fake $80k drop on the chart.
+    Unversioned `portfolio_values_daily` backfill rows are deliberately not
+    consumed here. They cannot prove which transactions, owner overrides,
+    prices, or account universe produced them, so a later correction could
+    otherwise leave certified performance using stale modeled values.
     """
-    forward = _forward_values_from_snapshots(session, start_date, end_date)
-    cached = _cached_daily_values(session, start_date, end_date)
+    return _daily_portfolio_value_assessment(session, start_date, end_date).values
 
-    # Snapshot wins on overlap; cache fills anything the snapshot missed.
-    merged: dict[date, Decimal] = dict(cached)
-    merged.update(forward)
+
+def performance_account_ids(session: Session, start_date: date, end_date: date) -> frozenset[int]:
+    """Every active investment account plus active in-window transaction accounts.
+
+    Coverage is intentionally defined from the linked account inventory, not
+    from whichever value rows happened to arrive. Otherwise an unsynchronized
+    account and all of its cash flows disappear from both sides of the return
+    equation and the reduced book can be mislabeled complete.
+    """
+    active = active_account_ids(session)
+    if not active:
+        return frozenset()
+    investment_accounts = frozenset(
+        session.execute(
+            select(Account.account_id).where(
+                Account.account_id.in_(active), Account.type.in_(INVESTMENT_ACCOUNT_TYPES)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    transaction_accounts = frozenset(
+        session.execute(
+            select(InvestmentTransaction.account_id)
+            .where(InvestmentTransaction.account_id.in_(active))
+            .where(InvestmentTransaction.date >= start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    return investment_accounts | transaction_accounts
+
+
+def _complete_account_valuations_by_date(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> dict[date, tuple[AccountValuationObservation, ...]]:
+    """Same-date account totals only when the entire universe is present."""
+    if account_ids is None:
+        account_ids = performance_account_ids(session, start_date, end_date)
+    if not account_ids:
+        return {}
+    observations = session.scalars(
+        select(AccountValuationObservation)
+        .where(AccountValuationObservation.account_id.in_(account_ids))
+        .where(AccountValuationObservation.as_of_date >= start_date)
+        .where(AccountValuationObservation.as_of_date <= end_date)
+        .where(AccountValuationObservation.currency == "USD")
+        .order_by(
+            AccountValuationObservation.as_of_date,
+            AccountValuationObservation.account_id,
+            AccountValuationObservation.fetched_at.desc(),
+            AccountValuationObservation.valuation_observation_id.desc(),
+        )
+    )
+    selected_by_date: dict[date, dict[int, AccountValuationObservation]] = defaultdict(dict)
+    invalid_by_date: dict[date, set[int]] = defaultdict(set)
+    for observation in observations:
+        try:
+            stored_account_valuation_observation_payload(observation)
+        except (TypeError, ValueError):
+            # An immutable receipt whose key no longer commits to its fields is
+            # not valuation evidence. The assessment below emits a stable
+            # integrity reason instead of silently using the tampered value.
+            invalid_by_date[observation.as_of_date].add(observation.account_id)
+            selected_by_date[observation.as_of_date].pop(observation.account_id, None)
+            continue
+        if observation.account_id in invalid_by_date[observation.as_of_date]:
+            continue
+        selected_by_date[observation.as_of_date].setdefault(observation.account_id, observation)
+    complete: dict[date, tuple[AccountValuationObservation, ...]] = {}
+    for candidate, selected in selected_by_date.items():
+        if set(selected) == set(account_ids) and all(row.is_complete for row in selected.values()):
+            complete[candidate] = tuple(selected[account_id] for account_id in sorted(account_ids))
+    return complete
+
+
+def _provider_valuation_uses_capture_date(
+    observation: AccountValuationObservation,
+) -> bool:
+    """Whether a complete provider total lacks a provider-reported as-of time.
+
+    Provider API observations with no ``as_of_at`` are dated to the successful
+    capture day. They are valid mathematical boundaries, but their temporal
+    precision is provider-unasserted and therefore cannot be fully certified.
+    Statement/export observations may legitimately report only a date, so the
+    same nullable timestamp does not make those sources provisional.
+    """
+    return observation.source_kind == "provider_api" and observation.as_of_at is None
+
+
+def _has_account_valuation_on_date(
+    session: Session, boundary_date: date, account_ids: frozenset[int] | None = None
+) -> bool:
+    account_ids = account_ids or performance_account_ids(session, boundary_date, boundary_date)
+    if not account_ids:
+        return False
+    return (
+        session.scalar(
+            select(AccountValuationObservation.valuation_observation_id)
+            .where(AccountValuationObservation.account_id.in_(account_ids))
+            .where(AccountValuationObservation.as_of_date == boundary_date)
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _has_invalid_account_valuation_on_date(
+    session: Session, boundary_date: date, account_ids: frozenset[int]
+) -> bool:
+    observations = session.scalars(
+        select(AccountValuationObservation)
+        .where(AccountValuationObservation.account_id.in_(account_ids))
+        .where(AccountValuationObservation.as_of_date == boundary_date)
+    )
+    for observation in observations:
+        try:
+            stored_account_valuation_observation_payload(observation)
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
+def _daily_portfolio_value_assessment(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    exclude_index_etfs: bool = False,
+) -> _PortfolioValueAssessment:
+    """Return daily values with boundary lineage and fail-closed coverage.
+
+    Observed values exist only when every valued account reported on that
+    date. Modeled cache rows retain modeled lineage and are accepted only when
+    the current dataset still has a complete full-book reconstruction anchor.
+    A partial observed boundary is never papered over with a cache row.
+    """
+    valuation_accounts = performance_account_ids(session, start_date, end_date)
+    complete_account_valuations = _complete_account_valuations_by_date(
+        session, start_date, end_date, account_ids=valuation_accounts
+    )
+    account_ids = tuple(sorted(valuation_accounts))
+    forward = _forward_values_from_snapshots(
+        session, start_date, end_date, account_ids=valuation_accounts
+    )
+    has_total_start = start_date in complete_account_valuations
+    has_total_end = end_date in complete_account_valuations
+    has_holding_boundaries = start_date in forward and end_date in forward
+    use_account_total_basis = (
+        has_total_start and has_total_end and not (exclude_index_etfs and has_holding_boundaries)
+    )
+    reasons: set[str] = set()
+
+    if use_account_total_basis:
+        merged = {
+            valuation_date: sum((row.total_value for row in rows), Decimal(0))
+            for valuation_date, rows in complete_account_valuations.items()
+        }
+        provenance: dict[date, _ValueProvenance] = {
+            valuation_date: _ACCOUNT_VALUATION_OBSERVED
+            for valuation_date in complete_account_valuations
+        }
+        if exclude_index_etfs:
+            reasons.add(_ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED)
+    else:
+        merged = dict(forward)
+        provenance = {d: _OBSERVED_VALUE for d in forward}
+
+    observation_keys: dict[date, tuple[str, ...]] = {}
+    certification_reasons: set[str] = set()
+    if use_account_total_basis:
+        observation_keys = {
+            valuation_date: tuple(sorted(row.observation_key for row in rows))
+            for valuation_date, rows in complete_account_valuations.items()
+        }
+        if any(
+            _provider_valuation_uses_capture_date(row)
+            for rows in complete_account_valuations.values()
+            for row in rows
+        ):
+            certification_reasons.add(_PROVIDER_VALUATION_AS_OF_UNASSERTED)
+
+    snapshot_candidates = _snapshot_dates(
+        session, start_date, end_date, account_ids=valuation_accounts
+    )
+    partial: dict[date, frozenset[int]] = partial_snapshot_dates(
+        session, snapshot_candidates, account_ids=valuation_accounts
+    )
+    unpriceable: set[date] = unpriceable_snapshot_dates(
+        session, snapshot_candidates, account_ids=valuation_accounts
+    )
+    if use_account_total_basis:
+        partial = {}
+        unpriceable = set()
+    for unsupported_date in set(partial) | unpriceable:
+        if provenance.get(unsupported_date) == _OBSERVED_VALUE:
+            merged.pop(unsupported_date, None)
+            provenance.pop(unsupported_date, None)
+    if start_date in partial and start_date not in complete_account_valuations:
+        reasons.add(_PARTIAL_SNAPSHOT_START_DATE)
+    if end_date in partial and end_date not in complete_account_valuations:
+        reasons.add(_PARTIAL_SNAPSHOT_END_DATE)
+    if any(day not in complete_account_valuations for day in unpriceable):
+        reasons.add(_UNPRICEABLE_HOLDING_SNAPSHOT)
+    if not use_account_total_basis and (
+        snapshot_candidates
+        and start_date < min(snapshot_candidates)
+        and start_date not in complete_account_valuations
+        and _reconstruction_anchor_date(session, account_ids=valuation_accounts) is None
+    ):
+        reasons.add(_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE)
 
     # Backfill is anchored on the earliest *real* snapshot, so figure out
     # whether we still have a gap at the start of the window.
     earliest_known = min(merged.keys()) if merged else None
-    if earliest_known is None or earliest_known > start_date:
+    if not use_account_total_basis and (earliest_known is None or earliest_known > start_date):
         backfill_end = (
             earliest_known - timedelta(days=1) if earliest_known is not None else end_date
         )
-        backfill = _backfill_values_from_transactions(session, start_date, backfill_end)
-        # Don't overwrite snapshot or cache rows we already have.
+        backfill = _backfill_values_from_transactions(
+            session, start_date, backfill_end, account_ids=valuation_accounts
+        )
+        if (
+            start_date
+            < (_reconstruction_anchor_date(session, account_ids=valuation_accounts) or start_date)
+            and start_date not in backfill
+        ):
+            reasons.add(_MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE)
+        # Don't overwrite observed snapshot rows we already have.
         for d, v in backfill.items():
             merged.setdefault(d, v)
+            provenance.setdefault(d, _MODELED_VALUE)
 
-    return merged
+    # A partial broker observation is evidence that the date is incomplete;
+    # never replace it with a modeled/cache value after gap filling.
+    for unsupported_date in set(partial) | unpriceable:
+        if provenance.get(unsupported_date) == _OBSERVED_VALUE:
+            merged.pop(unsupported_date, None)
+            provenance.pop(unsupported_date, None)
+
+    if (
+        provenance.get(start_date) == _MODELED_VALUE
+        and _reconstruction_anchor_date(session, account_ids=valuation_accounts) is None
+    ):
+        reasons.add(_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE)
+        merged.pop(start_date, None)
+        provenance.pop(start_date, None)
+
+    # Incomplete or integrity-invalid account totals matter only when no
+    # complete holdings/reconstruction boundary survived. A rejected optional
+    # total must not poison an independently complete matched basis.
+    if start_date not in merged and _has_account_valuation_on_date(
+        session, start_date, valuation_accounts
+    ):
+        reasons.add(_PARTIAL_ACCOUNT_VALUATION_START_DATE)
+    if end_date not in merged and _has_account_valuation_on_date(
+        session, end_date, valuation_accounts
+    ):
+        reasons.add(_PARTIAL_ACCOUNT_VALUATION_END_DATE)
+    if (
+        start_date not in merged
+        and _has_invalid_account_valuation_on_date(session, start_date, valuation_accounts)
+    ) or (
+        end_date not in merged
+        and end_date != start_date
+        and _has_invalid_account_valuation_on_date(session, end_date, valuation_accounts)
+    ):
+        reasons.add(_ACCOUNT_VALUATION_INTEGRITY_INVALID)
+    if valuation_accounts and (
+        (
+            start_date not in merged
+            and (
+                start_date in snapshot_candidates
+                or _has_account_valuation_on_date(session, start_date, valuation_accounts)
+            )
+        )
+        or (
+            end_date not in merged
+            and (
+                end_date in snapshot_candidates
+                or _has_account_valuation_on_date(session, end_date, valuation_accounts)
+            )
+        )
+    ):
+        reasons.add(_ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE)
+
+    return _PortfolioValueAssessment(
+        values=merged,
+        provenance=provenance,
+        valuation_account_ids=account_ids,
+        calculation_reason_codes=tuple(sorted(reasons)),
+        certification_reason_codes=tuple(sorted(certification_reasons)),
+        observation_keys=observation_keys,
+    )
 
 
-def _cached_daily_values(session: Session, start_date: date, end_date: date) -> dict[date, Decimal]:
-    rows = session.execute(
-        select(PortfolioValueDaily.date, PortfolioValueDaily.total_value)
-        .where(PortfolioValueDaily.date >= start_date)
-        .where(PortfolioValueDaily.date <= end_date)
-    ).all()
-    return {d: Decimal(v) for d, v in rows}
+def _snapshot_dates(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> set[date]:
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
+    if not accts:
+        return set()
+    return set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date >= start_date)
+            .where(HoldingSnapshot.snapshot_date <= end_date)
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+
+
+def partial_snapshot_dates(
+    session: Session,
+    candidates: set[date],
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> dict[date, frozenset[int]]:
+    """Return snapshot dates missing one or more valued accounts."""
+    if not candidates:
+        return {}
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
+    reported: dict[date, set[int]] = defaultdict(set)
+    for on_date, account_id in session.execute(
+        select(HoldingSnapshot.snapshot_date, HoldingSnapshot.account_id)
+        .where(HoldingSnapshot.snapshot_date.in_(candidates))
+        .where(HoldingSnapshot.account_id.in_(accts))
+        .distinct()
+    ).all():
+        reported[on_date].add(account_id)
+    return {
+        on_date: frozenset(accts - reported.get(on_date, set()))
+        for on_date in candidates
+        if accts - reported.get(on_date, set())
+    }
+
+
+def _complete_snapshot_dates(
+    session: Session,
+    candidates: set[date],
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> frozenset[date]:
+    return frozenset(
+        candidates
+        - set(partial_snapshot_dates(session, candidates, account_ids=account_ids))
+        - unpriceable_snapshot_dates(session, candidates, account_ids=account_ids)
+    )
+
+
+def unpriceable_snapshot_dates(
+    session: Session,
+    candidates: set[date],
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> set[date]:
+    """Dates containing a nonzero holding with no usable broker valuation."""
+    if not candidates:
+        return set()
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
+    if not accts:
+        return set()
+    return set(
+        session.execute(
+            select(HoldingSnapshot.snapshot_date)
+            .where(HoldingSnapshot.snapshot_date.in_(candidates))
+            .where(HoldingSnapshot.account_id.in_(accts))
+            .where(HoldingSnapshot.quantity != 0)
+            .where(HoldingSnapshot.institution_value.is_(None))
+            .where(HoldingSnapshot.institution_price.is_(None))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+
+
+def _reconstruction_anchor_date(
+    session: Session, *, account_ids: frozenset[int] | None = None
+) -> date | None:
+    """Earliest snapshot date covering the complete valued-account universe."""
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
+    candidates = _snapshot_dates(session, date.min, date.max, account_ids=accts)
+    complete = _complete_snapshot_dates(session, candidates, account_ids=accts)
+    return min(complete) if complete else None
 
 
 def _forward_values_from_snapshots(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
 ) -> dict[date, Decimal]:
-    accts = active_account_ids(session)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -1164,14 +2344,23 @@ def _forward_values_from_snapshots(
             HoldingSnapshot.institution_value,
             HoldingSnapshot.quantity,
             HoldingSnapshot.institution_price,
+            HoldingSnapshot.account_id,
         )
         .where(HoldingSnapshot.snapshot_date >= start_date)
         .where(HoldingSnapshot.snapshot_date <= end_date)
         .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
 
+    complete = _complete_snapshot_dates(
+        session,
+        {d for d, _v, _q, _p, _a in rows},
+        account_ids=accts,
+    )
+
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for snap_date, value, quantity, price in rows:
+    for snap_date, value, quantity, price, _account_id in rows:
+        if snap_date not in complete:
+            continue
         if value is not None:
             totals[snap_date] += Decimal(value)
         elif price is not None:
@@ -1180,7 +2369,11 @@ def _forward_values_from_snapshots(
 
 
 def _backfill_values_from_transactions(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
 ) -> dict[date, Decimal]:
     """Reconstruct daily portfolio values walking transactions backward.
 
@@ -1199,26 +2392,20 @@ def _backfill_values_from_transactions(
 
     Daily total = positions × historical_prices  +  cash_adjustment[d].
     """
-    accts = active_account_ids(session)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return {}
-    anchor_row = session.execute(
-        select(HoldingSnapshot.snapshot_date)
-        .where(HoldingSnapshot.account_id.in_(accts))
-        .order_by(HoldingSnapshot.snapshot_date.asc())
-        .limit(1)
-    ).scalar_one_or_none()
-    if anchor_row is None:
+    anchor_date = _reconstruction_anchor_date(session, account_ids=accts)
+    if anchor_date is None:
         return {}
-    anchor_date = anchor_row
 
-    positions = _anchor_positions(session, anchor_date)
+    positions = _anchor_positions(session, anchor_date, account_ids=accts)
     cash_equivalent_security_ids = frozenset(
         session.execute(select(Security.security_id).where(Security.is_cash_equivalent.is_(True)))
         .scalars()
         .all()
     )
-    tx_overrides = _load_transaction_overrides(session)
+    tx_overrides = external_flow_ledger.load_transaction_overrides(session)
     # Walk EVERY transaction in window — pure-cash ones (no security_id)
     # are needed for the cash-adjustment series even though they don't
     # affect positions.
@@ -1226,7 +2413,7 @@ def _backfill_values_from_transactions(
         session.execute(
             select(InvestmentTransaction)
             .where(InvestmentTransaction.account_id.in_(accts))
-            .where(InvestmentTransaction.date < anchor_date)
+            .where(InvestmentTransaction.date <= anchor_date)
             .where(InvestmentTransaction.date >= start_date)
             .order_by(InvestmentTransaction.date.desc())
         )
@@ -1245,54 +2432,93 @@ def _backfill_values_from_transactions(
         sid: q * split_factors.factor_after(sid, anchor_date) for sid, q in positions.items()
     }
 
+    # Canonical external-flow decisions own both amount and effective date.
+    # Suppress those rows from the transaction-date cash walk and apply them
+    # once on the ledger date instead. This matters when a statement Activity
+    # Date corroborates a provider row that posted several days later.
+    reconstruction_ledger = external_flow_ledger.build_external_flow_ledger(
+        session,
+        date.min,
+        anchor_date,
+        account_ids=accts,
+    )
+    canonical_external_transaction_ids = {
+        entry.transaction_id
+        for entry in reconstruction_ledger.entries
+        if entry.source_kind == "transaction"
+        and entry.transaction_id is not None
+        and entry.classification != "internal"
+    }
+    canonical_external_by_date: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
+    for entry in reconstruction_ledger.entries:
+        if (
+            entry.source_kind == "transaction"
+            and entry.transaction_id is not None
+            and entry.classification != "internal"
+            and start_date < entry.date <= anchor_date
+        ):
+            canonical_external_by_date[entry.date] += entry.signed_external_amount
+
+    transactions_by_date: dict[date, list[InvestmentTransaction]] = defaultdict(list)
+    for tx in backward_tx:
+        transactions_by_date[tx.date].append(tx)
+
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     daily_cash_adj: dict[date, Decimal] = {}
     rolling_positions = dict(positions)
-    rolling_cash_adj = Decimal(0)
+    rolling_cash_by_account: dict[int, Decimal] = defaultdict(lambda: Decimal(0))
 
+    def _cash_adjustment() -> Decimal:
+        # Every reversed transaction changes the prior-day cash state. Do not
+        # suppress the adjustment merely because the first retained row is a
+        # BUY: that is precisely the deployment whose pre-trade cash must keep
+        # the opening book value intact. Certified callers separately require
+        # approved source coverage for the requested history window.
+        return sum(rolling_cash_by_account.values(), Decimal(0))
+
+    def _reverse_date(activity_date: date) -> None:
+        for tx in transactions_by_date.get(activity_date, ()):
+            if tx.security_id is not None and tx.security_id not in cash_equivalent_security_ids:
+                delta = _reverse_transaction_quantity(tx)
+                if delta is not None:
+                    delta *= split_factors.factor_after(tx.security_id, tx.date)
+                    rolling_positions[tx.security_id] = (
+                        rolling_positions.get(tx.security_id, Decimal(0)) + delta
+                    )
+            if tx.plaid_investment_transaction_id in canonical_external_transaction_ids:
+                continue
+            rolling_cash_by_account[tx.account_id] += _reverse_transaction_cash_delta(
+                tx,
+                cash_equivalent_security_ids,
+                override=tx_overrides.get(tx.plaid_investment_transaction_id),
+            )
+        # Whole-portfolio external cash is intentionally scalar: the account
+        # assignment is retained in the ledger receipt, while the consolidated
+        # valuation needs only the exact signed change on its effective date.
+        rolling_cash_by_account[0] -= canonical_external_by_date.get(activity_date, Decimal(0))
+
+    # The anchor is an end-of-day broker observation. Reverse anchor-day
+    # activity before materializing the preceding day's modeled value.
+    _reverse_date(anchor_date)
     cursor_date = anchor_date - timedelta(days=1)
-    daily_quantities[cursor_date] = dict(rolling_positions)
-    daily_cash_adj[cursor_date] = rolling_cash_adj
-
-    for tx in backward_tx:
-        while cursor_date > tx.date:
-            cursor_date -= timedelta(days=1)
-            daily_quantities[cursor_date] = dict(rolling_positions)
-            daily_cash_adj[cursor_date] = rolling_cash_adj
-
-        if tx.security_id is not None:
-            delta = _reverse_transaction_quantity(tx)
-            if delta is not None:
-                delta *= split_factors.factor_after(tx.security_id, tx.date)
-                rolling_positions[tx.security_id] = (
-                    rolling_positions.get(tx.security_id, Decimal(0)) + delta
-                )
-
-        rolling_cash_adj += _reverse_transaction_cash_delta(
-            tx,
-            cash_equivalent_security_ids,
-            override=tx_overrides.get(tx.plaid_investment_transaction_id),
-        )
-
-        # NOTE: do NOT write daily_quantities[tx.date] here. After the
-        # reversal above, `rolling_*` represents EOD (tx.date - 1), not
-        # EOD tx.date. The correct EOD-tx.date state was already written
-        # by the while loop above (or carried over from the prior iter on
-        # the same date). Writing here would shift the chart by one day,
-        # making real cashflows appear on the day AFTER they happened.
-
-    while cursor_date > start_date:
-        cursor_date -= timedelta(days=1)
+    while cursor_date >= start_date:
         daily_quantities[cursor_date] = dict(rolling_positions)
-        daily_cash_adj[cursor_date] = rolling_cash_adj
+        daily_cash_adj[cursor_date] = _cash_adjustment()
+        _reverse_date(cursor_date)
+        cursor_date -= timedelta(days=1)
 
     return _value_quantities_with_prices(
         session, daily_quantities, daily_cash_adj, start_date, end_date
     )
 
 
-def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]:
-    accts = active_account_ids(session)
+def _anchor_positions(
+    session: Session,
+    anchor_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> dict[int, Decimal]:
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -1306,8 +2532,8 @@ def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]
     return dict(positions)
 
 
-def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
-    """Return the share-count delta needed to undo `tx` from current positions.
+def transaction_quantity_delta(tx: InvestmentTransaction) -> Decimal | None:
+    """Return the forward share-count change caused by ``tx``.
 
     Sign conventions vary across data sources:
       * Plaid signs the quantity by direction (sell = negative, buy = positive).
@@ -1317,17 +2543,7 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
 
     We use the TRANSACTION TYPE — not the sign of `quantity` — to determine
     direction for BUY/SELL, treating `quantity` as an unsigned magnitude.
-    For SnapTrade's `cash`-typed share-moving events (see
-    `_SHARE_MOVING_CASH_SUBTYPES`), the quantity is already signed, so we
-    just negate it as TRANSFER does:
-      * BUY                    → reverse subtracts |quantity|
-      * SELL                   → reverse adds |quantity|
-      * TRANSFER               → reverse subtracts signed(quantity)
-      * cash/external_asset_transfer_in   (qty +) → reverse subtracts +qty
-      * cash/external_asset_transfer_out  (qty −) → reverse subtracts −qty (= adds)
-      * cash/optionassignment             (qty +) → reverse subtracts +qty
-      * cash/optionexpiration             (qty +) → reverse subtracts +qty
-      * cash/rei                          (qty +) → reverse subtracts +qty
+    Transfer-flavored quantities are already signed.
 
     Returns None for events with no position effect (qty=0, plain
     cash/dividend/withdrawal/contribution, fees on USD).
@@ -1338,16 +2554,30 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
     if magnitude == 0:
         return None
     if tx_type == InvestmentTransactionType.BUY.value:
-        return -magnitude
-    if tx_type == InvestmentTransactionType.SELL.value:
         return magnitude
+    if tx_type == InvestmentTransactionType.SELL.value:
+        return -magnitude
     if tx_type == InvestmentTransactionType.TRANSFER.value:
-        return -quantity
+        return quantity
     if tx_type == InvestmentTransactionType.CASH.value:
         subtype = (tx.subtype or "").lower().strip()
         if subtype in _SHARE_MOVING_CASH_SUBTYPES:
-            return -quantity
+            return quantity
     return None
+
+
+def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
+    """Return the share-count delta needed to undo ``tx``."""
+    delta = transaction_quantity_delta(tx)
+    return -delta if delta is not None else None
+
+
+def _is_transfer_shaped_fee(name: str | None) -> bool:
+    """Whether a fee row is actually a broker-mislabeled share transfer."""
+    if not name:
+        return False
+    normalized = name.lower()
+    return "transfer in" in normalized or "transfer out" in normalized
 
 
 def _reverse_transaction_cash_delta(
@@ -1399,8 +2629,18 @@ def _reverse_transaction_cash_delta(
     ):
         return Decimal(0)
 
-    if _is_external_cashflow(tx.type, tx.subtype, override=override, name=tx.name):
-        return -_signed_cashflow(tx.type, tx.subtype, amount, override=override, name=tx.name)
+    if tx.type == InvestmentTransactionType.FEE.value and _is_transfer_shaped_fee(tx.name):
+        return Decimal(0)
+
+    flow_decision = external_flow_ledger.classify_transaction_cashflow(
+        tx.type,
+        tx.subtype,
+        amount,
+        override=override,
+        name=tx.name,
+    )
+    if flow_decision is not None and flow_decision.classification != "internal":
+        return -flow_decision.signed_external_amount
 
     if tx.type == InvestmentTransactionType.BUY.value:
         return magnitude
@@ -1435,7 +2675,7 @@ def _value_quantities_with_prices(
 ) -> dict[date, Decimal]:
     """Multiply reconstructed quantities by historical prices to get $ values.
 
-    Four valuation paths per security:
+    Four valuation outcomes per security:
       1. **Cash equivalents** (USD positions, money market funds) → qty × $1.00.
          These don't have yfinance-pulled price histories but their NAV is
          essentially fixed at $1, so face value is the right answer.
@@ -1450,9 +2690,9 @@ def _value_quantities_with_prices(
          is approximated as zero.
       3. **Securities with yfinance/stooq price history** → forward-fill the
          most recent close on or before `current_date`.
-      4. **No price, not cash, not derivative** → fall back to the most
-         recent `holdings_snapshots.institution_price` for that security
-         as a last-resort proxy. Better than dropping the position entirely.
+      4. **No eligible historical price on/before the valuation date** → the
+         reconstructed date is unavailable. A later snapshot mark is never
+         backcast into the past.
     """
     relevant_dates = [d for d in daily_quantities if start_date <= d <= end_date]
     if not relevant_dates:
@@ -1468,25 +2708,14 @@ def _value_quantities_with_prices(
     )
     sec_meta: dict[int, Security] = {s.security_id: s for s in securities}
 
-    # Snapshot-derived fallback price per security: most recent
-    # institution_price we ever observed.
-    fallback_rows = session.execute(
-        select(HoldingSnapshot.security_id, HoldingSnapshot.institution_price)
-        .where(HoldingSnapshot.security_id.in_(security_ids))
-        .where(HoldingSnapshot.institution_price.is_not(None))
-        .order_by(HoldingSnapshot.snapshot_date.desc())
-    ).all()
-    snapshot_price: dict[int, Decimal] = {}
-    for sid, price in fallback_rows:
-        if sid not in snapshot_price and price is not None:
-            snapshot_price[sid] = Decimal(price)
-
     # Extend the price query backward by ~14 days so non-trading start
     # dates (e.g., YTD = Jan 1, holiday) fall back to the most recent
     # actual close instead of the wrong snapshot_price fallback.
     price_rows = session.execute(
         select(Price.security_id, Price.date, Price.close)
         .where(Price.security_id.in_(security_ids))
+        .where(Price.position_price_trade_eligibility_clause())
+        .where(Price.close > 0)
         .where(Price.date >= start_date - timedelta(days=14))
         .where(Price.date <= end_date)
     ).all()
@@ -1498,29 +2727,26 @@ def _value_quantities_with_prices(
     for current_date in sorted(relevant_dates):
         snap = daily_quantities[current_date]
         total = Decimal(0)
+        valuation_complete = True
         for security_id, quantity in snap.items():
+            if quantity == 0:
+                continue
             sec = sec_meta.get(security_id)
             if sec is not None and sec.is_cash_equivalent:
                 # Cash equivalents (USD, money market funds): face value.
                 total += quantity * Decimal(1)
                 continue
             close = _last_known_price(price_lookup.get(security_id, {}), current_date)
-            if close is None and not _is_derivative(sec):
-                # `snapshot_price` is only safe as a fallback for things
-                # whose price doesn't move much (illiquid foreign stock,
-                # niche ETF). For options the snapshot is almost always $0
-                # at expiry, and a constant fallback would create a fake
-                # step at trade dates. Skip it for derivatives.
-                close = snapshot_price.get(security_id)
             if close is None:
-                continue
+                valuation_complete = False
+                break
             total += quantity * close
         # Add the cash delta induced by trades + external flows after the
         # anchor date. Anchor cash itself is already counted via cash-equiv
         # securities in `positions`; this term is the "and how much MORE
         # cash were they sitting on before the deployment" piece.
         total += daily_cash_adj.get(current_date, Decimal(0))
-        if total > 0:
+        if valuation_complete and total > 0:
             totals[current_date] = total
     return totals
 
@@ -1533,15 +2759,134 @@ def _last_known_price(series: dict[date, Decimal], target_date: date) -> Decimal
     return series[max(candidates)]
 
 
-def _is_derivative(sec: Security | None) -> bool:
-    """Plaid security `type` is `'derivative'` for options & futures.
+def _observed_fixed_holiday(on_date: date) -> date:
+    if on_date.weekday() == 5:  # Saturday -> Friday
+        return on_date - timedelta(days=1)
+    if on_date.weekday() == 6:  # Sunday -> Monday
+        return on_date + timedelta(days=1)
+    return on_date
 
-    Used to short-circuit the `snapshot_price` fallback in valuation —
-    derivatives are almost always missing from yfinance, and snapshot prices
-    on them are $0 (post-expiry) which would create a fake step at trade
-    dates if applied uniformly across the option's life.
-    """
-    return sec is not None and (sec.type or "").lower() == "derivative"
+
+def _nth_weekday(year: int, month: int, weekday: int, occurrence: int) -> date:
+    first = date(year, month, 1)
+    offset = (weekday - first.weekday()) % 7
+    return first + timedelta(days=offset + 7 * (occurrence - 1))
+
+
+def _last_weekday(year: int, month: int, weekday: int) -> date:
+    next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    last = next_month - timedelta(days=1)
+    return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter date, used for the NYSE Good Friday closure."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    ell = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ell) // 451
+    month = (h + ell - 7 * m + 114) // 31
+    day = ((h + ell - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+_SPECIAL_US_MARKET_CLOSURES = frozenset(
+    {
+        date(2001, 9, 11),
+        date(2001, 9, 12),
+        date(2001, 9, 13),
+        date(2001, 9, 14),
+        date(2004, 6, 11),
+        date(2007, 1, 2),
+        date(2012, 10, 29),
+        date(2012, 10, 30),
+        date(2018, 12, 5),
+        date(2025, 1, 9),
+    }
+)
+
+
+def _us_market_holidays(year: int) -> set[date]:
+    holidays = {
+        _observed_fixed_holiday(date(year, 1, 1)),
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Washington's Birthday
+        _easter_sunday(year) - timedelta(days=2),  # Good Friday
+        _last_weekday(year, 5, 0),  # Memorial Day
+        _observed_fixed_holiday(date(year, 7, 4)),
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving
+        _observed_fixed_holiday(date(year, 12, 25)),
+        # When next New Year's Day is Saturday, its observed closure falls in
+        # this calendar year on December 31.
+        _observed_fixed_holiday(date(year + 1, 1, 1)),
+    }
+    if year >= 2022:
+        holidays.add(_observed_fixed_holiday(date(year, 6, 19)))
+    return holidays
+
+
+def _is_us_market_session(on_date: date) -> bool:
+    if on_date.weekday() >= 5:
+        return False
+    return (
+        on_date not in _us_market_holidays(on_date.year)
+        and on_date not in _SPECIAL_US_MARKET_CLOSURES
+    )
+
+
+def _expected_benchmark_source_date(target_date: date) -> date:
+    source_date = target_date
+    while not _is_us_market_session(source_date):
+        source_date -= timedelta(days=1)
+    return source_date
+
+
+def benchmark_source_date(target_date: date) -> date:
+    """Return the exact market-close date required to value ``target_date``."""
+    return _expected_benchmark_source_date(target_date)
+
+
+def _benchmark_price_point(
+    series: dict[date, Decimal], target_date: date
+) -> tuple[date, Decimal] | None:
+    """Resolve only the exact or immediately preceding US market close."""
+    if _is_us_market_session(target_date):
+        exact_price = series.get(target_date)
+        if exact_price is None or exact_price <= 0:
+            return None
+        return target_date, exact_price
+    source_date = _expected_benchmark_source_date(target_date)
+    price = series.get(source_date)
+    if price is None or price <= 0:
+        return None
+    return source_date, price
+
+
+def _benchmark_price(series: dict[date, Decimal], target_date: date) -> Decimal | None:
+    resolved = _benchmark_price_point(series, target_date)
+    return resolved[1] if resolved is not None else None
+
+
+def _resolved_price_inputs(
+    series: dict[date, Decimal], required_dates: Iterable[date]
+) -> dict[date, tuple[date, Decimal]] | None:
+    """Resolve every required mark or return None; partial inputs are unusable."""
+    resolved: dict[date, tuple[date, Decimal]] = {}
+    for target_date in required_dates:
+        price_point = _benchmark_price_point(series, target_date)
+        if price_point is None:
+            return None
+        resolved[target_date] = price_point
+    return resolved
 
 
 def _benchmark_series(
@@ -1549,7 +2894,7 @@ def _benchmark_series(
 ) -> dict[str, dict[date, Decimal]]:
     """Pull benchmark closes covering `[start_date, end_date]`.
 
-    Extends the query backward by 14 days so we can anchor a synthetic
+    Extends the query backward by seven days so we can anchor a synthetic
     benchmark portfolio whose `start_date` falls on a non-trading day
     (e.g., YTD = Jan 1, a holiday). Without this lookback, `_last_known_price`
     has no candidates ≤ start_date in the filtered dict and returns None,
@@ -1566,10 +2911,31 @@ def _benchmark_series(
             Benchmark.date,
             func.coalesce(Benchmark.total_return_close, Benchmark.close),
         )
-        .where(Benchmark.date >= start_date - timedelta(days=14))
+        .where(Benchmark.date >= start_date - timedelta(days=_BENCHMARK_QUERY_LOOKBACK_DAYS))
         .where(Benchmark.date <= end_date)
     ).all()
     out: dict[str, dict[date, Decimal]] = defaultdict(dict)
     for symbol, bench_date, close in rows:
         out[symbol][bench_date] = Decimal(close)
+    return dict(out)
+
+
+def _benchmark_return_basis(
+    session: Session, start_date: date, end_date: date
+) -> dict[str, dict[date, str]]:
+    """Expose whether each benchmark mark is adjusted or raw-price fallback."""
+    rows = session.execute(
+        select(
+            Benchmark.symbol,
+            Benchmark.date,
+            Benchmark.total_return_close,
+        )
+        .where(Benchmark.date >= start_date - timedelta(days=_BENCHMARK_QUERY_LOOKBACK_DAYS))
+        .where(Benchmark.date <= end_date)
+    ).all()
+    out: dict[str, dict[date, str]] = defaultdict(dict)
+    for symbol, bench_date, total_return_close in rows:
+        out[symbol][bench_date] = (
+            "total_return_adjusted" if total_return_close is not None else "raw_price_fallback"
+        )
     return dict(out)
