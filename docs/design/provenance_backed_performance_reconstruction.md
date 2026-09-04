@@ -52,6 +52,18 @@ locator, provider account locator, record ID, and balance values.
 - Several independent source events may corroborate one economic transaction;
   one source event has exactly one current reconciliation decision.
 
+Statement reconciliation manifest schema v4 may resolve an already captured
+provider event only through a narrow append-only supersession. The private
+manifest binds the exact statement/owner evidence row, provider source-event
+and source-row digests, and the exact current provider decision key and payload
+digest. Planning fails unless that current decision is the single approved,
+provider-created `unresolved` decision and the evidence resolves to the same
+normalized provider transaction. Apply revalidates the plan under the database
+write lock, retains the old decision as superseded, creates the owner-approved
+replacement, and records both decisions in the atomic reconciliation-run
+receipt. It cannot replace a resolved provider decision or reinterpret a
+different provider transaction.
+
 ## Source-event identity and dates
 
 A statement without broker transaction IDs is identified by the source
@@ -88,6 +100,13 @@ candidate-row count and every candidate has exactly one disposition:
 `unresolved` and provisional decisions keep the range non-certifying. A source
 with zero candidates may certify only when the parser records zero candidates;
 an empty hand-authored event list is insufficient.
+
+An immutable `unresolved_classification` gap describes the provider capture at
+ingestion time. The current coverage projection closes that gap only when every
+source event implicated by its dates has exactly one approved, digest-valid,
+non-provisional resolved decision. The historical gap row remains visible.
+`provider_history_unavailable` and every other source gap remain uncovered and
+cannot be closed by decision supersession.
 
 For provider APIs, pagination continues until the provider-declared total is
 fetched. Duplicate IDs, malformed records, count mismatches, changed economic
@@ -209,6 +228,17 @@ The portfolio and every matched benchmark receive the identical dated
 external-flow set. A deposit/reversal pair may net to zero while still changing
 weighted capital between its two dates.
 
+Benchmark refreshes separately assess the exact opening and ending source
+marks required for SPY, QQQ, and every positive-weight policy component. A
+refresh can successfully store historical rows while its requested endpoint is
+still unavailable, for example before a same-day market close has been
+published. That outcome is `partial`, with one diagnostic entry per symbol,
+target date, required source date, and `missing` or `nonpositive` condition.
+Weekend and known market-holiday boundaries resolve to the immediately prior
+market close; an ordinary market session never silently falls back to an older
+close. A null adjusted close is not itself a gap because the documented raw
+close fallback remains eligible.
+
 Provider snapshot jobs append account-valuation observations; they never infer
 a broker total from the sum of holdings. Historical statement or provider-export
 totals enter only through the strict manifest importer documented in
@@ -218,12 +248,16 @@ database state, and affected row count. Apply requires a verified restorable
 backup, the approved plan digest, locked revalidation, and an atomic append-only
 commit.
 
-If a provider omits its own balance/holdings as-of timestamp, the fetch date is
-retained only as receipt metadata. The guessed calendar date is stored as an
-incomplete observation and cannot certify an exact return boundary. A later
-dated provider capture or statement observation is required for whole-account
-boundary use. Stored observations are rehashed before selection or lookup;
-payload/key drift fails closed.
+If a successful provider response supplies a direct account total and currency
+but omits its own balance/holdings as-of timestamp, the observation is
+structurally complete on the capture date. `as_of_at` remains null and the
+source reference retains `cached_as_fetched_no_provider_as_of`; the calculator
+does not manufacture a broker timestamp. Such a boundary is mathematically
+usable, but `provider_valuation_as_of_unasserted` keeps the result
+`source_provisional` even when broker-archive flow coverage is otherwise
+complete. A disabled or unavailable provider state remains incomplete. Stored
+observations are rehashed before selection or lookup; payload/key drift fails
+closed.
 
 ## Certification
 
@@ -250,13 +284,15 @@ implemented and satisfied, a mathematically computable modeled opening is
 reported as provisional rather than certified. No provisional label may be
 upgraded merely because the arithmetic equation residual is zero.
 
-`observed_certified` requires observed matched boundaries and complete broker
-archive coverage for the cash-flow interval. `source_provisional` means the
-equation is available and its provider delivery is count-complete, but the
-broker's full archive is not independently asserted. `modeled_provisional`
-means the opening boundary itself is a transaction walkback. `unavailable`
-means a required valuation, structural flow, source-delivery, price, or
-benchmark gate failed.
+`observed_certified` requires observed matched boundaries with provider- or
+source-reported effective dates and complete broker archive coverage for the
+cash-flow interval. `source_provisional` means the equation is available but
+either the provider did not assert possession of the broker's complete archive
+or a provider account total is dated to its successful capture because the
+provider omitted its own effective timestamp. `modeled_provisional` means the
+opening boundary itself is a transaction walkback. `unavailable` means a
+required valuation, structural flow, source-delivery, price, or benchmark gate
+failed.
 
 The current implementation does not yet model historical account inclusion
 intervals independently of current account state. It therefore fails closed

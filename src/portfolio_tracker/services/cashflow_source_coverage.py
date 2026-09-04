@@ -414,6 +414,46 @@ def _validation_reason_codes(
     return tuple(sorted(reasons))
 
 
+def _unresolved_classification_gap_is_closed(
+    gap: CashFlowSourceGap,
+    events: tuple[CashFlowSourceEvent, ...],
+    current_decisions: dict[str, tuple[CashFlowReconciliationDecision, ...]],
+) -> bool:
+    """Close only a historical classification gap with fully resolved lineage.
+
+    The gap remains immutable evidence of what the provider capture could not
+    classify at ingestion time. Coverage is a current derived view, so a later
+    append-only owner/statement resolution may close it without deleting that
+    evidence. Provider-history and all other gap kinds are never closed here.
+    """
+    if gap.reason_code != "unresolved_classification":
+        return False
+    implicated = tuple(
+        event
+        for event in events
+        if any(
+            candidate is not None and gap.gap_start <= candidate <= gap.gap_end
+            for candidate in (event.activity_date, event.process_date, event.settlement_date)
+        )
+    )
+    if not implicated:
+        return False
+    for event in implicated:
+        decisions = current_decisions.get(event.source_event_id, ())
+        if len(decisions) != 1:
+            return False
+        decision = decisions[0]
+        if (
+            decision.approved_at is None
+            or decision.resolution_kind == "unresolved"
+            or decision.confidence == "provisional"
+            or decision.decision_payload_sha256 != canonical_decision_payload_sha256(decision)
+            or not decision_date_basis_matches_source(decision, event)
+        ):
+            return False
+    return True
+
+
 def assess_cashflow_source_coverage(
     session: Session,
     start_date: date,
@@ -619,7 +659,16 @@ def assess_cashflow_source_coverage(
         if lifecycle_status != "approved" or validation_reasons:
             continue
         clipped = (max(row.coverage_start, required_start), min(row.coverage_end, end_date))
-        gap_ranges = tuple((gap.gap_start, gap.gap_end) for gap in raw_gaps)
+        current_decision_view = {key: tuple(value) for key, value in current_decisions.items()}
+        gap_ranges = tuple(
+            (gap.gap_start, gap.gap_end)
+            for gap in raw_gaps
+            if not _unresolved_classification_gap_is_closed(
+                gap,
+                raw_events,
+                current_decision_view,
+            )
+        )
         coverable_by_account[row.account_id].extend(_subtract_ranges(clipped, gap_ranges))
         if _broker_archive_coverage(row) != "unasserted":
             archive_coverable_by_account[row.account_id].extend(

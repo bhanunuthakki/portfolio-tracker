@@ -103,6 +103,7 @@ _MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE = "modeled_opening_valuation_cove
 _UNPRICEABLE_HOLDING_SNAPSHOT = "unpriceable_holding_snapshot"
 _ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE = "portfolio_account_universe_coverage_incomplete"
 _ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED = "account_valuation_index_exclusion_unsupported"
+_PROVIDER_VALUATION_AS_OF_UNASSERTED = "provider_valuation_as_of_unasserted"
 _PERFORMANCE_WINDOW_TOO_SHORT = "performance_window_too_short"
 
 _ValueProvenance = Literal[
@@ -139,13 +140,19 @@ class _PortfolioValueAssessment:
     provenance: dict[date, _ValueProvenance]
     valuation_account_ids: tuple[int, ...]
     calculation_reason_codes: tuple[str, ...]
+    certification_reason_codes: tuple[str, ...] = ()
     observation_keys: dict[date, tuple[str, ...]] = field(
         default_factory=lambda: dict[date, tuple[str, ...]]()
     )
 
 
 def latest_complete_portfolio_observation_date(session: Session) -> date | None:
-    """Latest exact date with a complete whole-portfolio observation."""
+    """Latest date with a structurally complete whole-portfolio observation.
+
+    A provider API total observed on its capture date can qualify even when
+    the provider omitted an effective timestamp. Downstream certification
+    retains that temporal limitation separately.
+    """
     valuation_universe = performance_account_ids(session, date.min, date.max)
     account_valuations = _complete_account_valuations_by_date(
         session, date.min, date.max, account_ids=valuation_universe
@@ -382,6 +389,7 @@ def compute_performance_series(
     # an unsupported valuation boundary. This gives reconciliation one closure
     # packet instead of revealing ledger and benchmark gaps one retry at a time.
     boundary_reason_codes = set(value_assessment.calculation_reason_codes)
+    boundary_reason_codes.update(value_assessment.certification_reason_codes)
     boundary_reason_codes.update(cashflow_assessment.calculation_reason_codes)
     if start_date >= end_date:
         boundary_reason_codes.add(_PERFORMANCE_WINDOW_TOO_SHORT)
@@ -567,7 +575,9 @@ def compute_performance_series(
             methodology_version="2",
             calculation_status="unavailable",
             reconstruction_certification="unavailable",
-            calculation_reason_codes=sorted(calculation_reason_codes),
+            calculation_reason_codes=sorted(
+                calculation_reason_codes | set(value_assessment.certification_reason_codes)
+            ),
             start_date=start_date,
             end_date=end_date,
             base_value=base_value_adj,
@@ -663,20 +673,15 @@ def compute_performance_series(
     )
 
     opening_is_observed = _is_observed_value(opening_provenance)
+    certification_reason_codes = set(value_assessment.certification_reason_codes)
+    if not source_coverage.broker_archive_is_complete:
+        certification_reason_codes.add(_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE)
     reconstruction_certification = (
         "modeled_provisional"
         if not opening_is_observed
-        else (
-            "observed_certified"
-            if source_coverage.broker_archive_is_complete
-            else "source_provisional"
-        )
+        else ("observed_certified" if not certification_reason_codes else "source_provisional")
     )
-    calculation_reason_codes = (
-        []
-        if source_coverage.broker_archive_is_complete
-        else [_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE]
-    )
+    calculation_reason_codes = sorted(certification_reason_codes)
     return PerformanceSeries(
         methodology="performance.modified_dietz",
         methodology_version="2",
@@ -1966,7 +1971,7 @@ def _complete_account_valuations_by_date(
     *,
     account_ids: frozenset[int] | None = None,
 ) -> dict[date, tuple[AccountValuationObservation, ...]]:
-    """Exact-date account totals only when the entire universe is present."""
+    """Same-date account totals only when the entire universe is present."""
     if account_ids is None:
         account_ids = performance_account_ids(session, start_date, end_date)
     if not account_ids:
@@ -2004,6 +2009,20 @@ def _complete_account_valuations_by_date(
         if set(selected) == set(account_ids) and all(row.is_complete for row in selected.values()):
             complete[candidate] = tuple(selected[account_id] for account_id in sorted(account_ids))
     return complete
+
+
+def _provider_valuation_uses_capture_date(
+    observation: AccountValuationObservation,
+) -> bool:
+    """Whether a complete provider total lacks a provider-reported as-of time.
+
+    Provider API observations with no ``as_of_at`` are dated to the successful
+    capture day. They are valid mathematical boundaries, but their temporal
+    precision is provider-unasserted and therefore cannot be fully certified.
+    Statement/export observations may legitimately report only a date, so the
+    same nullable timestamp does not make those sources provisional.
+    """
+    return observation.source_kind == "provider_api" and observation.as_of_at is None
 
 
 def _has_account_valuation_on_date(
@@ -2084,11 +2103,18 @@ def _daily_portfolio_value_assessment(
         provenance = {d: _OBSERVED_VALUE for d in forward}
 
     observation_keys: dict[date, tuple[str, ...]] = {}
+    certification_reasons: set[str] = set()
     if use_account_total_basis:
         observation_keys = {
             valuation_date: tuple(sorted(row.observation_key for row in rows))
             for valuation_date, rows in complete_account_valuations.items()
         }
+        if any(
+            _provider_valuation_uses_capture_date(row)
+            for rows in complete_account_valuations.values()
+            for row in rows
+        ):
+            certification_reasons.add(_PROVIDER_VALUATION_AS_OF_UNASSERTED)
 
     snapshot_candidates = _snapshot_dates(
         session, start_date, end_date, account_ids=valuation_accounts
@@ -2199,6 +2225,7 @@ def _daily_portfolio_value_assessment(
         provenance=provenance,
         valuation_account_ids=account_ids,
         calculation_reason_codes=tuple(sorted(reasons)),
+        certification_reason_codes=tuple(sorted(certification_reasons)),
         observation_keys=observation_keys,
     )
 

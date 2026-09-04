@@ -349,6 +349,185 @@ def test_partial_and_explicit_gap_remain_uncovered(session):
     assert result.attestations[0].gaps[0].reason_code == "provider_history_unavailable"
 
 
+def test_resolved_decision_closes_only_unresolved_classification_gap(session):
+    account = _valued_account(session, "resolved-provider-gap")
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 31)
+    event_date = date(2026, 1, 10)
+    attestation = _attestation(
+        session,
+        account,
+        key="provider-gap",
+        start=start + timedelta(days=1),
+        end=end,
+    )
+    attestation.source_type = "provider_api"
+    event = CashFlowSourceEvent(
+        source_event_id="8" * 64,
+        attestation_id=attestation.attestation_id,
+        source_record_id="provider-record",
+        source_locator_kind="provider_record",
+        source_locator="provider-record",
+        source_row_sha256="9" * 64,
+        activity_date=event_date,
+        source_amount=Decimal(0),
+        source_amount_sign_basis="provider_reported",
+        currency="USD",
+    )
+    unresolved = CashFlowReconciliationDecision(
+        decision_key="a" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id=None,
+        resolution_kind="unresolved",
+        classification=None,
+        signed_external_amount=None,
+        effective_date=None,
+        effective_date_basis=None,
+        effective_timezone=None,
+        decision_authority="provider",
+        confidence="provisional",
+        assumption_code="provider_transfer_classification_unresolved",
+        methodology_version="provider-api-v1",
+        decision_payload_sha256="b" * 64,
+        approved_at=_APPROVED_AT,
+    )
+    unresolved.decision_payload_sha256 = canonical_decision_payload_sha256(unresolved)
+    attestation.source_row_count = 1
+    attestation.cashflow_candidate_count = 1
+    attestation.source_event_set_sha256 = canonical_source_event_set_sha256((event,))
+    session.add_all(
+        [
+            event,
+            unresolved,
+            CashFlowSourceGap(
+                attestation_id=attestation.attestation_id,
+                gap_start=event_date,
+                gap_end=event_date,
+                reason_code="unresolved_classification",
+            ),
+            CashFlowSourceGap(
+                attestation_id=attestation.attestation_id,
+                gap_start=date(2026, 1, 20),
+                gap_end=date(2026, 1, 21),
+                reason_code="provider_history_unavailable",
+            ),
+        ]
+    )
+    session.commit()
+
+    before = assess_cashflow_source_coverage(
+        session, start, end, account_ids=frozenset({account.account_id})
+    )
+    assert before.accounts[0].uncovered_ranges == (
+        (event_date, event_date),
+        (date(2026, 1, 20), date(2026, 1, 21)),
+    )
+
+    resolved = CashFlowReconciliationDecision(
+        decision_key="c" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id=None,
+        resolution_kind="internal",
+        classification="internal",
+        signed_external_amount=Decimal(0),
+        effective_date=event_date,
+        effective_date_basis="owner_resolved",
+        effective_timezone="America/New_York",
+        decision_authority="owner_approved",
+        confidence="exact",
+        assumption_code="corroborating_evidence_resolves_provider_unresolved",
+        methodology_version="2",
+        decision_payload_sha256="d" * 64,
+        approved_at=_APPROVED_AT + timedelta(days=1),
+    )
+    resolved.decision_payload_sha256 = canonical_decision_payload_sha256(resolved)
+    unresolved.superseded_at = _APPROVED_AT + timedelta(days=1)
+    unresolved.superseded_by_decision_key = resolved.decision_key
+    session.add(resolved)
+    session.commit()
+
+    after = assess_cashflow_source_coverage(
+        session, start, end, account_ids=frozenset({account.account_id})
+    )
+    assert after.accounts[0].uncovered_ranges == ((date(2026, 1, 20), date(2026, 1, 21)),)
+    assert after.attestations[0].gaps[0].reason_code == "unresolved_classification"
+
+
+def test_unresolved_classification_gap_stays_open_until_every_event_is_resolved(session):
+    account = _valued_account(session, "partially-resolved-provider-gap")
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 31)
+    attestation = _attestation(
+        session,
+        account,
+        key="multi-event-provider-gap",
+        start=start + timedelta(days=1),
+        end=end,
+    )
+    attestation.source_type = "provider_api"
+    events: list[CashFlowSourceEvent] = []
+    decisions: list[CashFlowReconciliationDecision] = []
+    for index, event_date in enumerate((date(2026, 1, 10), date(2026, 1, 11)), start=1):
+        event = CashFlowSourceEvent(
+            source_event_id=str(index) * 64,
+            attestation_id=attestation.attestation_id,
+            source_record_id=f"provider-record-{index}",
+            source_locator_kind="provider_record",
+            source_locator=f"provider-record-{index}",
+            source_row_sha256=str(index + 2) * 64,
+            activity_date=event_date,
+            source_amount=Decimal(0),
+            source_amount_sign_basis="provider_reported",
+            currency="USD",
+        )
+        decision = CashFlowReconciliationDecision(
+            decision_key=str(index + 4) * 64,
+            source_event_id=event.source_event_id,
+            target_transaction_id=None,
+            resolution_kind="internal" if index == 1 else "unresolved",
+            classification="internal" if index == 1 else None,
+            signed_external_amount=Decimal(0) if index == 1 else None,
+            effective_date=event_date if index == 1 else None,
+            effective_date_basis="owner_resolved" if index == 1 else None,
+            effective_timezone="America/New_York" if index == 1 else None,
+            decision_authority="owner_approved" if index == 1 else "provider",
+            confidence="exact" if index == 1 else "provisional",
+            assumption_code=(
+                "corroborating_evidence_resolves_provider_unresolved"
+                if index == 1
+                else "provider_transfer_classification_unresolved"
+            ),
+            methodology_version="2" if index == 1 else "provider-api-v1",
+            decision_payload_sha256="f" * 64,
+            approved_at=_APPROVED_AT,
+        )
+        decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+        events.append(event)
+        decisions.append(decision)
+    attestation.source_row_count = len(events)
+    attestation.cashflow_candidate_count = len(events)
+    attestation.source_event_set_sha256 = canonical_source_event_set_sha256(tuple(events))
+    session.add_all(
+        [
+            *events,
+            *decisions,
+            CashFlowSourceGap(
+                attestation_id=attestation.attestation_id,
+                gap_start=date(2026, 1, 10),
+                gap_end=date(2026, 1, 11),
+                reason_code="unresolved_classification",
+            ),
+        ]
+    )
+    session.commit()
+
+    result = assess_cashflow_source_coverage(
+        session, start, end, account_ids=frozenset({account.account_id})
+    )
+
+    assert result.accounts[0].uncovered_ranges == ((date(2026, 1, 10), date(2026, 1, 11)),)
+
+
 def test_superseded_attestation_does_not_count(session):
     account = _valued_account(session, "superseded")
     old = _attestation(

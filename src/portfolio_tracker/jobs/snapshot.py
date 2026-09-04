@@ -87,7 +87,6 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
             continue
         balance_as_of = plaid_account.provider_balance_as_of
         valuation_date = balance_as_of.date() if balance_as_of is not None else snapshot_date
-        has_exact_provider_as_of = balance_as_of is not None
         source_reference = "investments/holdings/get.accounts[].balances"
         if balance_as_of is not None:
             source_reference += ".last_updated_datetime"
@@ -97,8 +96,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
             # as-of timestamp when the provider omits last_updated_datetime.
             source_reference += ";cached_as_fetched_no_provider_as_of"
         is_empty = (
-            has_exact_provider_as_of
-            and total_value == 0
+            total_value == 0
             and (cash_value is None or cash_value == 0)
             and plaid_account.plaid_account_id not in holding_account_ids
         )
@@ -125,7 +123,11 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
                     currency=balance_currency,
                 ),
                 fetched_at=fetched_at,
-                is_complete=has_exact_provider_as_of,
+                # Completeness describes the delivered account total, not the
+                # precision of its effective time. When Plaid omits the
+                # provider timestamp, the capture date and source marker keep
+                # that temporal uncertainty explicit for certification.
+                is_complete=True,
                 is_empty=is_empty,
             ),
         )

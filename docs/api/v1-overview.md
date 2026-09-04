@@ -76,16 +76,20 @@ activity on the broker-observation anchor date), so the portfolio path and all
 matched benchmark books do not place one economic flow on different days.
 `reconstruction_certification` is independent of mathematical availability:
 `observed_certified` means the opening and ending boundaries are complete broker
-snapshots and broker-archive flow coverage is complete; `source_provisional`
-means the calculation is available from complete provider delivery but the
-provider did not assert possession of the broker's complete archive;
+snapshots with provider- or source-reported effective dates and broker-archive
+flow coverage is complete; `source_provisional` means the calculation is
+available from complete provider delivery but the provider did not assert
+possession of the broker's complete archive, or a structurally complete direct
+provider valuation uses its successful capture date because the provider
+omitted an effective timestamp;
 `modeled_provisional` means the opening is a transaction walkback; and
 `unavailable` means the series did not pass the existing fail-closed gates.
 A modeled opening remains provisional until position activity, account
 lifecycle, broker cash/account-total closure, and eligible on-or-before-date
 historical prices are all proven; the current schema does not claim those
 additional closure proofs. Available source-provisional results carry
-`broker_archive_coverage_not_complete`, and `source_coverage` exposes global,
+`broker_archive_coverage_not_complete` and/or
+`provider_valuation_as_of_unasserted`, and `source_coverage` exposes global,
 per-account, and per-attestation archive status/ranges separately from provider
 delivery completeness. Unavailable results set the receipt and all derived point fields to null and
 return stable reason codes such as `portfolio_start_value_unavailable`,
@@ -177,6 +181,17 @@ must match, and every event must have exactly one approved current resolved,
 non-provisional decision whose payload digest recomputes exactly. Legacy
 document-only attestations remain visible but are non-certifying. Stable
 `validation_reason_codes` identify the failed gate.
+
+Private statement reconciliation manifest schema v4 can bind one statement or
+owner evidence event to one exact provider source event and the exact current
+provider decision key, source-row digest, and decision-payload digest. It may
+supersede only a single approved provider-created `unresolved` decision. The
+old and new decisions remain append-only members of the same atomic,
+digest-approved run receipt, and matching statement/provider decisions share
+one normalized transaction so the ledger emits one flow. A historical
+`unresolved_classification` gap stops reducing current coverage only after all
+events on that gap have approved, digest-valid, non-provisional resolved
+decisions; provider-history gaps never close this way.
 
 Migration `0025` creates empty attestation tables deliberately. It does not
 infer historical coverage from the rows already stored. Recording or replacing

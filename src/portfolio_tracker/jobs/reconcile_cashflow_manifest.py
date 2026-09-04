@@ -46,6 +46,9 @@ from portfolio_tracker.models import (
     TransactionOverride,
 )
 from portfolio_tracker.services.active_items import valued_account_ids
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_decision_payload_sha256,
+)
 from portfolio_tracker.services.external_flow_ledger import (
     classify_transaction_cashflow,
 )
@@ -128,8 +131,10 @@ _TOP_LEVEL_KEYS_V2 = frozenset(
 _TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | frozenset(
     {"requested_return_start", "requested_return_end"}
 )
+_TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V3 | frozenset({"provider_unresolved_resolutions"})
 _REQUIRED_TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V2 - {"schema_version"}
 _REQUIRED_TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V3
+_REQUIRED_TOP_LEVEL_KEYS_V4 = _TOP_LEVEL_KEYS_V4
 _EVENT_KEYS = frozenset(
     {
         "source_row_ordinal",
@@ -167,6 +172,27 @@ _EXISTING_RESOLUTION_KEYS = frozenset(
 _MANUAL_RESOLUTION_KEYS = frozenset({"kind"})
 _NO_TRANSACTION_RESOLUTION_KEYS = frozenset({"kind"})
 _GAP_KEYS = frozenset({"gap_start", "gap_end", "reason_code"})
+_PROVIDER_UNRESOLVED_RESOLUTION_KEYS = frozenset(
+    {
+        "evidence_source_row_ordinal",
+        "provider_source_event_id",
+        "expected_provider_source_row_sha256",
+        "expected_current_decision_key",
+        "expected_current_decision_payload_sha256",
+    }
+)
+_PROVIDER_UNRESOLVED_ASSUMPTION_CODES = frozenset(
+    {
+        "provider_activity_type_unresolved",
+        "provider_in_kind_requires_reconciliation",
+        "provider_external_cash_amount_zero",
+        "provider_cash_classification_unresolved",
+        "provider_transfer_classification_unresolved",
+    }
+)
+_CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION = (
+    "corroborating_evidence_resolves_provider_unresolved"
+)
 _ROBINHOOD_HEADERS: tuple[str, ...] = (
     "Activity Date",
     "Process Date",
@@ -222,6 +248,28 @@ class _SourceRow:
     quantity: str
     amount: str
     source_row_sha256: str
+
+
+@dataclass(frozen=True)
+class _ProviderUnresolvedResolution:
+    """Exact preconditions for replacing one provider-created unresolved decision."""
+
+    evidence_source_row_ordinal: int
+    provider_source_event_id: str
+    expected_provider_source_row_sha256: str
+    expected_current_decision_key: str
+    expected_current_decision_payload_sha256: str
+
+    def digest_payload(self) -> dict[str, object]:
+        return {
+            "evidence_source_row_ordinal": self.evidence_source_row_ordinal,
+            "provider_source_event_id": self.provider_source_event_id,
+            "expected_provider_source_row_sha256": self.expected_provider_source_row_sha256,
+            "expected_current_decision_key": self.expected_current_decision_key,
+            "expected_current_decision_payload_sha256": (
+                self.expected_current_decision_payload_sha256
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -293,7 +341,7 @@ class _Event:
 @dataclass(frozen=True)
 class _Manifest:
     source: ManifestSource
-    schema_version: Literal["2", "3"]
+    schema_version: Literal["2", "3", "4"]
     account_id: int
     account_identity_sha256: str
     coverage_start: date
@@ -315,6 +363,7 @@ class _Manifest:
     source_event_set_sha256: str
     gaps: tuple[_Gap, ...]
     events: tuple[_Event, ...]
+    provider_unresolved_resolutions: tuple[_ProviderUnresolvedResolution, ...]
     attestation_key: str
     attestation_manifest_sha256: str
     manifest_digest: str
@@ -393,6 +442,46 @@ class _AttestationPlan:
 
 
 @dataclass(frozen=True)
+class _ProviderUnresolvedResolutionPlan:
+    """Read-only disposition for one exact provider unresolved-decision replacement."""
+
+    evidence_source_event_id: str
+    provider_source_event_id: str
+    expected_provider_source_row_sha256: str
+    expected_current_decision_key: str
+    expected_current_decision_payload_sha256: str
+    desired_decision_values: dict[str, object]
+    status: Literal["existing_exact", "supersession_required", "conflict"]
+    reason_code: str
+    planned_mutation_count: int
+
+    def digest_payload(self) -> dict[str, object]:
+        desired = {
+            key: (
+                value.isoformat()
+                if isinstance(value, date)
+                else _decimal_text(value)
+                if isinstance(value, Decimal)
+                else value
+            )
+            for key, value in self.desired_decision_values.items()
+        }
+        return {
+            "evidence_source_event_id": self.evidence_source_event_id,
+            "provider_source_event_id": self.provider_source_event_id,
+            "expected_provider_source_row_sha256": self.expected_provider_source_row_sha256,
+            "expected_current_decision_key": self.expected_current_decision_key,
+            "expected_current_decision_payload_sha256": (
+                self.expected_current_decision_payload_sha256
+            ),
+            "desired_decision_values": desired,
+            "status": self.status,
+            "reason_code": self.reason_code,
+            "planned_mutation_count": self.planned_mutation_count,
+        }
+
+
+@dataclass(frozen=True)
 class ReconciliationPlan:
     """Immutable dry-run plan whose digest is required for commit."""
 
@@ -400,6 +489,7 @@ class ReconciliationPlan:
     manifests: tuple[_Manifest, ...]
     entries: tuple[PlanEntry, ...]
     attestations: tuple[_AttestationPlan, ...]
+    provider_unresolved_resolutions: tuple[_ProviderUnresolvedResolutionPlan, ...]
     requested_return_start: date | None
     requested_return_end: date | None
     status_counts: dict[str, int]
@@ -412,7 +502,7 @@ class ReconciliationPlan:
         return {
             "committed": False,
             "manifest_count": len(self.manifests),
-            "source_event_count": len(self.entries),
+            "source_event_count": len(self.entries) + len(self.provider_unresolved_resolutions),
             "status_counts": dict(self.status_counts),
             "planned_mutation_count": self.planned_mutation_count,
             "conflict_count": self.conflict_count,
@@ -1039,6 +1129,56 @@ def _parse_event(
     )
 
 
+def _parse_provider_unresolved_resolution(
+    raw: object,
+    *,
+    index: int,
+    events_by_ordinal: Mapping[int, _Event],
+) -> _ProviderUnresolvedResolution:
+    context = f"provider_unresolved_resolutions[{index}]"
+    payload = _expect_object(raw, context)
+    _expect_keys(
+        payload,
+        required=_PROVIDER_UNRESOLVED_RESOLUTION_KEYS,
+        allowed=_PROVIDER_UNRESOLVED_RESOLUTION_KEYS,
+        context=context,
+    )
+    ordinal = payload["evidence_source_row_ordinal"]
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or ordinal < 1:
+        raise ManifestValidationError(
+            f"{context}.evidence_source_row_ordinal must be a positive integer"
+        )
+    evidence = events_by_ordinal.get(ordinal)
+    if evidence is None:
+        raise ManifestValidationError(f"{context} references a missing evidence event")
+    if (
+        evidence.disposition == "unresolved"
+        or evidence.confidence == "provisional"
+        or evidence.resolution_kind != "existing_transaction"
+    ):
+        raise ManifestValidationError(
+            f"{context} requires resolved non-provisional evidence targeting an existing transaction"
+        )
+    return _ProviderUnresolvedResolution(
+        evidence_source_row_ordinal=ordinal,
+        provider_source_event_id=_expect_sha256(
+            payload["provider_source_event_id"], f"{context}.provider_source_event_id"
+        ),
+        expected_provider_source_row_sha256=_expect_sha256(
+            payload["expected_provider_source_row_sha256"],
+            f"{context}.expected_provider_source_row_sha256",
+        ),
+        expected_current_decision_key=_expect_sha256(
+            payload["expected_current_decision_key"],
+            f"{context}.expected_current_decision_key",
+        ),
+        expected_current_decision_payload_sha256=_expect_sha256(
+            payload["expected_current_decision_payload_sha256"],
+            f"{context}.expected_current_decision_payload_sha256",
+        ),
+    )
+
+
 def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     try:
         manifest_bytes = source.manifest_path.read_bytes()
@@ -1057,8 +1197,11 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     elif schema_version == "3":
         required_keys = _REQUIRED_TOP_LEVEL_KEYS_V3
         allowed_keys = _TOP_LEVEL_KEYS_V3
+    elif schema_version == "4":
+        required_keys = _REQUIRED_TOP_LEVEL_KEYS_V4
+        allowed_keys = _TOP_LEVEL_KEYS_V4
     else:
-        raise ManifestValidationError("manifest.schema_version must be 2 or 3")
+        raise ManifestValidationError("manifest.schema_version must be 2, 3, or 4")
     _expect_keys(
         payload,
         required=required_keys,
@@ -1096,7 +1239,7 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
     coverage_end = _expect_date(payload["coverage_end"], "manifest.coverage_end")
     if coverage_start > coverage_end:
         raise ManifestValidationError("manifest coverage dates are reversed")
-    if schema_version == "3":
+    if schema_version in {"3", "4"}:
         requested_return_start = _expect_date(
             payload["requested_return_start"], "manifest.requested_return_start"
         )
@@ -1114,7 +1257,7 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         _is_in_kind_transfer(row)
         and (
             (
-                schema_version == "3"
+                schema_version in {"3", "4"}
                 and requested_return_start is not None
                 and requested_return_end is not None
                 and requested_return_start
@@ -1206,7 +1349,7 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         gap_keys.add(key)
         gaps.append(_Gap(gap_start, gap_end, reason))
     gaps.sort(key=lambda gap: (gap.gap_start, gap.gap_end, gap.reason_code))
-    if schema_version == "3":
+    if schema_version in {"3", "4"}:
         assert requested_return_start is not None
         assert requested_return_end is not None
         outside_window_in_kind_dates = {
@@ -1243,6 +1386,39 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         )
         for index, raw_event in enumerate(raw_event_items)
     )
+    events_by_ordinal = {event.source_row_ordinal: event for event in events}
+    if schema_version == "4":
+        if source_type not in {"brokerage_statement", "owner_reconciliation"}:
+            raise ManifestValidationError(
+                "provider unresolved resolutions require statement or owner evidence"
+            )
+        raw_resolutions = payload["provider_unresolved_resolutions"]
+        if not isinstance(raw_resolutions, list):
+            raise ManifestValidationError("manifest.provider_unresolved_resolutions must be a list")
+        provider_unresolved_resolutions = tuple(
+            _parse_provider_unresolved_resolution(
+                raw_resolution,
+                index=index,
+                events_by_ordinal=events_by_ordinal,
+            )
+            for index, raw_resolution in enumerate(cast(list[object], raw_resolutions))
+        )
+        provider_event_ids = [
+            resolution.provider_source_event_id for resolution in provider_unresolved_resolutions
+        ]
+        evidence_ordinals = [
+            resolution.evidence_source_row_ordinal for resolution in provider_unresolved_resolutions
+        ]
+        if len(provider_event_ids) != len(set(provider_event_ids)):
+            raise ManifestValidationError(
+                "manifest contains duplicate provider unresolved source-event identity"
+            )
+        if len(evidence_ordinals) != len(set(evidence_ordinals)):
+            raise ManifestValidationError(
+                "one evidence event cannot resolve multiple provider unresolved events"
+            )
+    else:
+        provider_unresolved_resolutions = ()
     if source_type == "brokerage_statement" and any(
         event.ledger_effective_date is not None
         and (
@@ -1310,7 +1486,7 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         "captured_at": _datetime_text(captured_at),
         "events": [event.digest_payload() for event in events],
     }
-    if schema_version == "3":
+    if schema_version in {"3", "4"}:
         assert requested_return_start is not None
         assert requested_return_end is not None
         manifest_payload.update(
@@ -1319,10 +1495,14 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
                 "requested_return_end": requested_return_end.isoformat(),
             }
         )
+    if schema_version == "4":
+        manifest_payload["provider_unresolved_resolutions"] = [
+            resolution.digest_payload() for resolution in provider_unresolved_resolutions
+        ]
     manifest_digest = _digest(manifest_payload)
     return _Manifest(
         source=source,
-        schema_version=cast(Literal["2", "3"], schema_version),
+        schema_version=cast(Literal["2", "3", "4"], schema_version),
         account_id=account_id,
         account_identity_sha256=account_identity,
         coverage_start=coverage_start,
@@ -1344,6 +1524,7 @@ def _parse_manifest(session: Session, source: ManifestSource) -> _Manifest:
         source_event_set_sha256=source_event_set_sha256,
         gaps=tuple(gaps),
         events=events,
+        provider_unresolved_resolutions=provider_unresolved_resolutions,
         attestation_key=attestation_key,
         attestation_manifest_sha256=identity_digest,
         manifest_digest=manifest_digest,
@@ -1614,6 +1795,151 @@ def _decision_matches(
     return all(getattr(row, key) == value for key, value in values.items())
 
 
+def _provider_resolution_decision_values(
+    evidence: _Event,
+    provider_source_event_id: str,
+    target_transaction_id: str,
+) -> dict[str, object]:
+    if evidence.classification in {"external_in", "external_out"}:
+        disposition: Disposition = "provider_exact"
+    elif evidence.classification == "internal":
+        disposition = "internal"
+    elif evidence.classification == "excluded":
+        disposition = "excluded"
+    else:
+        raise ManifestValidationError("provider unresolved replacement evidence is unresolved")
+    owner_resolution = replace(
+        evidence,
+        source_event_id=provider_source_event_id,
+        disposition=disposition,
+        effective_date_basis="owner_resolved",
+        decision_authority="owner_approved",
+        assumption_code=_CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION,
+    )
+    return _decision_values(owner_resolution, target_transaction_id)
+
+
+def _plan_provider_unresolved_resolution(
+    session: Session,
+    manifest: _Manifest,
+    reference: _ProviderUnresolvedResolution,
+    evidence_entry: PlanEntry,
+) -> _ProviderUnresolvedResolutionPlan:
+    def conflict(
+        reason_code: str,
+        desired: dict[str, object] | None = None,
+    ) -> _ProviderUnresolvedResolutionPlan:
+        return _ProviderUnresolvedResolutionPlan(
+            evidence_source_event_id=evidence_entry.source_event_id,
+            provider_source_event_id=reference.provider_source_event_id,
+            expected_provider_source_row_sha256=reference.expected_provider_source_row_sha256,
+            expected_current_decision_key=reference.expected_current_decision_key,
+            expected_current_decision_payload_sha256=(
+                reference.expected_current_decision_payload_sha256
+            ),
+            desired_decision_values=desired or {},
+            status="conflict",
+            reason_code=reason_code,
+            planned_mutation_count=0,
+        )
+
+    if manifest.source_type not in {"brokerage_statement", "owner_reconciliation"}:
+        return conflict("provider_resolution_evidence_authority_invalid")
+    if evidence_entry.status == "conflict" or evidence_entry.resolved_transaction_id is None:
+        return conflict("provider_resolution_evidence_target_unavailable")
+    provider_event = session.get(CashFlowSourceEvent, reference.provider_source_event_id)
+    if provider_event is None:
+        return conflict("provider_unresolved_source_event_missing")
+    provider_attestation = session.get(CashFlowSourceAttestation, provider_event.attestation_id)
+    if (
+        provider_attestation is None
+        or provider_attestation.source_type != "provider_api"
+        or provider_attestation.account_id != manifest.account_id
+        or provider_attestation.approved_at is None
+    ):
+        return conflict("provider_unresolved_source_event_authority_mismatch")
+    if (
+        provider_event.source_locator_kind != "provider_record"
+        or provider_event.source_record_id is None
+        or provider_event.source_record_id != evidence_entry.resolved_transaction_id
+    ):
+        return conflict("provider_unresolved_target_identity_mismatch")
+    if provider_event.source_row_sha256 != reference.expected_provider_source_row_sha256:
+        return conflict("provider_unresolved_source_row_digest_mismatch")
+
+    desired = _provider_resolution_decision_values(
+        evidence_entry.event,
+        reference.provider_source_event_id,
+        evidence_entry.resolved_transaction_id,
+    )
+    current_rows = tuple(
+        session.scalars(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id
+                == reference.provider_source_event_id,
+                CashFlowReconciliationDecision.superseded_at.is_(None),
+            )
+        )
+    )
+    expected = session.get(CashFlowReconciliationDecision, reference.expected_current_decision_key)
+    desired_key = cast(str, desired["decision_key"])
+    if len(current_rows) == 1 and _decision_matches(current_rows[0], desired):
+        current = current_rows[0]
+        if (
+            current.approved_at is None
+            or current.confidence == "provisional"
+            or expected is None
+            or expected.source_event_id != reference.provider_source_event_id
+            or expected.decision_payload_sha256
+            != reference.expected_current_decision_payload_sha256
+            or expected.superseded_at is None
+            or expected.superseded_by_decision_key != desired_key
+        ):
+            return conflict("provider_unresolved_supersession_receipt_mismatch", desired)
+        return _ProviderUnresolvedResolutionPlan(
+            evidence_entry.source_event_id,
+            reference.provider_source_event_id,
+            reference.expected_provider_source_row_sha256,
+            reference.expected_current_decision_key,
+            reference.expected_current_decision_payload_sha256,
+            desired,
+            "existing_exact",
+            "provider_unresolved_supersession_exact",
+            0,
+        )
+    if len(current_rows) != 1:
+        return conflict("provider_unresolved_current_decision_not_unique", desired)
+    current = current_rows[0]
+    if (
+        current.decision_key != reference.expected_current_decision_key
+        or current.decision_payload_sha256 != reference.expected_current_decision_payload_sha256
+        or canonical_decision_payload_sha256(current)
+        != reference.expected_current_decision_payload_sha256
+    ):
+        return conflict("provider_unresolved_current_decision_digest_mismatch", desired)
+    if (
+        current.resolution_kind != "unresolved"
+        or current.decision_authority != "provider"
+        or current.methodology_version != "provider-api-v1"
+        or current.confidence != "provisional"
+        or current.approved_at is None
+        or current.target_transaction_id is not None
+        or current.assumption_code not in _PROVIDER_UNRESOLVED_ASSUMPTION_CODES
+    ):
+        return conflict("provider_unresolved_current_decision_not_provider_created", desired)
+    return _ProviderUnresolvedResolutionPlan(
+        evidence_entry.source_event_id,
+        reference.provider_source_event_id,
+        reference.expected_provider_source_row_sha256,
+        reference.expected_current_decision_key,
+        reference.expected_current_decision_payload_sha256,
+        desired,
+        "supersession_required",
+        "provider_unresolved_decision_requires_supersession",
+        2,
+    )
+
+
 def _provenance_disposition(
     session: Session,
     manifest: _Manifest,
@@ -1780,8 +2106,8 @@ def build_reconciliation_plan(
     manifests = tuple(_parse_manifest(session, source) for source in normalized_sources)
     schema_versions = {manifest.schema_version for manifest in manifests}
     if len(schema_versions) != 1:
-        raise ManifestValidationError("schema v2 and v3 manifests cannot be mixed")
-    if schema_versions == {"3"}:
+        raise ManifestValidationError("different manifest schema versions cannot be mixed")
+    if schema_versions in ({"3"}, {"4"}):
         requested_windows = {
             (manifest.requested_return_start, manifest.requested_return_end)
             for manifest in manifests
@@ -1800,6 +2126,15 @@ def build_reconciliation_plan(
     all_event_ids = [event.source_event_id for manifest in manifests for event in manifest.events]
     if len(all_event_ids) != len(set(all_event_ids)):
         raise ManifestValidationError("duplicate stable source-row identity across manifests")
+    all_provider_resolution_ids = [
+        resolution.provider_source_event_id
+        for manifest in manifests
+        for resolution in manifest.provider_unresolved_resolutions
+    ]
+    if len(all_provider_resolution_ids) != len(set(all_provider_resolution_ids)):
+        raise ManifestValidationError(
+            "duplicate provider unresolved source-event identity across manifests"
+        )
 
     entries = tuple(
         _plan_event(session, manifest, event) for manifest in manifests for event in manifest.events
@@ -1845,11 +2180,32 @@ def build_reconciliation_plan(
             else entry
             for entry in entries
         )
+    entries_by_manifest_ordinal = {
+        (manifest.manifest_digest, entry.event.source_row_ordinal): entry
+        for manifest in manifests
+        for entry in entries
+        if entry.source_event_id in {event.source_event_id for event in manifest.events}
+    }
+    provider_unresolved_resolutions = tuple(
+        _plan_provider_unresolved_resolution(
+            session,
+            manifest,
+            reference,
+            entries_by_manifest_ordinal[
+                (manifest.manifest_digest, reference.evidence_source_row_ordinal)
+            ],
+        )
+        for manifest in manifests
+        for reference in manifest.provider_unresolved_resolutions
+    )
     attestations = tuple(_plan_attestation(session, manifest) for manifest in manifests)
     counts = Counter(entry.status for entry in entries)
     status_counts = {status: counts.get(status, 0) for status in _STATUS_ORDER}
     conflict_count = status_counts["conflict"] + sum(
         attestation.status == "conflict" for attestation in attestations
+    )
+    conflict_count += sum(
+        resolution.status == "conflict" for resolution in provider_unresolved_resolutions
     )
     manual_insert_ids = {
         entry.resolved_transaction_id for entry in entries if entry.status == "missing_insert"
@@ -1863,6 +2219,9 @@ def build_reconciliation_plan(
         + sum(attestation.planned_mutation_count for attestation in attestations)
     )
     planned_mutations += provenance_mutations
+    planned_mutations += sum(
+        resolution.planned_mutation_count for resolution in provider_unresolved_resolutions
+    )
     if planned_mutations:
         planned_mutations += 1  # durable applied-run receipt
     plan_payload: dict[str, object] = {
@@ -1870,6 +2229,9 @@ def build_reconciliation_plan(
         "manifests": [manifest.manifest_digest for manifest in manifests],
         "entries": [entry.digest_payload() for entry in entries],
         "attestations": [attestation.digest_payload() for attestation in attestations],
+        "provider_unresolved_resolutions": [
+            resolution.digest_payload() for resolution in provider_unresolved_resolutions
+        ],
         "planned_mutation_count": planned_mutations,
         "conflict_count": conflict_count,
     }
@@ -1885,6 +2247,7 @@ def build_reconciliation_plan(
         manifests=manifests,
         entries=entries,
         attestations=attestations,
+        provider_unresolved_resolutions=provider_unresolved_resolutions,
         requested_return_start=requested_return_start,
         requested_return_end=requested_return_end,
         status_counts=status_counts,
@@ -2115,6 +2478,61 @@ def _persist_source_events_and_decisions(
     return mutations, tuple(memberships), tuple(transaction_mutations)
 
 
+def _persist_provider_unresolved_resolutions(
+    session: Session,
+    plan: ReconciliationPlan,
+    approved_at: datetime,
+) -> tuple[int, tuple[_DecisionMembership, ...]]:
+    mutations = 0
+    memberships: list[_DecisionMembership] = []
+    for resolution in plan.provider_unresolved_resolutions:
+        desired_key = cast(str, resolution.desired_decision_values["decision_key"])
+        current = session.scalar(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id
+                == resolution.provider_source_event_id,
+                CashFlowReconciliationDecision.superseded_at.is_(None),
+            )
+        )
+        if resolution.status == "existing_exact":
+            if current is None or not _decision_matches(
+                current, resolution.desired_decision_values
+            ):
+                raise ReconciliationConflictError(
+                    "provider unresolved supersession changed before commit"
+                )
+            memberships.append(_DecisionMembership(current.decision_key, "verified"))
+            continue
+        if resolution.status != "supersession_required" or current is None:
+            raise ReconciliationConflictError("provider unresolved supersession is not applicable")
+        if (
+            current.decision_key != resolution.expected_current_decision_key
+            or current.decision_payload_sha256
+            != resolution.expected_current_decision_payload_sha256
+            or current.resolution_kind != "unresolved"
+            or current.decision_authority != "provider"
+            or current.methodology_version != "provider-api-v1"
+        ):
+            raise ReconciliationConflictError("provider unresolved decision changed before commit")
+        current.superseded_at = approved_at
+        current.superseded_by_decision_key = desired_key
+        memberships.append(_DecisionMembership(current.decision_key, "superseded"))
+        # Retire the partial-unique current row before inserting its successor.
+        session.flush()
+        session.add(
+            CashFlowReconciliationDecision(
+                **resolution.desired_decision_values,
+                approved_at=approved_at,
+                superseded_at=None,
+                superseded_by_decision_key=None,
+            )
+        )
+        memberships.append(_DecisionMembership(desired_key, "created"))
+        mutations += 2
+    session.flush()
+    return mutations, tuple(memberships)
+
+
 def _persist_run_receipt(
     session: Session,
     plan: ReconciliationPlan,
@@ -2155,7 +2573,7 @@ def _persist_run_receipt(
             requested_return_start=plan.requested_return_start,
             requested_return_end=plan.requested_return_end,
             affected_account_count=len({item.account_id for item in plan.manifests}),
-            source_event_count=len(plan.entries),
+            source_event_count=len(plan.entries) + len(plan.provider_unresolved_resolutions),
             planned_mutation_count=plan.planned_mutation_count,
             applied_mutation_count=applied_mutation_count + 1,
             status="applied",
@@ -2321,6 +2739,41 @@ def _verify_applied_state(session: Session, plan: ReconciliationPlan) -> None:
             ):
                 raise ReconciliationConflictError("decision write verification failed")
 
+    for resolution in plan.provider_unresolved_resolutions:
+        provider_event = session.get(CashFlowSourceEvent, resolution.provider_source_event_id)
+        if (
+            provider_event is None
+            or provider_event.source_row_sha256 != resolution.expected_provider_source_row_sha256
+        ):
+            raise ReconciliationConflictError(
+                "provider unresolved source-event verification failed"
+            )
+        current = session.scalar(
+            select(CashFlowReconciliationDecision).where(
+                CashFlowReconciliationDecision.source_event_id
+                == resolution.provider_source_event_id,
+                CashFlowReconciliationDecision.superseded_at.is_(None),
+            )
+        )
+        previous = session.get(
+            CashFlowReconciliationDecision, resolution.expected_current_decision_key
+        )
+        desired_key = cast(str, resolution.desired_decision_values["decision_key"])
+        if (
+            current is None
+            or current.approved_at is None
+            or not _decision_matches(current, resolution.desired_decision_values)
+            or previous is None
+            or previous.decision_payload_sha256
+            != resolution.expected_current_decision_payload_sha256
+            or previous.superseded_at is None
+            or previous.superseded_by_decision_key != desired_key
+        ):
+            raise ReconciliationConflictError(
+                "provider unresolved decision supersession verification failed"
+            )
+        _validate_decision_chain(session, resolution.provider_source_event_id)
+
     # The evidence is outside the database transaction.  Re-read it at the
     # final boundary so a source replacement during apply fails closed too.
     reparsed = tuple(_parse_manifest(session, source) for source in plan.sources)
@@ -2443,6 +2896,18 @@ def apply_reconciliation_plan(
                 approved_at,
             )
         )
+        provider_resolution_count, provider_resolution_memberships = (
+            _persist_provider_unresolved_resolutions(
+                session,
+                locked_plan,
+                approved_at,
+            )
+        )
+        provenance_count += provider_resolution_count
+        decision_memberships = (
+            *decision_memberships,
+            *provider_resolution_memberships,
+        )
         applied_mutation_count += provenance_count
         transaction_mutations.extend(provenance_transaction_mutations)
         if applied_mutation_count == 0:
@@ -2489,7 +2954,9 @@ def apply_reconciliation_plan(
     return ReconciliationResult(
         committed=True,
         manifest_count=len(locked_plan.manifests),
-        source_event_count=len(locked_plan.entries),
+        source_event_count=(
+            len(locked_plan.entries) + len(locked_plan.provider_unresolved_resolutions)
+        ),
         status_counts=dict(locked_plan.status_counts),
         applied_mutation_count=applied_mutation_count,
         plan_digest=locked_plan.plan_digest,
@@ -2613,6 +3080,26 @@ def write_private_preview_artifact(plan: ReconciliationPlan, destination: Path) 
                 "reason_code": attestation.reason_code,
             }
             for attestation in plan.attestations
+        ],
+        "provider_unresolved_resolutions": [
+            {
+                "evidence_source_event_id": resolution.evidence_source_event_id,
+                "provider_source_event_id": resolution.provider_source_event_id,
+                "expected_provider_source_row_sha256": (
+                    resolution.expected_provider_source_row_sha256
+                ),
+                "expected_current_decision_key": resolution.expected_current_decision_key,
+                "expected_current_decision_payload_sha256": (
+                    resolution.expected_current_decision_payload_sha256
+                ),
+                "desired_decision_key": resolution.desired_decision_values.get("decision_key"),
+                "target_transaction_id": resolution.desired_decision_values.get(
+                    "target_transaction_id"
+                ),
+                "status": resolution.status,
+                "reason_code": resolution.reason_code,
+            }
+            for resolution in plan.provider_unresolved_resolutions
         ],
     }
     file_descriptor, temporary_name = tempfile.mkstemp(

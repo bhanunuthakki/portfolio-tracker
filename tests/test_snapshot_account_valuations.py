@@ -116,7 +116,9 @@ def test_plaid_snapshot_records_direct_account_totals_and_explicit_empty_account
     assert session.scalar(select(func.count()).select_from(AccountValuationObservation)) == 2
 
 
-def test_plaid_total_without_provider_as_of_is_non_certifying(session, monkeypatch) -> None:
+def test_plaid_total_without_provider_as_of_is_complete_on_capture_date(
+    session, monkeypatch
+) -> None:
     response = _response()
     response.accounts[0] = response.accounts[0].model_copy(update={"provider_balance_as_of": None})
     item = Item(
@@ -139,10 +141,38 @@ def test_plaid_total_without_provider_as_of_is_non_certifying(session, monkeypat
         )
     )
     assert valuation is not None
-    assert valuation.is_complete is False
+    assert valuation.is_complete is True
     assert valuation.is_empty is False
     assert valuation.as_of_at is None
     assert "cached_as_fetched_no_provider_as_of" in valuation.source_reference
+
+
+def test_plaid_empty_total_without_provider_as_of_is_complete_empty(session, monkeypatch) -> None:
+    response = _response()
+    response.accounts[1] = response.accounts[1].model_copy(update={"provider_balance_as_of": None})
+    item = Item(
+        source="plaid",
+        plaid_item_id="plaid-item-1",
+        plaid_access_token_encrypted="encrypted-test-token",
+    )
+    session.add(item)
+    session.flush()
+    monkeypatch.setattr(snapshot, "decrypt_token", lambda _encrypted: "test-token")
+    monkeypatch.setattr(plaid_client, "get_holdings", lambda _token: response)
+
+    snapshot._snapshot_item(session, item, date(2026, 9, 3))
+
+    account = session.scalar(select(Account).where(Account.plaid_account_id == "empty-1"))
+    assert account is not None
+    valuation = session.scalar(
+        select(AccountValuationObservation).where(
+            AccountValuationObservation.account_id == account.account_id
+        )
+    )
+    assert valuation is not None
+    assert valuation.is_complete is True
+    assert valuation.is_empty is True
+    assert valuation.as_of_at is None
 
 
 def test_plaid_total_without_provider_iso_currency_is_not_certified(session, monkeypatch) -> None:

@@ -197,7 +197,6 @@ def sync_with_transaction_correction_approvals(
                     source_reference += "+get_user_holdings.balances[].cash"
                 balance_as_of = plaid_shaped_account.provider_holdings_last_successful_sync
                 valuation_date = balance_as_of.date() if balance_as_of is not None else today
-                has_exact_provider_as_of = balance_as_of is not None
                 if balance_as_of is not None:
                     source_reference += ";as_of=sync_status.holdings.last_successful_sync"
                 else:
@@ -209,7 +208,6 @@ def sync_with_transaction_correction_approvals(
                     source_reference += ";provider_state_unavailable"
                 is_empty = (
                     holdings_available
-                    and has_exact_provider_as_of
                     and total_value == 0
                     and (cash_value is None or cash_value == 0)
                     and not holdings_resp.holdings
@@ -238,7 +236,11 @@ def sync_with_transaction_correction_approvals(
                             currency=currency,
                         ),
                         fetched_at=fetched_at,
-                        is_complete=holdings_available and has_exact_provider_as_of,
+                        # A direct total is structurally complete when the
+                        # provider account/holdings state is available. A
+                        # missing provider timestamp remains explicit through
+                        # as_of_at=None and the capture-date source marker.
+                        is_complete=holdings_available,
                         is_empty=is_empty,
                     ),
                 )

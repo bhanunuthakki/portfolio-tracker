@@ -11,13 +11,15 @@ Run manually:
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import typer
 import yfinance as yf
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
@@ -55,6 +57,85 @@ _DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX", *_SECTOR_ETFS)
 # lookback (two years) is available, not merely the 30-day maintenance pull.
 _POLICY_SUPPORTED_HORIZON_DAYS = 730
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BenchmarkEndpointMark:
+    """Availability of one exact benchmark source mark for a requested boundary."""
+
+    target_date: date
+    source_date: date
+    resolution: Literal["same_day", "previous_market_close"]
+    status: Literal["available", "missing", "nonpositive"]
+    return_basis: Literal["total_return_adjusted", "raw_price_fallback"] | None
+
+
+@dataclass(frozen=True)
+class BenchmarkSymbolEndpointCoverage:
+    """Endpoint coverage and stored positive-date extent for one symbol."""
+
+    symbol: str
+    earliest_available_date: date | None
+    latest_available_date: date | None
+    endpoint_marks: tuple[BenchmarkEndpointMark, ...]
+
+    @property
+    def is_complete(self) -> bool:
+        return all(mark.status == "available" for mark in self.endpoint_marks)
+
+
+@dataclass(frozen=True)
+class BenchmarkEndpointCoverage:
+    """Read-only evidence that all comparator boundary marks are usable."""
+
+    requested_start_date: date
+    requested_end_date: date
+    symbols: tuple[BenchmarkSymbolEndpointCoverage, ...]
+
+    @property
+    def is_complete(self) -> bool:
+        return all(symbol.is_complete for symbol in self.symbols)
+
+    @property
+    def missing_marks(self) -> tuple[tuple[str, BenchmarkEndpointMark], ...]:
+        return tuple(
+            (symbol.symbol, mark)
+            for symbol in self.symbols
+            for mark in symbol.endpoint_marks
+            if mark.status != "available"
+        )
+
+
+@dataclass(frozen=True)
+class BenchmarkRefreshResult:
+    """Refresh count plus exact endpoint coverage for operational receipts."""
+
+    rows_written: int
+    endpoint_coverage: BenchmarkEndpointCoverage
+
+    @property
+    def status(self) -> Literal["complete", "partial"]:
+        return "complete" if self.endpoint_coverage.is_complete else "partial"
+
+
+def _report_partial_endpoint_coverage(
+    coverage: BenchmarkEndpointCoverage,
+    *,
+    rows_written: int,
+) -> None:
+    if coverage.is_complete:
+        return
+    gap_details = ",".join(
+        f"{symbol}:{mark.target_date}->{mark.source_date}:{mark.status}"
+        for symbol, mark in coverage.missing_marks
+    )
+    logger.warning(
+        "benchmark refresh partial endpoint coverage: rows_written=%d gaps=%s",
+        rows_written,
+        gap_details,
+    )
+
 
 class PolicyBenchmarkCoverageError(RuntimeError):
     """The requested window lacks data for one or more policy components."""
@@ -67,7 +148,108 @@ class PolicyBenchmarkCoverageError(RuntimeError):
         super().__init__("policy benchmark coverage incomplete")
 
 
-def run(start_date: date, end_date: date) -> int:
+def assess_endpoint_coverage(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    symbols: set[str] | frozenset[str] | None = None,
+) -> BenchmarkEndpointCoverage:
+    """Inspect exact opening/ending marks without modifying benchmark state.
+
+    The assessment mirrors performance's fail-closed boundary semantics: a US
+    market session requires its same-day mark, while a weekend or known market
+    holiday resolves to the immediately preceding market close. Missing
+    adjusted prices remain usable through the documented raw-close fallback.
+    """
+    required_symbols = (
+        frozenset(symbols)
+        if symbols is not None
+        else frozenset({"SPY", "QQQ"} | _policy_tickers(session))
+    )
+    target_dates = tuple(dict.fromkeys((start_date, end_date)))
+    source_dates = {target_date: benchmark_source_date(target_date) for target_date in target_dates}
+    requested_source_dates = frozenset(source_dates.values())
+
+    rows = session.execute(
+        select(
+            Benchmark.symbol,
+            Benchmark.date,
+            Benchmark.close,
+            Benchmark.total_return_close,
+        ).where(
+            Benchmark.symbol.in_(required_symbols),
+            Benchmark.date.in_(requested_source_dates),
+        )
+    ).all()
+    rows_by_key = {
+        (symbol, benchmark_date): (
+            Decimal(close),
+            Decimal(total_return_close) if total_return_close is not None else None,
+        )
+        for symbol, benchmark_date, close, total_return_close in rows
+    }
+
+    available_extents = {
+        symbol: (earliest, latest)
+        for symbol, earliest, latest in session.execute(
+            select(
+                Benchmark.symbol,
+                func.min(Benchmark.date),
+                func.max(Benchmark.date),
+            )
+            .where(
+                Benchmark.symbol.in_(required_symbols),
+                func.coalesce(Benchmark.total_return_close, Benchmark.close) > 0,
+            )
+            .group_by(Benchmark.symbol)
+        ).all()
+    }
+
+    symbol_coverage: list[BenchmarkSymbolEndpointCoverage] = []
+    for symbol in sorted(required_symbols):
+        endpoint_marks: list[BenchmarkEndpointMark] = []
+        for target_date in target_dates:
+            source_date = source_dates[target_date]
+            stored = rows_by_key.get((symbol, source_date))
+            if stored is None:
+                status: Literal["available", "missing", "nonpositive"] = "missing"
+                return_basis = None
+            else:
+                raw_close, adjusted_close = stored
+                selected_close = adjusted_close if adjusted_close is not None else raw_close
+                status = "available" if selected_close > 0 else "nonpositive"
+                return_basis = (
+                    "total_return_adjusted" if adjusted_close is not None else "raw_price_fallback"
+                )
+            endpoint_marks.append(
+                BenchmarkEndpointMark(
+                    target_date=target_date,
+                    source_date=source_date,
+                    resolution=(
+                        "same_day" if target_date == source_date else "previous_market_close"
+                    ),
+                    status=status,
+                    return_basis=return_basis,
+                )
+            )
+        earliest, latest = available_extents.get(symbol, (None, None))
+        symbol_coverage.append(
+            BenchmarkSymbolEndpointCoverage(
+                symbol=symbol,
+                earliest_available_date=earliest,
+                latest_available_date=latest,
+                endpoint_marks=tuple(endpoint_marks),
+            )
+        )
+    return BenchmarkEndpointCoverage(
+        requested_start_date=start_date,
+        requested_end_date=end_date,
+        symbols=tuple(symbol_coverage),
+    )
+
+
+def run_with_coverage(start_date: date, end_date: date) -> BenchmarkRefreshResult:
     rows_written = 0
     with SessionLocal() as session:
         policy_tickers = _policy_tickers(session)
@@ -84,6 +266,13 @@ def run(start_date: date, end_date: date) -> int:
         fetch_start_date = benchmark_source_date(coverage_start_date)
         for symbol in symbols:
             rows_written += _fetch_symbol(session, symbol, fetch_start_date, end_date)
+        endpoint_coverage = assess_endpoint_coverage(
+            session,
+            start_date,
+            end_date,
+            symbols={"SPY", "QQQ"} | policy_tickers,
+        )
+        _report_partial_endpoint_coverage(endpoint_coverage, rows_written=rows_written)
         if target_revision is not None:
             _complete_policy_recomputation(
                 session,
@@ -93,7 +282,15 @@ def run(start_date: date, end_date: date) -> int:
                 end_date=end_date,
             )
         session.commit()
-    return rows_written
+    return BenchmarkRefreshResult(
+        rows_written=rows_written,
+        endpoint_coverage=endpoint_coverage,
+    )
+
+
+def run(start_date: date, end_date: date) -> int:
+    """Refresh benchmark rows and retain the legacy integer return contract."""
+    return run_with_coverage(start_date, end_date).rows_written
 
 
 def _policy_tickers(session: Session) -> set[str]:
@@ -216,10 +413,19 @@ def main(
 ) -> None:
     start_date = date.fromisoformat(start)
     end_date = date.fromisoformat(end) if end is not None else date.today()
-    written = run(start_date, end_date)
-    with SessionLocal() as session:
-        symbols = sorted(set(_DEFAULT_BENCHMARKS) | _policy_tickers(session))
-    print(f"benchmarks complete: {written} rows written across {symbols}")
+    result = run_with_coverage(start_date, end_date)
+    symbols = [symbol.symbol for symbol in result.endpoint_coverage.symbols]
+    print(
+        f"benchmarks {result.status}: {result.rows_written} rows written "
+        f"across required comparators {symbols}"
+    )
+    if result.status == "partial":
+        for symbol, mark in result.endpoint_coverage.missing_marks:
+            print(
+                "benchmark endpoint unavailable: "
+                f"symbol={symbol} target_date={mark.target_date} "
+                f"source_date={mark.source_date} reason={mark.status}"
+            )
 
 
 if __name__ == "__main__":

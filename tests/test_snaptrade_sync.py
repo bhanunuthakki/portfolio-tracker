@@ -260,7 +260,7 @@ def test_sync_combines_account_list_total_with_holdings_cash(session, monkeypatc
     )
 
 
-def test_sync_total_without_provider_as_of_is_non_certifying(session, monkeypatch):
+def test_sync_total_without_provider_as_of_is_complete_on_capture_date(session, monkeypatch):
     route_mod = _patch_snaptrade(monkeypatch)
     monkeypatch.setattr(
         snaptrade_client,
@@ -281,7 +281,7 @@ def test_sync_total_without_provider_as_of_is_non_certifying(session, monkeypatc
     route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
 
     valuation = session.execute(select(AccountValuationObservation)).scalar_one()
-    assert valuation.is_complete is False
+    assert valuation.is_complete is True
     assert valuation.is_empty is False
     assert valuation.as_of_at is None
     assert "cached_as_fetched_no_provider_as_of" in valuation.source_reference

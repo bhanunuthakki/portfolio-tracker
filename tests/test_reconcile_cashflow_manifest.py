@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,12 +26,19 @@ from portfolio_tracker.models import (
     CashFlowReconciliationRunTransactionMutation,
     CashFlowSourceAttestation,
     CashFlowSourceEvent,
+    CashFlowSourceGap,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
     Security,
     TransactionOverride,
 )
+from portfolio_tracker.services.cashflow_source_coverage import (
+    assess_cashflow_source_coverage,
+    canonical_decision_payload_sha256,
+    canonical_source_event_set_sha256,
+)
+from portfolio_tracker.services.external_flow_ledger import build_external_flow_ledger
 
 
 def _sha256(payload: bytes) -> str:
@@ -265,6 +272,105 @@ def _transaction(
         currency="USD",
         origin="broker",
     )
+
+
+def _provider_unresolved(
+    session: Session,
+    account: Account,
+    transaction: InvestmentTransaction,
+) -> tuple[CashFlowSourceEvent, CashFlowReconciliationDecision]:
+    captured = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    attestation = CashFlowSourceAttestation(
+        attestation_key="provider-unresolved-attestation",
+        account_id=account.account_id,
+        coverage_start=date(2024, 9, 3),
+        coverage_end=date(2026, 7, 31),
+        source_type="provider_api",
+        source_reference="provider_api:snaptrade:count_verified_response",
+        broker_archive_coverage="unasserted",
+        source_sha256="a" * 64,
+        captured_at=captured,
+        approved_at=captured,
+        methodology_version="provider-api-v1",
+        account_identity_sha256="b" * 64,
+        account_mapping_basis="provider_account_id",
+        account_mapping_confidence="exact",
+        source_format="snaptrade_account_activities_api",
+        parser_version="snaptrade_account_activity.v3",
+        source_timezone="provider-date",
+        source_row_count=1,
+        cashflow_candidate_count=1,
+        source_event_set_sha256="c" * 64,
+        manifest_sha256="d" * 64,
+    )
+    session.add(attestation)
+    session.flush()
+    event = CashFlowSourceEvent(
+        source_event_id="e" * 64,
+        attestation_id=attestation.attestation_id,
+        source_record_id=transaction.plaid_investment_transaction_id,
+        source_locator_kind="provider_record",
+        source_locator=transaction.plaid_investment_transaction_id,
+        source_row_sha256="f" * 64,
+        activity_date=transaction.date,
+        source_amount=transaction.amount,
+        source_amount_sign_basis="provider_reported",
+        currency="USD",
+        source_code="cash",
+    )
+    decision = CashFlowReconciliationDecision(
+        decision_key="1" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id=None,
+        resolution_kind="unresolved",
+        classification=None,
+        signed_external_amount=None,
+        effective_date=None,
+        effective_date_basis=None,
+        effective_timezone=None,
+        decision_authority="provider",
+        confidence="provisional",
+        assumption_code="provider_cash_classification_unresolved",
+        methodology_version="provider-api-v1",
+        decision_payload_sha256="2" * 64,
+        approved_at=captured,
+    )
+    decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+    attestation.source_event_set_sha256 = canonical_source_event_set_sha256((event,))
+    session.add_all(
+        [
+            event,
+            decision,
+            CashFlowSourceGap(
+                attestation_id=attestation.attestation_id,
+                gap_start=transaction.date,
+                gap_end=transaction.date,
+                reason_code="unresolved_classification",
+            ),
+        ]
+    )
+    session.commit()
+    return event, decision
+
+
+def _add_provider_unresolved_resolution(
+    source: ManifestSource,
+    provider_event: CashFlowSourceEvent,
+    provider_decision: CashFlowReconciliationDecision,
+) -> None:
+    payload = json.loads(source.manifest_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = "4"
+    payload["parser_version"] = "robinhood_activity_csv.v4"
+    payload["provider_unresolved_resolutions"] = [
+        {
+            "evidence_source_row_ordinal": 1,
+            "provider_source_event_id": provider_event.source_event_id,
+            "expected_provider_source_row_sha256": provider_event.source_row_sha256,
+            "expected_current_decision_key": provider_decision.decision_key,
+            "expected_current_decision_payload_sha256": (provider_decision.decision_payload_sha256),
+        }
+    ]
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def test_manifest_requires_stable_unique_source_row_ordinals(session, tmp_path):
@@ -893,3 +999,254 @@ def test_later_provider_transaction_supersedes_statement_supplement(session, tmp
         )
     )
     assert {row.membership_kind for row in memberships} == {"created", "superseded"}
+
+
+def test_statement_evidence_supersedes_provider_unresolved_without_double_counting(
+    session,
+    tmp_path,
+):
+    account = _account(session)
+    flow_date = date(2025, 1, 2)
+    provider_transaction = _transaction(
+        account.account_id,
+        "ambiguous-provider-target",
+        flow_date,
+        "100.00",
+        "provider_specific_cash",
+    )
+    session.add(provider_transaction)
+    session.commit()
+    provider_event, provider_decision = _provider_unresolved(session, account, provider_transaction)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [
+            _event(
+                1,
+                flow_date.isoformat(),
+                "100.00",
+                "external_in",
+                resolution=_existing_resolution(provider_transaction),
+            )
+        ],
+    )
+    _add_provider_unresolved_resolution(source, provider_event, provider_decision)
+
+    plan = build_reconciliation_plan(session, [source])
+
+    assert plan.conflict_count == 0
+    assert len(plan.provider_unresolved_resolutions) == 1
+    assert plan.provider_unresolved_resolutions[0].status == "supersession_required"
+    apply_reconciliation_plan(
+        session,
+        plan,
+        expected_plan_digest=plan.plan_digest,
+        approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+        software_revision="a" * 40,
+        backup_reference="private:backup:before",
+        preview_reference="private:preview:approved",
+    )
+
+    current_provider_decision = session.scalar(
+        select(CashFlowReconciliationDecision).where(
+            CashFlowReconciliationDecision.source_event_id == provider_event.source_event_id,
+            CashFlowReconciliationDecision.superseded_at.is_(None),
+        )
+    )
+    assert current_provider_decision is not None
+    assert provider_decision.superseded_by_decision_key == current_provider_decision.decision_key
+    assert current_provider_decision.decision_authority == "owner_approved"
+    assert current_provider_decision.resolution_kind == "provider_exact"
+    assert current_provider_decision.target_transaction_id == (
+        provider_transaction.plaid_investment_transaction_id
+    )
+    assert current_provider_decision.effective_date_basis == "owner_resolved"
+
+    ledger = build_external_flow_ledger(
+        session,
+        flow_date - timedelta(days=1),
+        flow_date,
+        account_ids=frozenset({account.account_id}),
+    )
+    assert ledger.issues == ()
+    assert ledger.net_external_cashflow_in == Decimal("100.00")
+    assert len(ledger.entries) == 1
+    assert set(ledger.entries[0].source_event_ids) == {
+        provider_event.source_event_id,
+        plan.entries[0].source_event_id,
+    }
+
+    coverage = assess_cashflow_source_coverage(
+        session,
+        flow_date - timedelta(days=1),
+        flow_date,
+        account_ids=frozenset({account.account_id}),
+    )
+    assert coverage.is_complete is True
+    applied_run = session.scalar(
+        select(CashFlowReconciliationRun).where(
+            CashFlowReconciliationRun.plan_digest == plan.plan_digest
+        )
+    )
+    assert applied_run is not None
+    memberships = tuple(
+        session.scalars(
+            select(CashFlowReconciliationRunDecision).where(
+                CashFlowReconciliationRunDecision.run_id == applied_run.run_id
+            )
+        )
+    )
+    assert {row.membership_kind for row in memberships} == {"created", "superseded"}
+    assert len(memberships) == 3
+
+    rerun = build_reconciliation_plan(session, [source])
+    assert rerun.conflict_count == 0
+    assert rerun.provider_unresolved_resolutions[0].status == "existing_exact"
+    assert rerun.planned_mutation_count == 0
+
+
+def test_provider_unresolved_resolution_rejects_non_provider_current_decision(
+    session,
+    tmp_path,
+):
+    account = _account(session)
+    provider_transaction = _transaction(
+        account.account_id,
+        "not-provider-owned",
+        date(2025, 1, 2),
+        "100.00",
+        "provider_specific_cash",
+    )
+    session.add(provider_transaction)
+    session.commit()
+    provider_event, provider_decision = _provider_unresolved(session, account, provider_transaction)
+    provider_decision.decision_authority = "owner_approved"
+    provider_decision.decision_payload_sha256 = canonical_decision_payload_sha256(provider_decision)
+    session.commit()
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [
+            _event(
+                1,
+                "2025-01-02",
+                "100.00",
+                "external_in",
+                resolution=_existing_resolution(provider_transaction),
+            )
+        ],
+    )
+    _add_provider_unresolved_resolution(source, provider_event, provider_decision)
+
+    plan = build_reconciliation_plan(session, [source])
+
+    assert plan.conflict_count == 1
+    assert plan.provider_unresolved_resolutions[0].reason_code == (
+        "provider_unresolved_current_decision_not_provider_created"
+    )
+    assert session.scalar(select(func.count()).select_from(CashFlowReconciliationRun)) == 0
+
+
+def test_provider_unresolved_resolution_rejects_conflicting_statement_evidence(
+    session,
+    tmp_path,
+):
+    account = _account(session)
+    provider_transaction = _transaction(
+        account.account_id,
+        "conflicting-statement-target",
+        date(2025, 1, 2),
+        "100.00",
+        "provider_specific_cash",
+    )
+    session.add(provider_transaction)
+    session.commit()
+    provider_event, provider_decision = _provider_unresolved(session, account, provider_transaction)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [
+            _event(
+                1,
+                "2025-01-02",
+                "100.00",
+                "external_in",
+                resolution=_existing_resolution(provider_transaction),
+            ),
+            _event(
+                2,
+                "2025-01-02",
+                "-100.00",
+                "external_out",
+                resolution=_existing_resolution(provider_transaction),
+            ),
+        ],
+    )
+    _add_provider_unresolved_resolution(source, provider_event, provider_decision)
+
+    plan = build_reconciliation_plan(session, [source])
+
+    assert plan.conflict_count == 3
+    assert all(
+        entry.reason_code == "shared_transaction_classification_conflict" for entry in plan.entries
+    )
+    assert plan.provider_unresolved_resolutions[0].status == "conflict"
+    assert plan.provider_unresolved_resolutions[0].reason_code == (
+        "provider_resolution_evidence_target_unavailable"
+    )
+    assert session.scalar(select(func.count()).select_from(CashFlowReconciliationRun)) == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "reason_code"),
+    [
+        (
+            "expected_provider_source_row_sha256",
+            "provider_unresolved_source_row_digest_mismatch",
+        ),
+        (
+            "expected_current_decision_payload_sha256",
+            "provider_unresolved_current_decision_digest_mismatch",
+        ),
+    ],
+)
+def test_provider_unresolved_resolution_is_bound_to_existing_digests(
+    session,
+    tmp_path,
+    field,
+    reason_code,
+):
+    account = _account(session)
+    provider_transaction = _transaction(
+        account.account_id,
+        "digest-bound-provider-target",
+        date(2025, 1, 2),
+        "100.00",
+        "provider_specific_cash",
+    )
+    session.add(provider_transaction)
+    session.commit()
+    provider_event, provider_decision = _provider_unresolved(session, account, provider_transaction)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [
+            _event(
+                1,
+                "2025-01-02",
+                "100.00",
+                "external_in",
+                resolution=_existing_resolution(provider_transaction),
+            )
+        ],
+    )
+    _add_provider_unresolved_resolution(source, provider_event, provider_decision)
+    payload = json.loads(source.manifest_path.read_text(encoding="utf-8"))
+    payload["provider_unresolved_resolutions"][0][field] = "0" * 64
+    source.manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = build_reconciliation_plan(session, [source])
+
+    assert plan.conflict_count == 1
+    assert plan.provider_unresolved_resolutions[0].reason_code == reason_code
+    assert session.scalar(select(func.count()).select_from(CashFlowReconciliationRun)) == 0

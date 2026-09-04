@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from portfolio_tracker.models import (
     Account,
     AccountValuationObservation,
@@ -61,6 +63,7 @@ def _valuation_row(
     source_record_id: str,
     fetched_at: datetime,
     is_complete: bool = True,
+    as_of_at: datetime | None = None,
 ) -> AccountValuationObservation:
     value = NewAccountValuationObservation(
         account_id=account_id,
@@ -76,6 +79,7 @@ def _valuation_row(
         fetched_at=fetched_at,
         is_complete=is_complete,
         is_empty=False,
+        as_of_at=as_of_at,
     )
     return AccountValuationObservation(
         observation_key=account_valuation_observation_key(value),
@@ -93,6 +97,7 @@ def _valuation_row(
         fetched_at=value.fetched_at,
         is_complete=value.is_complete,
         is_empty=value.is_empty,
+        as_of_at=value.as_of_at,
     )
 
 
@@ -340,7 +345,24 @@ def test_legacy_and_v1_default_performance_windows_are_identical(client, session
     assert versioned.json()["series"] == legacy.json()
 
 
-def test_complete_account_totals_supply_exact_boundaries_and_receipt_keys(client, session) -> None:
+@pytest.mark.parametrize(
+    ("capture_date_basis", "expected_certification", "expected_reason_codes"),
+    [
+        (False, "observed_certified", []),
+        (
+            True,
+            "source_provisional",
+            ["provider_valuation_as_of_unasserted"],
+        ),
+    ],
+)
+def test_complete_account_totals_supply_boundaries_and_receipt_keys(
+    client,
+    session,
+    capture_date_basis: bool,
+    expected_certification: str,
+    expected_reason_codes: list[str],
+) -> None:
     start = date(2026, 8, 3)
     end = date(2026, 8, 28)
     item = Item(
@@ -362,18 +384,28 @@ def test_complete_account_totals_supply_exact_boundaries_and_receipt_keys(client
         as_of_date=start,
         total_value=Decimal(1000),
         source_provider="snaptrade",
-        source_reference="account.balance.total",
+        source_reference=(
+            "account.balance.total;cached_as_fetched_no_provider_as_of"
+            if capture_date_basis
+            else "account.balance.total"
+        ),
         source_record_id=f"balance-{start.isoformat()}",
         fetched_at=datetime(2026, 8, 29, tzinfo=UTC),
+        as_of_at=None if capture_date_basis else datetime(2026, 8, 3, 20, tzinfo=UTC),
     )
     closing = _valuation_row(
         account_id=account.account_id,
         as_of_date=end,
         total_value=Decimal(1100),
         source_provider="snaptrade",
-        source_reference="account.balance.total",
+        source_reference=(
+            "account.balance.total;cached_as_fetched_no_provider_as_of"
+            if capture_date_basis
+            else "account.balance.total"
+        ),
         source_record_id=f"balance-{end.isoformat()}",
         fetched_at=datetime(2026, 8, 29, tzinfo=UTC),
+        as_of_at=None if capture_date_basis else datetime(2026, 8, 28, 20, tzinfo=UTC),
     )
     session.add_all([opening, closing])
     session.add(
@@ -398,6 +430,7 @@ def test_complete_account_totals_supply_exact_boundaries_and_receipt_keys(client
             cashflow_candidate_count=0,
             source_event_set_sha256=canonical_source_event_set_sha256(()),
             manifest_sha256="e" * 64,
+            broker_archive_coverage="provider_asserted",
         )
     )
     session.add_all(
@@ -429,6 +462,8 @@ def test_complete_account_totals_supply_exact_boundaries_and_receipt_keys(client
     assert versioned.json()["series"] == payload
     assert payload["base_value"] == "1000.000000"
     assert payload["calculation_status"] == "available"
+    assert payload["reconstruction_certification"] == expected_certification
+    assert payload["calculation_reason_codes"] == expected_reason_codes
     assert payload["opening_value_provenance"] == "observed_account_valuation"
     assert payload["ending_value_provenance"] == "observed_account_valuation"
     assert payload["opening_valuation_observation_keys"] == [opening.observation_key]
