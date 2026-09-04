@@ -374,7 +374,6 @@ def _verify_backup(
 
 def _validate_approval(
     plan: ProviderTransactionCorrectionPlan,
-    capture: ProviderAccountTransactionCapture,
     approval: ProviderTransactionCorrectionApproval,
 ) -> datetime:
     if approval.expected_plan_digest != plan.plan_digest:
@@ -392,13 +391,6 @@ def _validate_approval(
     if approved_at.tzinfo is None or approved_at.utcoffset() is None:
         raise ProviderTransactionCorrectionError("approval_timestamp_timezone_missing")
     normalized = approved_at.astimezone(UTC)
-    captured_at = (
-        capture.captured_at.replace(tzinfo=UTC)
-        if capture.captured_at.tzinfo is None
-        else capture.captured_at.astimezone(UTC)
-    )
-    if normalized < captured_at:
-        raise ProviderTransactionCorrectionError("approval_predates_provider_capture")
     if (
         len(str(approval.backup_path.resolve())) > 512
         or len(str(approval.preview_path.resolve())) > 512
@@ -447,7 +439,10 @@ def apply_provider_transaction_corrections(
     """Apply the exact preview atomically without committing the caller session."""
     if not plan.corrections:
         raise ProviderTransactionCorrectionError("correction_plan_has_no_mutations")
-    approved_at = _validate_approval(plan, capture, approval)
+    approved_at = _validate_approval(plan, approval)
+    applied_at = datetime.now(UTC)
+    if approved_at > applied_at:
+        raise ProviderTransactionCorrectionError("approval_timestamp_is_in_the_future")
     existing_run = session.scalar(
         select(CashFlowReconciliationRun).where(
             CashFlowReconciliationRun.plan_digest == plan.plan_digest
@@ -491,7 +486,7 @@ def apply_provider_transaction_corrections(
             applied_mutation_count=len(plan.corrections),
             status="applied",
             approved_at=approved_at,
-            applied_at=approved_at,
+            applied_at=applied_at,
         )
     )
     session.flush()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -220,9 +221,10 @@ def test_apply_requires_verified_backup_then_persists_append_only_receipt(
         preview=preview,
         preview_sha256=preview_sha256,
     )
+    rerun_capture = replace(capture, captured_at=_CAPTURED + timedelta(hours=2))
     result = persist_provider_account_attestation_with_correction_approvals(
         session,
-        capture,
+        rerun_capture,
         {plan.plan_digest: approval},
     )
     session.flush()
