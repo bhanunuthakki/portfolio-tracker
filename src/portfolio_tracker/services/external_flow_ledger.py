@@ -163,6 +163,14 @@ class ExternalFlowLedger:
     account_ids: frozenset[int]
     entries: tuple[ExternalFlowEntry, ...]
     issues: tuple[ExternalFlowIssue, ...] = ()
+    # Any transaction ever governed by provenance remains managed even when
+    # its current decision is excluded or invalid and therefore emits no row.
+    # Transaction read models use this set to avoid falling back to a legacy
+    # heuristic that the canonical ledger has explicitly superseded.
+    provenance_target_ids: frozenset[str] = frozenset()
+    # Valid current provenance classifications, including `excluded` rows that
+    # deliberately do not emit a ledger entry.
+    provenance_transaction_classifications: tuple[tuple[str, str], ...] = ()
 
     def require_complete(self) -> None:
         if self.issues:
@@ -637,6 +645,7 @@ def build_external_flow_ledger(
     transfer_components: list[_ShareTransferComponent] = []
     issues: list[ExternalFlowIssue] = list(provenance_issues)
     seen_managed_targets: set[str] = set()
+    provenance_classifications: dict[str, str] = {}
 
     for transaction, account, item, security in rows:
         transaction_id = transaction.plaid_investment_transaction_id
@@ -683,6 +692,7 @@ def build_external_flow_ledger(
                     )
                 )
                 continue
+            provenance_classifications[transaction_id] = cast(str, decision.classification)
             if decision.classification == "excluded":
                 continue
             classification = cast(FlowClassification, decision.classification)
@@ -875,8 +885,54 @@ def build_external_flow_ledger(
     issues.extend(synthesized_issues)
     entries.sort(key=lambda entry: (entry.date, entry.flow_id), reverse=True)
     return ExternalFlowLedger(
-        start_date, end_date, frozenset(accounts), tuple(entries), tuple(issues)
+        start_date,
+        end_date,
+        frozenset(accounts),
+        tuple(entries),
+        tuple(issues),
+        provenance_target_ids,
+        tuple(sorted(provenance_classifications.items())),
     )
+
+
+def effective_transaction_classifications(
+    session: Session,
+    transactions: tuple[InvestmentTransaction, ...],
+    *,
+    account_ids: frozenset[int],
+) -> dict[str, str | None]:
+    """Project transaction rows through the canonical cash-flow authority.
+
+    Provenance decisions can supersede the legacy override/name/subtype rules,
+    including by excluding a row or withholding it after failed validation.
+    Build the same ledger consumed by performance over the full persisted date
+    domain, then use heuristics only for transactions that have never been
+    provenance-managed.
+    """
+    if not transactions:
+        return {}
+    ledger = build_external_flow_ledger(
+        session,
+        date.min,
+        date.max,
+        account_ids=account_ids,
+    )
+    canonical = dict(ledger.provenance_transaction_classifications)
+    overrides = load_transaction_overrides(session)
+    return {
+        transaction.plaid_investment_transaction_id: (
+            canonical.get(transaction.plaid_investment_transaction_id)
+            if transaction.plaid_investment_transaction_id in ledger.provenance_target_ids
+            else effective_classification(
+                transaction.type,
+                transaction.subtype,
+                overrides.get(transaction.plaid_investment_transaction_id),
+                amount=Decimal(transaction.amount or 0),
+                name=transaction.name,
+            )
+        )
+        for transaction in transactions
+    }
 
 
 def _synthesized_share_transfer_entries(

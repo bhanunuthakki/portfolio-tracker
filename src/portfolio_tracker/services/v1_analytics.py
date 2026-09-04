@@ -87,7 +87,7 @@ def _analytics_meta(
 
 
 class PerformanceV1Result(BaseModel):
-    """Modified-Dietz TWR vs cashflow-matched benchmark counterfactuals."""
+    """Money-weighted Modified Dietz vs cashflow-matched counterfactuals."""
 
     meta: V1Meta
     series: PerformanceSeries

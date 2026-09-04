@@ -43,7 +43,7 @@ from portfolio_tracker.services.beta import BetaResult
 from portfolio_tracker.services.cashflow_source_coverage import assess_cashflow_source_coverage
 from portfolio_tracker.services.external_flow_ledger import (
     build_external_flow_ledger,
-    effective_classification,
+    effective_transaction_classifications,
     load_transaction_overrides,
 )
 
@@ -284,6 +284,12 @@ def transactions(
     ).all()
 
     overrides = load_transaction_overrides(session)
+    transaction_rows = tuple(t for t, _a, _s in rows)
+    effective_classifications = effective_transaction_classifications(
+        session,
+        transaction_rows,
+        account_ids=accts,
+    )
     return [
         InvestmentTransactionOut(
             plaid_investment_transaction_id=t.plaid_investment_transaction_id,
@@ -301,12 +307,8 @@ def transactions(
             subtype=t.subtype,
             currency=t.currency,
             override_classification=overrides.get(t.plaid_investment_transaction_id),
-            effective_classification=effective_classification(
-                t.type,
-                t.subtype,
-                overrides.get(t.plaid_investment_transaction_id),
-                amount=Decimal(t.amount) if t.amount is not None else None,
-                name=t.name,
+            effective_classification=effective_classifications.get(
+                t.plaid_investment_transaction_id
             ),
         )
         for t, a, s in rows

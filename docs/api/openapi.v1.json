@@ -1448,7 +1448,7 @@
         "type": "object"
       },
       "DataQualityFindingOut": {
-        "description": "A single data-quality issue surfaced for the user.\n\n`severity` ranks user attention:\n  * `info`    \u2014 known limitation, no action required (e.g., SoFi\n                doesn't expose cost basis through Plaid).\n  * `warning` \u2014 affects accuracy of derived metrics (TWR, P&L)\n                but the rest of the data is fine.\n  * `error`   \u2014 broken contract; something needs fixing.\n\n`recommended_action` is rendered on the UI as the next-step text.",
+        "description": "A single data-quality issue surfaced for the user.\n\n`severity` ranks user attention:\n  * `info`    \u2014 known limitation, no action required (e.g., SoFi\n                doesn't expose cost basis through Plaid).\n  * `warning` \u2014 affects accuracy of derived metrics (returns, P&L)\n                but the rest of the data is fine.\n  * `error`   \u2014 broken contract; something needs fixing.\n\n`recommended_action` is rendered on the UI as the next-step text.",
         "properties": {
           "category": {
             "title": "Category",
@@ -2777,7 +2777,7 @@
         "type": "object"
       },
       "PerformanceV1Result": {
-        "description": "Modified-Dietz TWR vs cashflow-matched benchmark counterfactuals.",
+        "description": "Money-weighted Modified Dietz vs cashflow-matched counterfactuals.",
         "properties": {
           "meta": {
             "$ref": "#/components/schemas/V1Meta"
@@ -5001,7 +5001,7 @@
     },
     "/api/v1/analytics/performance": {
       "get": {
-        "description": "Modified-Dietz TWR + benchmark counterfactuals (same calculation as the\nlegacy `/api/portfolio/performance`, now enveloped and versioned).",
+        "description": "Money-weighted Modified Dietz + benchmark counterfactuals (same\ncalculation as the legacy `/api/portfolio/performance`, now enveloped and\nversioned).",
         "operationId": "analytics_performance_api_v1_analytics_performance_get",
         "parameters": [
           {

@@ -123,7 +123,7 @@ class ConsolidatedHoldingOut(BaseModel):
     the actual blended per-share cost across the user's accounts. None when
     we don't have cost basis from any account or when total_quantity is 0.
 
-    Returns / TWR continue to be computed at the per-account level inside
+    Returns continue to be computed at the per-account level inside
     the `services/performance.py` pipeline; this consolidation is a
     presentation-layer rollup only.
     """
@@ -163,10 +163,10 @@ class InvestmentTransactionOut(BaseModel):
     # User-set override (None if no override). One of:
     #   external_in / external_out / internal
     override_classification: str | None = None
-    # The classification actually used by the cashflow / TWR pipeline.
-    # Same as override_classification when set; otherwise derived from
-    # type+subtype heuristics. Useful for the UI to show "what's the
-    # pipeline doing with this row right now."
+    # The classification actually used by the Modified Dietz cash-flow
+    # pipeline. A current provenance decision wins; otherwise this is the
+    # owner override or deterministic name/type/subtype classification.
+    # `excluded` is possible for a provenance-managed non-flow event.
     effective_classification: str | None = None
 
 
@@ -520,7 +520,7 @@ class DataQualityFindingOut(BaseModel):
     `severity` ranks user attention:
       * `info`    — known limitation, no action required (e.g., SoFi
                     doesn't expose cost basis through Plaid).
-      * `warning` — affects accuracy of derived metrics (TWR, P&L)
+      * `warning` — affects accuracy of derived metrics (returns, P&L)
                     but the rest of the data is fine.
       * `error`   — broken contract; something needs fixing.
 

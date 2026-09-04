@@ -10,13 +10,13 @@ Resources:
   * ``GET /api/v1/accounts``             — canonical accounts + detailed Tax treatment
   * ``GET /api/v1/portfolio-snapshot``   — the bulk consumer read model
   * ``GET /api/v1/transactions``         — cursor-paginated normalized transactions
-  * ``GET /api/v1/cash-flows``           — TWR-classified external/internal flows
+  * ``GET /api/v1/cash-flows``           — return-classified external/internal flows
   * ``GET /api/v1/position-snapshots``   — historical observed holdings
   * ``GET /api/v1/securities``           — security master + Classification
   * ``GET /api/v1/data-quality``         — machine-readable data-quality findings
   * ``GET /api/v1/valuation-observations/{key}`` — sanitized valuation provenance
   * ``GET /api/v1/analytics/positioning``— Positioning cuts + equity fraction
-  * ``GET /api/v1/analytics/performance``— Modified-Dietz TWR vs benchmarks
+  * ``GET /api/v1/analytics/performance``— money-weighted Modified Dietz vs benchmarks
   * ``GET /api/v1/analytics/position-performance`` — fail-closed position comparison
   * ``GET /api/v1/analytics/risk``       — beta/volatility + drawdown together
   * ``GET /api/v1/analytics/beta``       — the regression half alone
@@ -357,8 +357,9 @@ def analytics_performance(
     reserve_amount: float = Query(default=0.0, ge=0),
     exclude_index_etfs: bool = Query(default=False),
 ) -> PerformanceV1Result:
-    """Modified-Dietz TWR + benchmark counterfactuals (same calculation as the
-    legacy `/api/portfolio/performance`, now enveloped and versioned)."""
+    """Money-weighted Modified Dietz + benchmark counterfactuals (same
+    calculation as the legacy `/api/portfolio/performance`, now enveloped and
+    versioned)."""
     start_date, end_date = performance_service.resolve_performance_window(
         session,
         start_date,

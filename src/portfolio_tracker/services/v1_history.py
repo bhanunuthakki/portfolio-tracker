@@ -43,7 +43,7 @@ from portfolio_tracker.services.cashflow_source_coverage import (
 )
 from portfolio_tracker.services.external_flow_ledger import (
     build_external_flow_ledger,
-    effective_classification,
+    effective_transaction_classifications,
     load_transaction_overrides,
 )
 from portfolio_tracker.services.performance import performance_account_ids
@@ -138,7 +138,7 @@ class TransactionV1(BaseModel):
     type: str
     subtype: str | None
     currency: str
-    # User override (None if none) and the classification the TWR pipeline
+    # User override (None if none) and the classification the return pipeline
     # actually uses (override wins; else heuristic).
     override_classification: str | None
     effective_classification: str | None
@@ -219,6 +219,11 @@ def build_transactions_page(
 
     overrides = load_transaction_overrides(session)
     page = rows[:limit]
+    effective_classifications = effective_transaction_classifications(
+        session,
+        tuple(t for t, _a, _s in page),
+        account_ids=accts,
+    )
     out: list[TransactionV1] = []
     for t, a, s in page:
         out.append(
@@ -238,12 +243,8 @@ def build_transactions_page(
                 subtype=t.subtype,
                 currency=t.currency,
                 override_classification=overrides.get(t.plaid_investment_transaction_id),
-                effective_classification=effective_classification(
-                    t.type,
-                    t.subtype,
-                    overrides.get(t.plaid_investment_transaction_id),
-                    amount=Decimal(t.amount) if t.amount is not None else None,
-                    name=t.name,
+                effective_classification=effective_classifications.get(
+                    t.plaid_investment_transaction_id
                 ),
             )
         )
@@ -273,7 +274,7 @@ class CashFlowV1(BaseModel):
     type: str
     subtype: str | None
     amount: Decimal
-    # Signed flow INTO the portfolio as the TWR pipeline sees it (positive =
+    # Signed flow INTO the portfolio as the Modified Dietz pipeline sees it (positive =
     # money entered). Zero for internal events.
     signed_external_amount: Decimal
     classification: str  # external_in | external_out | internal

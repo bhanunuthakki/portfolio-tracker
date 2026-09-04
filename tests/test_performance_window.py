@@ -31,6 +31,7 @@ from portfolio_tracker.services.cashflow_source_coverage import (
 from portfolio_tracker.services.performance import (
     _complete_account_valuations_by_date,
     _daily_portfolio_value_assessment,
+    benchmark_source_date,
     resolve_performance_window,
 )
 
@@ -488,6 +489,92 @@ def test_complete_account_totals_supply_boundaries_and_receipt_keys(
     assert "source_reference" not in provenance_payload
     assert "source_record_id" not in provenance_payload
     assert "total_value" not in provenance_payload
+
+
+@pytest.mark.parametrize("lookback_days", [90, 180, 365, 730])
+def test_first_class_lookback_horizons_have_legacy_v1_parity_and_exact_receipts(
+    client,
+    session,
+    lookback_days: int,
+) -> None:
+    end = date(2026, 8, 28)
+    start = end - timedelta(days=lookback_days)
+    account = _seed_snapshot_account(session, account_key=f"horizon-{lookback_days}")
+    opening = _valuation_row(
+        account_id=account.account_id,
+        as_of_date=start,
+        total_value=Decimal(1000),
+        source_provider="snaptrade",
+        source_reference="account.balance.total",
+        source_record_id=f"horizon-{lookback_days}-start",
+        fetched_at=datetime(2026, 8, 29, tzinfo=UTC),
+        as_of_at=datetime(start.year, start.month, start.day, 20, tzinfo=UTC),
+    )
+    closing = _valuation_row(
+        account_id=account.account_id,
+        as_of_date=end,
+        total_value=Decimal(1100),
+        source_provider="snaptrade",
+        source_reference="account.balance.total",
+        source_record_id=f"horizon-{lookback_days}-end",
+        fetched_at=datetime(2026, 8, 29, tzinfo=UTC),
+        as_of_at=datetime(end.year, end.month, end.day, 20, tzinfo=UTC),
+    )
+    session.add_all([opening, closing])
+    session.add(
+        CashFlowSourceAttestation(
+            attestation_key=f"horizon-{lookback_days}-coverage",
+            account_id=account.account_id,
+            coverage_start=start + timedelta(days=1),
+            coverage_end=end,
+            source_type="provider_export",
+            broker_archive_coverage="provider_asserted",
+            source_reference=f"synthetic:horizon-{lookback_days}",
+            source_sha256="a" * 64,
+            captured_at=datetime(2026, 8, 29, tzinfo=UTC),
+            approved_at=datetime(2026, 8, 29, tzinfo=UTC),
+            methodology_version="1",
+            account_identity_sha256="b" * 64,
+            account_mapping_basis="owner_confirmed",
+            account_mapping_confidence="exact",
+            source_format="synthetic",
+            parser_version="test-v1",
+            source_timezone="UTC",
+            source_row_count=0,
+            cashflow_candidate_count=0,
+            source_event_set_sha256=canonical_source_event_set_sha256(()),
+            manifest_sha256="c" * 64,
+        )
+    )
+    session.add_all(
+        Benchmark(
+            symbol=symbol,
+            date=source_date,
+            close=price,
+            total_return_close=price,
+        )
+        for symbol in ("SPY", "QQQ")
+        for source_date, price in (
+            (benchmark_source_date(start), Decimal(100)),
+            (benchmark_source_date(end), Decimal(110)),
+        )
+    )
+    session.commit()
+
+    params = {"start_date": start.isoformat(), "end_date": end.isoformat()}
+    legacy = client.get("/api/portfolio/performance", params=params)
+    versioned = client.get("/api/v1/analytics/performance", params=params)
+
+    assert legacy.status_code == 200
+    assert versioned.status_code == 200
+    payload = legacy.json()
+    assert versioned.json()["series"] == payload
+    assert payload["calculation_status"] == "available"
+    assert payload["reconstruction_certification"] == "observed_certified"
+    assert payload["start_date"] == start.isoformat()
+    assert payload["end_date"] == end.isoformat()
+    assert payload["equation_receipt"]["requested_start_date"] == start.isoformat()
+    assert payload["equation_receipt"]["requested_end_date"] == end.isoformat()
 
 
 def test_tampered_account_valuation_is_rejected_by_calculation_and_receipt_api(

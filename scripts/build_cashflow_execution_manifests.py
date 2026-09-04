@@ -180,7 +180,14 @@ class EvidenceInventory(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     account_id: int = Field(gt=0)
-    account_identity_sha256: str | None = None
+    account_identity_sha256: str
+    account_mapping_basis: Literal[
+        "provider_account_id",
+        "statement_account_identifier",
+        "owner_confirmed",
+    ]
+    account_mapping_confidence: Literal["exact", "high", "provisional"]
+    account_mapping_evidence_sha256: str
     coverage_start: date
     coverage_end: date
     source_type: Literal["brokerage_statement", "provider_export", "owner_reconciliation"] = (
@@ -192,11 +199,13 @@ class EvidenceInventory(BaseModel):
     gaps: list[EvidenceGap] = Field(default_factory=list[EvidenceGap])
     events: list[EvidenceEvent] = Field(default_factory=list[EvidenceEvent])
 
-    @field_validator("account_identity_sha256", "source_document_sha256")
+    @field_validator(
+        "account_identity_sha256",
+        "account_mapping_evidence_sha256",
+        "source_document_sha256",
+    )
     @classmethod
-    def validate_sha256(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
+    def validate_sha256(cls, value: str) -> str:
         if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
             raise ValueError("expected lowercase SHA-256")
         return value
@@ -272,6 +281,25 @@ def _sha256(payload: bytes) -> str:
 def _digest(payload: object) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return _sha256(encoded)
+
+
+def _account_mapping_evidence_sha256(
+    *,
+    account_identity_sha256: str,
+    account_mapping_basis: str,
+    account_mapping_confidence: str,
+    source_document_sha256: str,
+) -> str:
+    """Commit to the complete account-mapping assertion in reproducible form."""
+    return _digest(
+        {
+            "identity_version": "cashflow_account_mapping.v1",
+            "account_identity_sha256": account_identity_sha256,
+            "account_mapping_basis": account_mapping_basis,
+            "account_mapping_confidence": account_mapping_confidence,
+            "source_document_sha256": source_document_sha256,
+        }
+    )
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -704,11 +732,16 @@ def _verify_account(session: Session, inventory: EvidenceInventory) -> str:
     if account is None:
         raise BuildError("account_not_found")
     actual_fingerprint = _sha256(account.plaid_account_id.encode())
-    if (
-        inventory.account_identity_sha256 is not None
-        and actual_fingerprint != inventory.account_identity_sha256
-    ):
+    if actual_fingerprint != inventory.account_identity_sha256:
         raise BuildError("account_identity_mismatch")
+    expected_mapping_evidence = _account_mapping_evidence_sha256(
+        account_identity_sha256=inventory.account_identity_sha256,
+        account_mapping_basis=inventory.account_mapping_basis,
+        account_mapping_confidence=inventory.account_mapping_confidence,
+        source_document_sha256=inventory.source_document_sha256,
+    )
+    if inventory.account_mapping_evidence_sha256 != expected_mapping_evidence:
+        raise BuildError("account_mapping_evidence_mismatch")
     active = session.scalar(
         select(Item.item_id).where(
             Item.item_id == account.item_id,
@@ -877,8 +910,8 @@ def _build_document(
         "schema_version": schema_version,
         "account_id": inventory.account_id,
         "account_identity_sha256": account_identity_sha256,
-        "account_mapping_basis": "provider_account_id",
-        "account_mapping_confidence": "exact",
+        "account_mapping_basis": inventory.account_mapping_basis,
+        "account_mapping_confidence": inventory.account_mapping_confidence,
         "coverage_start": inventory.coverage_start.isoformat(),
         "coverage_end": inventory.coverage_end.isoformat(),
         "requested_return_start": requested_return_start.isoformat(),

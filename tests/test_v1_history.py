@@ -1,5 +1,5 @@
 """Contract tests for the Slice-2 `/api/v1` history + analytics resources:
-cursor pagination (no silent caps), TWR-consistent cash-flow classification,
+cursor pagination (no silent caps), canonical cash-flow classification,
 position-snapshot origin markers, the securities master, structured cursor
 errors, and deprecation headers on superseded legacy endpoints.
 """
@@ -11,7 +11,9 @@ from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
+    CashFlowReconciliationDecision,
     CashFlowSourceAttestation,
+    CashFlowSourceEvent,
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
@@ -21,7 +23,10 @@ from portfolio_tracker.models import (
     Security,
     TransactionOverride,
 )
-from portfolio_tracker.services.cashflow_source_coverage import canonical_source_event_set_sha256
+from portfolio_tracker.services.cashflow_source_coverage import (
+    canonical_decision_payload_sha256,
+    canonical_source_event_set_sha256,
+)
 
 _TODAY = date.today()
 _FRESH = _TODAY - timedelta(days=1)
@@ -155,6 +160,63 @@ def test_transactions_pagination_no_silent_cap(client, session):
     assert by_id["t4"]["effective_classification"] == "external_out"
     assert by_id["t2"]["effective_classification"] == "internal"  # dividend name hint
     assert by_id["t1"]["effective_classification"] is None  # buy: not cashflow-shaped
+
+
+def test_transaction_resources_project_current_provenance_classification(client, session):
+    account = _seed(session)
+    attestation = session.query(CashFlowSourceAttestation).one()
+    event = CashFlowSourceEvent(
+        source_event_id="1" * 64,
+        attestation_id=attestation.attestation_id,
+        source_record_id="t4",
+        source_locator_kind="provider_record",
+        source_locator="provider:t4",
+        source_row_ordinal=None,
+        source_page=None,
+        source_line=None,
+        source_row_sha256="2" * 64,
+        activity_date=_FRESH,
+        process_date=None,
+        settlement_date=None,
+        source_amount=Decimal(200),
+        source_amount_sign_basis="provider_reported",
+        currency="USD",
+        source_code="withdrawal",
+    )
+    decision = CashFlowReconciliationDecision(
+        decision_key="3" * 64,
+        source_event_id=event.source_event_id,
+        target_transaction_id="t4",
+        resolution_kind="excluded",
+        classification="excluded",
+        signed_external_amount=Decimal(0),
+        effective_date=_FRESH,
+        effective_date_basis="provider_posting",
+        effective_timezone="UTC",
+        decision_authority="owner_approved",
+        confidence="exact",
+        assumption_code="owner_resolved_excluded_event",
+        methodology_version="2",
+        decision_payload_sha256="4" * 64,
+        approved_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+    decision.decision_payload_sha256 = canonical_decision_payload_sha256(decision)
+    attestation.source_row_count = 1
+    attestation.cashflow_candidate_count = 1
+    attestation.source_event_set_sha256 = canonical_source_event_set_sha256((event,))
+    session.add_all([event, decision])
+    session.commit()
+
+    legacy = client.get("/api/portfolio/transactions").json()
+    versioned = client.get("/api/v1/transactions").json()["transactions"]
+    legacy_t4 = next(row for row in legacy if row["plaid_investment_transaction_id"] == "t4")
+    versioned_t4 = next(row for row in versioned if row["transaction_id"] == "t4")
+
+    assert account.account_id == versioned_t4["account_id"]
+    assert legacy_t4["override_classification"] is None
+    assert versioned_t4["override_classification"] is None
+    assert legacy_t4["effective_classification"] == "excluded"
+    assert versioned_t4["effective_classification"] == "excluded"
 
 
 def test_cash_flows_match_twr_semantics(client, session):

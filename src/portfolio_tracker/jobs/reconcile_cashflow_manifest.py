@@ -3,8 +3,8 @@
 This job is deliberately a two-step writer.  ``build_reconciliation_plan`` is
 read-only and produces a deterministic digest.  ``apply_reconciliation_plan``
 requires that exact digest, revalidates every source and database precondition
-under a SQLite write lock, then commits transactions, overrides, attestations,
-and gaps as one unit.
+under a SQLite write lock, verifies a distinct digest-bound SQLite backup, then
+commits transactions, overrides, attestations, and gaps as one unit.
 
 Manifest contents are private, untrusted data.  The CLI and preview artifact
 therefore expose only counts, stable opaque hashes, statuses, and reason codes.
@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import tempfile
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -28,6 +29,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import quote
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -2800,6 +2802,112 @@ def _verify_applied_state(session: Session, plan: ReconciliationPlan) -> None:
         raise ReconciliationConflictError("manifest source changed during commit")
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        raise ReconciliationConflictError("backup_artifact_unavailable") from None
+    return digest.hexdigest()
+
+
+def _live_sqlite_path(session: Session) -> Path:
+    try:
+        rows = session.execute(text("PRAGMA database_list")).all()
+    except Exception:
+        raise ReconciliationConflictError("live_database_path_unavailable") from None
+    for _, name, filename in rows:
+        if name == "main" and filename:
+            return Path(cast(str, filename)).resolve()
+    raise ReconciliationConflictError("live_database_must_be_file_backed")
+
+
+def _database_revision(session: Session) -> tuple[str, ...]:
+    try:
+        revisions = tuple(
+            cast(str, revision)
+            for revision in session.execute(
+                text("SELECT version_num FROM alembic_version ORDER BY version_num")
+            ).scalars()
+        )
+    except Exception:
+        raise ReconciliationConflictError("live_database_revision_unavailable") from None
+    if len(revisions) != 1 or not revisions[0]:
+        raise ReconciliationConflictError("live_database_revision_invalid")
+    return revisions
+
+
+def _paths_alias(first: Path, second: Path) -> bool:
+    if first.resolve(strict=False) == second.resolve(strict=False):
+        return True
+    try:
+        return first.exists() and second.exists() and os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+def _expected_backup_sha256(reference: str) -> str:
+    if not reference.startswith("sha256:"):
+        raise ReconciliationConflictError("backup_reference_must_bind_sha256")
+    digest = reference.removeprefix("sha256:")
+    if not _SHA256_RE.fullmatch(digest):
+        raise ReconciliationConflictError("backup_reference_must_bind_sha256")
+    return digest
+
+
+def _verify_backup_artifact(
+    session: Session,
+    backup_path: Path,
+    backup_reference: str,
+) -> str:
+    """Verify one immutable SQLite recovery artifact and return its receipt reference."""
+    try:
+        resolved = backup_path.resolve(strict=True)
+    except OSError:
+        raise ReconciliationConflictError("backup_artifact_unavailable") from None
+    if not resolved.is_file():
+        raise ReconciliationConflictError("backup_artifact_unavailable")
+    live_path = _live_sqlite_path(session)
+    if _paths_alias(resolved, live_path):
+        raise ReconciliationConflictError("backup_must_be_distinct_from_live_database")
+    expected_sha256 = _expected_backup_sha256(backup_reference)
+    actual_sha256 = _file_sha256(resolved)
+    if actual_sha256 != expected_sha256:
+        raise ReconciliationConflictError("backup_digest_mismatch")
+    target_revision = _database_revision(session)
+    uri = f"file:{quote(resolved.as_posix(), safe='/:')}?mode=ro"
+    try:
+        with sqlite3.connect(uri, uri=True) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+            if integrity != ("ok",):
+                raise ReconciliationConflictError("backup_integrity_check_failed")
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ReconciliationConflictError("backup_foreign_key_check_failed")
+            backup_revision = tuple(
+                cast(str, row[0])
+                for row in connection.execute(
+                    "SELECT version_num FROM alembic_version ORDER BY version_num"
+                ).fetchall()
+            )
+    except ReconciliationConflictError:
+        raise
+    except sqlite3.Error:
+        raise ReconciliationConflictError("backup_not_valid_sqlite") from None
+    if backup_revision != target_revision:
+        raise ReconciliationConflictError("backup_schema_revision_mismatch")
+    receipt_reference = json.dumps(
+        {"path": str(resolved), "sha256": actual_sha256},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if len(receipt_reference) > 512:
+        raise ReconciliationConflictError("backup_receipt_reference_too_long")
+    return receipt_reference
+
+
 def apply_reconciliation_plan(
     session: Session,
     plan: ReconciliationPlan,
@@ -2807,6 +2915,7 @@ def apply_reconciliation_plan(
     expected_plan_digest: str | None = None,
     approved_at: datetime,
     software_revision: str,
+    backup_path: Path | None = None,
     backup_reference: str,
     preview_reference: str,
 ) -> ReconciliationResult:
@@ -2815,6 +2924,8 @@ def apply_reconciliation_plan(
         raise ReconciliationConflictError("exact plan digest approval is required")
     approved_at = _validate_approval_time(approved_at, plan.manifests)
     software_revision = _expect_string(software_revision, "software_revision", maximum=64)
+    if backup_path is None:
+        raise ReconciliationConflictError("explicit_backup_path_required")
     backup_reference = _expect_string(backup_reference, "backup_reference", maximum=512)
     preview_reference = _expect_string(preview_reference, "preview_reference", maximum=512)
     if plan.conflict_count:
@@ -2831,6 +2942,11 @@ def apply_reconciliation_plan(
             raise ReconciliationConflictError("reconciliation plan changed before commit")
         if locked_plan.conflict_count:
             raise ReconciliationConflictError("reconciliation plan contains conflicts")
+        verified_backup_reference = _verify_backup_artifact(
+            session,
+            backup_path,
+            backup_reference,
+        )
 
         applied_mutation_count = 0
         transaction_mutations: list[_TransactionMutationReceipt] = []
@@ -2940,7 +3056,7 @@ def apply_reconciliation_plan(
             locked_plan,
             approved_at=approved_at,
             software_revision=software_revision,
-            backup_reference=backup_reference,
+            backup_reference=verified_backup_reference,
             preview_reference=preview_reference,
             applied_mutation_count=applied_mutation_count,
         )
@@ -3163,7 +3279,11 @@ def _argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-plan-digest")
     parser.add_argument("--approved-at", type=_parse_cli_datetime)
     parser.add_argument("--software-revision")
-    parser.add_argument("--backup-reference")
+    parser.add_argument("--backup-path", type=Path)
+    parser.add_argument(
+        "--backup-reference",
+        help="expected backup bytes as sha256:<lowercase-hex-digest>",
+    )
     return parser
 
 
@@ -3177,13 +3297,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.expected_plan_digest,
             args.approved_at,
             args.software_revision,
+            args.backup_path,
             args.backup_reference,
             args.preview_path,
         )
     ):
         parser.error(
             "--commit requires --expected-plan-digest, --approved-at, "
-            "--software-revision, --backup-reference, and --preview-path"
+            "--software-revision, --backup-path, --backup-reference, and --preview-path"
         )
     sources = tuple(
         ManifestSource(Path(manifest_path), Path(source_path))
@@ -3208,6 +3329,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     expected_plan_digest=args.expected_plan_digest,
                     approved_at=args.approved_at,
                     software_revision=args.software_revision,
+                    backup_path=args.backup_path,
                     backup_reference=args.backup_reference,
                     preview_reference=preview_reference,
                 )

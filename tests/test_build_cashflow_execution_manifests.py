@@ -197,16 +197,27 @@ def _inputs(
             f"${event['signed_external_amount']}\n"
         )
     csv_path.write_text(header + "".join(rows), encoding="utf-8")
+    source_document_sha256 = _sha256(csv_path)
+    account_mapping_basis = "provider_account_id"
+    account_mapping_confidence = "exact"
     inventory = tmp_path / "private-inventory.json"
     inventory.write_text(
         json.dumps(
             {
                 "account_id": account_id,
                 "account_identity_sha256": fingerprint,
+                "account_mapping_basis": account_mapping_basis,
+                "account_mapping_confidence": account_mapping_confidence,
+                "account_mapping_evidence_sha256": builder._account_mapping_evidence_sha256(
+                    account_identity_sha256=fingerprint,
+                    account_mapping_basis=account_mapping_basis,
+                    account_mapping_confidence=account_mapping_confidence,
+                    source_document_sha256=source_document_sha256,
+                ),
                 "coverage_start": "2025-01-01",
                 "coverage_end": "2025-12-31",
                 "source_type": "brokerage_statement",
-                "source_document_sha256": _sha256(csv_path),
+                "source_document_sha256": source_document_sha256,
                 "captured_at": "2026-01-01T00:00:00+00:00",
                 "events": events,
                 "gaps": [],
@@ -233,6 +244,16 @@ def _build(
         output,
         requested_return_start=return_start,
         requested_return_end=return_end,
+    )
+
+
+def _refresh_source_mapping_evidence(payload: dict[str, object], csv_path: Path) -> None:
+    payload["source_document_sha256"] = _sha256(csv_path)
+    payload["account_mapping_evidence_sha256"] = builder._account_mapping_evidence_sha256(
+        account_identity_sha256=str(payload["account_identity_sha256"]),
+        account_mapping_basis=str(payload["account_mapping_basis"]),
+        account_mapping_confidence=str(payload["account_mapping_confidence"]),
+        source_document_sha256=str(payload["source_document_sha256"]),
     )
 
 
@@ -470,13 +491,16 @@ def test_shifted_statement_corroboration_applies_as_exactly_one_provider_dated_f
         source = builder.ManifestSource(manifest_path, csv_path)
         plan = builder.build_reconciliation_plan(session, [source])
         assert plan.conflict_count == 0
+        backup_path = tmp_path / "before-reconciliation.db"
+        backup_path.write_bytes(database.read_bytes())
         builder_result = apply_reconciliation_plan(
             session,
             plan,
             expected_plan_digest=plan.plan_digest,
             approved_at=datetime(2026, 1, 2, tzinfo=UTC),
             software_revision="a" * 40,
-            backup_reference="private:backup:test",
+            backup_path=backup_path,
+            backup_reference=f"sha256:{_sha256(backup_path)}",
             preview_reference="private:preview:test",
         )
         assert builder_result.committed is True
@@ -550,13 +574,12 @@ def test_multiple_same_account_candidates_fail_closed_without_output(tmp_path: P
     assert not output.exists()
 
 
-def test_legacy_inventory_derives_exact_source_code_account_hash_and_capture_time(
+def test_inventory_derives_source_code_and_capture_time(
     tmp_path: Path,
 ) -> None:
     events = _events(2)
     database, inventory, csv_path = _inputs(tmp_path, events)
     payload = json.loads(inventory.read_text(encoding="utf-8"))
-    payload.pop("account_identity_sha256")
     payload.pop("captured_at")
     for event in payload["events"]:
         event.pop("source_code")
@@ -570,6 +593,66 @@ def test_legacy_inventory_derives_exact_source_code_account_hash_and_capture_tim
     assert len(manifest["account_identity_sha256"]) == 64
     assert manifest["captured_at"].endswith("+00:00")
     assert [event["source_code"] for event in manifest["events"]] == ["ACH", "ACH"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "account_identity_sha256",
+        "account_mapping_basis",
+        "account_mapping_confidence",
+        "account_mapping_evidence_sha256",
+    ),
+)
+def test_inventory_requires_explicit_account_mapping_provenance(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    payload = json.loads(inventory.read_text(encoding="utf-8"))
+    payload.pop(field)
+    inventory.write_text(json.dumps(payload), encoding="utf-8")
+    output = tmp_path / "output"
+
+    with pytest.raises(builder.BuildError, match="inventory_invalid"):
+        _build(database, inventory, csv_path, output)
+
+    assert not output.exists()
+
+
+def test_account_mapping_basis_confidence_and_evidence_propagate_without_defaulting_exact(
+    tmp_path: Path,
+) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    payload = json.loads(inventory.read_text(encoding="utf-8"))
+    payload["account_mapping_basis"] = "statement_account_identifier"
+    payload["account_mapping_confidence"] = "high"
+    payload["account_mapping_evidence_sha256"] = builder._account_mapping_evidence_sha256(
+        account_identity_sha256=payload["account_identity_sha256"],
+        account_mapping_basis=payload["account_mapping_basis"],
+        account_mapping_confidence=payload["account_mapping_confidence"],
+        source_document_sha256=payload["source_document_sha256"],
+    )
+    inventory.write_text(json.dumps(payload), encoding="utf-8")
+
+    _build(database, inventory, csv_path, tmp_path / "output")
+
+    manifest = json.loads(next((tmp_path / "output").glob("*.json")).read_text())
+    assert manifest["account_mapping_basis"] == "statement_account_identifier"
+    assert manifest["account_mapping_confidence"] == "high"
+
+
+def test_account_mapping_evidence_digest_mismatch_fails_closed(tmp_path: Path) -> None:
+    database, inventory, csv_path = _inputs(tmp_path, _events(1))
+    payload = json.loads(inventory.read_text(encoding="utf-8"))
+    payload["account_mapping_evidence_sha256"] = "0" * 64
+    inventory.write_text(json.dumps(payload), encoding="utf-8")
+    output = tmp_path / "output"
+
+    with pytest.raises(builder.BuildError, match="account_mapping_evidence_mismatch"):
+        _build(database, inventory, csv_path, output)
+
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("changed", ["source", "account"])
@@ -617,7 +700,7 @@ def test_only_supported_external_cash_codes_are_candidates(tmp_path: Path) -> No
     with csv_path.open("a", encoding="utf-8") as handle:
         handle.write(non_external_rows)
     inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
-    inventory_payload["source_document_sha256"] = _sha256(csv_path)
+    _refresh_source_mapping_evidence(inventory_payload, csv_path)
     inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
 
     result = _build(database, inventory, csv_path, tmp_path / "output")
@@ -684,7 +767,7 @@ def test_in_kind_transfer_inside_requested_window_fails_closed(tmp_path: Path) -
     with csv_path.open("a", encoding="utf-8") as handle:
         handle.write("02/01/2025,02/01/2025,02/01/2025,SYN,private description,ACATI,2,,--\n")
     inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
-    inventory_payload["source_document_sha256"] = _sha256(csv_path)
+    _refresh_source_mapping_evidence(inventory_payload, csv_path)
     inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
 
     with pytest.raises(builder.BuildError, match="in_kind_transfer_inside_requested_window"):
@@ -709,7 +792,7 @@ def test_in_kind_transfer_before_or_on_opening_boundary_is_gap_not_cashflow(
     with csv_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{row_date},{row_date},{row_date},SYN,private description,ACATI,2,,--\n")
     inventory_payload = json.loads(inventory.read_text(encoding="utf-8"))
-    inventory_payload["source_document_sha256"] = _sha256(csv_path)
+    _refresh_source_mapping_evidence(inventory_payload, csv_path)
     inventory.write_text(json.dumps(inventory_payload), encoding="utf-8")
 
     result = _build(

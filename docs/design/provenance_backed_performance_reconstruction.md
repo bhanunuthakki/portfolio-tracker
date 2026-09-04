@@ -64,6 +64,38 @@ replacement, and records both decisions in the atomic reconciliation-run
 receipt. It cannot replace a resolved provider decision or reinterpret a
 different provider transaction.
 
+### Account-mapping evidence
+
+The private evidence inventory must explicitly provide
+`account_identity_sha256`, `account_mapping_basis`,
+`account_mapping_confidence`, and `account_mapping_evidence_sha256`. Missing
+mapping provenance is invalid; the manifest builder never derives an `exact`
+mapping from the selected database account. Basis is one of
+`provider_account_id`, `statement_account_identifier`, or `owner_confirmed`,
+and confidence is `exact`, `high`, or `provisional`. A provisional mapping is
+retained but cannot certify source coverage.
+
+`account_mapping_evidence_sha256` is the SHA-256 of this canonical JSON value
+(sorted keys and compact separators):
+
+```json
+{
+  "account_identity_sha256": "…",
+  "account_mapping_basis": "statement_account_identifier",
+  "account_mapping_confidence": "high",
+  "identity_version": "cashflow_account_mapping.v1",
+  "source_document_sha256": "…"
+}
+```
+
+The builder recomputes that digest and verifies `account_identity_sha256`
+against the selected database account. The execution manifest then carries the
+four committed mapping inputs—account identity, basis, confidence, and source
+document digest—so its existing manifest/attestation hashes bind the same
+mapping assertion without adding a second persisted representation. Changing
+any mapping input requires a new evidence digest and produces a different
+manifest identity.
+
 ## Source-event identity and dates
 
 A statement without broker transaction IDs is identified by the source
@@ -309,12 +341,37 @@ row counts. Ordinary console output contains counts and opaque digests only.
 Live application requires:
 
 1. a distinct SQLite backup;
-2. a successful restore/integrity check;
-3. migration and reconciliation rehearsal on the restored copy;
-4. an exact approved plan digest;
-5. locked revalidation of database and source inputs;
-6. one atomic commit; and
-7. post-write equation, provenance, duplicate, and idempotency checks.
+2. an explicit `--backup-path` and caller-bound `sha256:<digest>` reference;
+3. read-only verification that the backup exists, is not the live database,
+   matches that digest, passes SQLite `integrity_check` and
+   `foreign_key_check`, and has the same sole Alembic revision as the live
+   target;
+4. migration and reconciliation rehearsal on the restored copy;
+5. an exact approved plan digest;
+6. locked revalidation of database and source inputs;
+7. one atomic commit; and
+8. post-write equation, provenance, duplicate, and idempotency checks.
+
+The commit command is therefore shaped as follows; the digest must be computed
+from the exact backup bytes after the backup is complete:
+
+```shell
+python -m portfolio_tracker.jobs.reconcile_cashflow_manifest \
+  --source private/execution-manifest.json private/broker-source.csv \
+  --preview-path private/approved-preview.json \
+  --commit \
+  --expected-plan-digest DIGEST_FROM_PREVIEW \
+  --approved-at 2026-09-03T12:00:00-07:00 \
+  --software-revision FULL_GIT_REVISION \
+  --backup-path backups/portfolio-before-reconciliation.db \
+  --backup-reference sha256:BACKUP_FILE_SHA256
+```
+
+The applied run receipt privately binds the resolved backup path and verified
+content digest. Neither the path nor source data appears in the sanitized CLI
+summary. A legacy `--backup-reference` without `--backup-path`, a descriptive
+reference that is not `sha256:<digest>`, or any failed verification aborts
+before reconciliation writes.
 
 No live migration or correction is implied by code completion or a successful
 dry run.

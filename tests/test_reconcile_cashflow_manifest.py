@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import Engine, create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.jobs.reconcile_cashflow_manifest import (
@@ -20,6 +21,7 @@ from portfolio_tracker.jobs.reconcile_cashflow_manifest import (
 )
 from portfolio_tracker.models import (
     Account,
+    Base,
     CashFlowReconciliationDecision,
     CashFlowReconciliationRun,
     CashFlowReconciliationRunDecision,
@@ -43,6 +45,41 @@ from portfolio_tracker.services.external_flow_ledger import build_external_flow_
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+@pytest.fixture
+def reconciliation_engine(tmp_path: Path):
+    database_path = tmp_path / "live.db"
+    engine = create_engine(f"sqlite:///{database_path}", future=True)
+    Base.metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+        connection.exec_driver_sql("INSERT INTO alembic_version VALUES ('0031')")
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+@pytest.fixture
+def reconciliation_session(reconciliation_engine: Engine):
+    with Session(reconciliation_engine) as session:
+        yield session
+
+
+def _backup_approval(
+    session: Session,
+    tmp_path: Path,
+    name: str,
+) -> tuple[Path, str]:
+    session.commit()
+    backup_path = tmp_path / name
+    driver_connection = session.connection().connection.driver_connection
+    assert isinstance(driver_connection, sqlite3.Connection)
+    with sqlite3.connect(backup_path) as destination:
+        driver_connection.backup(destination)
+    digest = _sha256(backup_path.read_bytes())
+    return backup_path, f"sha256:{digest}"
 
 
 def _account(session, *, account_key: str = "provider-account-1") -> Account:
@@ -584,7 +621,8 @@ def test_plan_classifies_each_event_once_without_writing(session, tmp_path):
     assert session.scalar(select(func.count()).select_from(CashFlowSourceAttestation)) == 0
 
 
-def test_commit_is_atomic_and_second_run_has_zero_writes(session, tmp_path):
+def test_commit_is_atomic_and_second_run_has_zero_writes(reconciliation_session, tmp_path):
+    session = reconciliation_session
     account = _account(session)
     needs_override = _transaction(
         account.account_id,
@@ -610,6 +648,7 @@ def test_commit_is_atomic_and_second_run_has_zero_writes(session, tmp_path):
         ],
     )
     plan = build_reconciliation_plan(session, [source])
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "before-first.db")
 
     result = apply_reconciliation_plan(
         session,
@@ -617,7 +656,8 @@ def test_commit_is_atomic_and_second_run_has_zero_writes(session, tmp_path):
         expected_plan_digest=plan.plan_digest,
         approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
         software_revision="a" * 40,
-        backup_reference="private:backup:before",
+        backup_path=backup_path,
+        backup_reference=backup_reference,
         preview_reference="private:preview:approved",
     )
 
@@ -636,13 +676,15 @@ def test_commit_is_atomic_and_second_run_has_zero_writes(session, tmp_path):
     before_memberships = session.scalar(
         select(func.count()).select_from(CashFlowReconciliationRunDecision)
     )
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "before-rerun.db")
     rerun_result = apply_reconciliation_plan(
         session,
         rerun,
         expected_plan_digest=rerun.plan_digest,
         approved_at=datetime(2026, 9, 3, 12, 1, tzinfo=UTC),
         software_revision="a" * 40,
-        backup_reference="private:backup:before",
+        backup_path=backup_path,
+        backup_reference=backup_reference,
         preview_reference="private:preview:approved",
     )
     assert rerun_result.applied_mutation_count == 0
@@ -656,7 +698,11 @@ def test_commit_is_atomic_and_second_run_has_zero_writes(session, tmp_path):
     )
 
 
-def test_changed_explicit_match_fails_closed_without_partial_writes(session, tmp_path):
+def test_changed_explicit_match_fails_closed_without_partial_writes(
+    reconciliation_session,
+    tmp_path,
+):
+    session = reconciliation_session
     account = _account(session)
     candidate = _transaction(
         account.account_id,
@@ -685,6 +731,7 @@ def test_changed_explicit_match_fails_closed_without_partial_writes(session, tmp
     session.commit()
     plan = build_reconciliation_plan(session, [source])
     before = session.scalar(select(func.count()).select_from(InvestmentTransaction))
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "before-conflict.db")
 
     with pytest.raises(ReconciliationConflictError):
         apply_reconciliation_plan(
@@ -693,7 +740,8 @@ def test_changed_explicit_match_fails_closed_without_partial_writes(session, tmp
             expected_plan_digest=plan.plan_digest,
             approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
             software_revision="a" * 40,
-            backup_reference="private:backup:before",
+            backup_path=backup_path,
+            backup_reference=backup_reference,
             preview_reference="private:preview:approved",
         )
 
@@ -782,7 +830,11 @@ def test_manifest_round_trips_source_dates_row_hash_and_decision_metadata(
     assert parsed.assumption_code == "statement_activity_date_used"
 
 
-def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path):
+def test_apply_persists_source_event_decision_and_run_receipt(
+    reconciliation_session,
+    tmp_path,
+):
+    session = reconciliation_session
     account = _account(session)
     source = _manifest_source(
         tmp_path,
@@ -790,6 +842,7 @@ def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path)
         [_event(1, "2025-01-02", "100.00", "external_in")],
     )
     plan = build_reconciliation_plan(session, [source])
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "before-apply.db")
 
     result = apply_reconciliation_plan(
         session,
@@ -797,7 +850,8 @@ def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path)
         expected_plan_digest=plan.plan_digest,
         approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
         software_revision="a" * 40,
-        backup_reference="private:backup:before",
+        backup_path=backup_path,
+        backup_reference=backup_reference,
         preview_reference="private:preview:approved",
     )
 
@@ -817,7 +871,11 @@ def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path)
     assert decision.assumption_code == "statement_activity_date_used"
     assert run is not None
     assert run.plan_digest == plan.plan_digest
-    assert run.backup_reference == "private:backup:before"
+    stored_backup_reference = json.loads(run.backup_reference)
+    assert stored_backup_reference == {
+        "path": str(backup_path.resolve()),
+        "sha256": backup_reference.removeprefix("sha256:"),
+    }
     assert run.preview_reference == "private:preview:approved"
     assert run.requested_return_start == date(2024, 9, 3)
     assert run.requested_return_end == date(2026, 9, 3)
@@ -835,11 +893,135 @@ def test_apply_persists_source_event_decision_and_run_receipt(session, tmp_path)
     assert all(len(row.after_payload_sha256) == 64 for row in transaction_mutations)
 
 
-def test_apply_orders_source_event_before_decision_with_production_session(
-    engine,
+def test_legacy_backup_reference_without_explicit_path_fails_closed(
+    reconciliation_session,
     tmp_path,
 ):
-    with Session(engine, autoflush=False) as production_session:
+    session = reconciliation_session
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    plan = build_reconciliation_plan(session, [source])
+
+    with pytest.raises(ReconciliationConflictError, match="explicit_backup_path_required"):
+        apply_reconciliation_plan(
+            session,
+            plan,
+            expected_plan_digest=plan.plan_digest,
+            approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+            software_revision="a" * 40,
+            backup_reference="private:backup:legacy",
+            preview_reference="private:preview:approved",
+        )
+
+    assert session.scalar(select(func.count()).select_from(CashFlowSourceAttestation)) == 0
+
+
+@pytest.mark.parametrize(
+    ("case", "reason_code"),
+    (
+        ("missing", "backup_artifact_unavailable"),
+        ("digest", "backup_digest_mismatch"),
+        ("not_sqlite", "backup_not_valid_sqlite"),
+        ("foreign_key", "backup_foreign_key_check_failed"),
+        ("revision", "backup_schema_revision_mismatch"),
+    ),
+)
+def test_invalid_backup_artifact_fails_before_reconciliation_writes(
+    reconciliation_session,
+    tmp_path,
+    case,
+    reason_code,
+):
+    session = reconciliation_session
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    plan = build_reconciliation_plan(session, [source])
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "candidate-backup.db")
+    if case == "missing":
+        backup_path.unlink()
+    elif case == "digest":
+        backup_reference = f"sha256:{'0' * 64}"
+    elif case == "not_sqlite":
+        backup_path.write_bytes(b"not a SQLite database")
+        backup_reference = f"sha256:{_sha256(backup_path.read_bytes())}"
+    elif case == "foreign_key":
+        with sqlite3.connect(backup_path) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "INSERT INTO transaction_overrides "
+                "(plaid_investment_transaction_id, classification) "
+                "VALUES ('missing-target', 'external_in')"
+            )
+        backup_reference = f"sha256:{_sha256(backup_path.read_bytes())}"
+    elif case == "revision":
+        with sqlite3.connect(backup_path) as connection:
+            connection.execute("UPDATE alembic_version SET version_num = '0030'")
+        backup_reference = f"sha256:{_sha256(backup_path.read_bytes())}"
+
+    with pytest.raises(ReconciliationConflictError, match=reason_code):
+        apply_reconciliation_plan(
+            session,
+            plan,
+            expected_plan_digest=plan.plan_digest,
+            approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+            software_revision="a" * 40,
+            backup_path=backup_path,
+            backup_reference=backup_reference,
+            preview_reference="private:preview:approved",
+        )
+
+    assert session.scalar(select(func.count()).select_from(CashFlowSourceAttestation)) == 0
+
+
+def test_live_database_cannot_serve_as_its_own_backup(reconciliation_session, tmp_path):
+    session = reconciliation_session
+    account = _account(session)
+    source = _manifest_source(
+        tmp_path,
+        account,
+        [_event(1, "2025-01-02", "100.00", "external_in")],
+    )
+    plan = build_reconciliation_plan(session, [source])
+    live_path = Path(
+        next(
+            filename
+            for _, name, filename in session.execute(text("PRAGMA database_list")).all()
+            if name == "main"
+        )
+    )
+    backup_reference = f"sha256:{_sha256(live_path.read_bytes())}"
+
+    with pytest.raises(
+        ReconciliationConflictError,
+        match="backup_must_be_distinct_from_live_database",
+    ):
+        apply_reconciliation_plan(
+            session,
+            plan,
+            expected_plan_digest=plan.plan_digest,
+            approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
+            software_revision="a" * 40,
+            backup_path=live_path,
+            backup_reference=backup_reference,
+            preview_reference="private:preview:approved",
+        )
+
+    assert session.scalar(select(func.count()).select_from(CashFlowSourceAttestation)) == 0
+
+
+def test_apply_orders_source_event_before_decision_with_production_session(
+    reconciliation_engine,
+    tmp_path,
+):
+    with Session(reconciliation_engine, autoflush=False) as production_session:
         production_session.execute(text("PRAGMA foreign_keys=ON"))
         assert production_session.scalar(text("PRAGMA foreign_keys")) == 1
         account = _account(production_session)
@@ -849,6 +1031,11 @@ def test_apply_orders_source_event_before_decision_with_production_session(
             [_event(1, "2025-01-02", "100.00", "external_in")],
         )
         plan = build_reconciliation_plan(production_session, [source])
+        backup_path, backup_reference = _backup_approval(
+            production_session,
+            tmp_path,
+            "before-production-apply.db",
+        )
 
         result = apply_reconciliation_plan(
             production_session,
@@ -856,7 +1043,8 @@ def test_apply_orders_source_event_before_decision_with_production_session(
             expected_plan_digest=plan.plan_digest,
             approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
             software_revision="a" * 40,
-            backup_reference="private:backup:before",
+            backup_path=backup_path,
+            backup_reference=backup_reference,
             preview_reference="private:preview:approved",
         )
 
@@ -919,7 +1107,11 @@ def test_multiple_source_events_may_corroborate_one_provider_transaction(session
     ]
 
 
-def test_later_provider_transaction_supersedes_statement_supplement(session, tmp_path):
+def test_later_provider_transaction_supersedes_statement_supplement(
+    reconciliation_session,
+    tmp_path,
+):
+    session = reconciliation_session
     account = _account(session)
     source = _manifest_source(
         tmp_path,
@@ -927,13 +1119,15 @@ def test_later_provider_transaction_supersedes_statement_supplement(session, tmp
         [_event(1, "2025-01-02", "100.00", "external_in")],
     )
     first_plan = build_reconciliation_plan(session, [source])
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "before-supplement.db")
     apply_reconciliation_plan(
         session,
         first_plan,
         expected_plan_digest=first_plan.plan_digest,
         approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
         software_revision="a" * 40,
-        backup_reference="private:backup:before",
+        backup_path=backup_path,
+        backup_reference=backup_reference,
         preview_reference="private:preview:first",
     )
     original_decision = session.scalar(
@@ -962,13 +1156,15 @@ def test_later_provider_transaction_supersedes_statement_supplement(session, tmp
     replacement_plan = build_reconciliation_plan(session, [source])
     assert replacement_plan.conflict_count == 0
     assert replacement_plan.planned_mutation_count == 4
+    backup_path, backup_reference = _backup_approval(session, tmp_path, "before-supersession.db")
     apply_reconciliation_plan(
         session,
         replacement_plan,
         expected_plan_digest=replacement_plan.plan_digest,
         approved_at=datetime(2026, 9, 3, 12, 5, tzinfo=UTC),
         software_revision="b" * 40,
-        backup_reference="private:backup:second",
+        backup_path=backup_path,
+        backup_reference=backup_reference,
         preview_reference="private:preview:second",
     )
 
@@ -1002,9 +1198,10 @@ def test_later_provider_transaction_supersedes_statement_supplement(session, tmp
 
 
 def test_statement_evidence_supersedes_provider_unresolved_without_double_counting(
-    session,
+    reconciliation_session,
     tmp_path,
 ):
+    session = reconciliation_session
     account = _account(session)
     flow_date = date(2025, 1, 2)
     provider_transaction = _transaction(
@@ -1037,13 +1234,19 @@ def test_statement_evidence_supersedes_provider_unresolved_without_double_counti
     assert plan.conflict_count == 0
     assert len(plan.provider_unresolved_resolutions) == 1
     assert plan.provider_unresolved_resolutions[0].status == "supersession_required"
+    backup_path, backup_reference = _backup_approval(
+        session,
+        tmp_path,
+        "before-provider-resolution.db",
+    )
     apply_reconciliation_plan(
         session,
         plan,
         expected_plan_digest=plan.plan_digest,
         approved_at=datetime(2026, 9, 3, 12, 0, tzinfo=UTC),
         software_revision="a" * 40,
-        backup_reference="private:backup:before",
+        backup_path=backup_path,
+        backup_reference=backup_reference,
         preview_reference="private:preview:approved",
     )
 
