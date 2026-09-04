@@ -148,6 +148,91 @@ class Account(Base):
     item: Mapped[Item] = relationship(back_populates="accounts")
 
 
+class AccountValuationSourceKind(StrEnum):
+    """Evidence channel that supplied a whole-account valuation."""
+
+    PROVIDER_API = "provider_api"
+    BROKERAGE_STATEMENT = "brokerage_statement"
+    PROVIDER_EXPORT = "provider_export"
+
+
+class AccountValuationObservation(Base):
+    """Immutable broker-level total for one account and effective date.
+
+    Unlike ``HoldingSnapshot``, this records the broker's whole-account total
+    directly, including cash and explicit empty accounts.  ``observation_key``
+    commits to the normalized value and its source identity; a corrected
+    source value therefore appends a new row instead of rewriting evidence.
+    """
+
+    __tablename__ = "account_valuation_observations"
+    __table_args__ = (
+        CheckConstraint(
+            "length(observation_key) = 64",
+            name="ck_account_valuation_observations_key_length",
+        ),
+        CheckConstraint(
+            "source_kind IN ('provider_api', 'brokerage_statement', 'provider_export')",
+            name="ck_account_valuation_observations_source_kind",
+        ),
+        CheckConstraint(
+            "length(currency) = 3",
+            name="ck_account_valuation_observations_currency_length",
+        ),
+        CheckConstraint(
+            "length(source_provider) > 0 AND length(source_reference) > 0",
+            name="ck_account_valuation_observations_source_locator_present",
+        ),
+        CheckConstraint(
+            "source_record_id IS NOT NULL OR source_payload_sha256 IS NOT NULL",
+            name="ck_account_valuation_observations_source_identity",
+        ),
+        CheckConstraint(
+            "source_payload_sha256 IS NULL OR length(source_payload_sha256) = 64",
+            name="ck_account_valuation_observations_payload_sha256_length",
+        ),
+        CheckConstraint(
+            "is_empty = 0 OR (is_complete = 1 AND total_value = 0 AND "
+            "(cash_value IS NULL OR cash_value = 0))",
+            name="ck_account_valuation_observations_empty_zero",
+        ),
+        Index(
+            "ix_account_valuation_observations_account_date",
+            "account_id",
+            "as_of_date",
+        ),
+    )
+
+    valuation_observation_id: Mapped[int] = mapped_column(primary_key=True)
+    observation_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.account_id", ondelete="CASCADE"), nullable=False
+    )
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # Some providers expose only a business date. Preserve their exact
+    # timestamp when supplied without manufacturing one when it is absent.
+    as_of_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    total_value: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    cash_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Provider endpoint/field or statement/page locator. This is private
+    # evidence metadata and must not be emitted in logs.
+    source_reference: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_record_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    source_payload_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    normalization_version: Mapped[str] = mapped_column(
+        String(16), default="1", server_default="1", nullable=False
+    )
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    is_empty: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class Security(Base):
     """One row per unique security Plaid has reported."""
 
@@ -564,8 +649,16 @@ class CashFlowSourceType(StrEnum):
     """Authoritative evidence used to reconcile an account's flow history."""
 
     BROKERAGE_STATEMENT = "brokerage_statement"
+    PROVIDER_API = "provider_api"
     PROVIDER_EXPORT = "provider_export"
     OWNER_RECONCILIATION = "owner_reconciliation"
+
+
+class CashFlowBrokerArchiveCoverage(StrEnum):
+    """Assurance that an attested range represents broker archive history."""
+
+    UNASSERTED = "unasserted"
+    PROVIDER_ASSERTED = "provider_asserted"
 
 
 class CashFlowSourceGapReason(StrEnum):
@@ -681,8 +774,14 @@ class CashFlowSourceAttestation(Base):
             name="ck_cashflow_source_attestations_date_order",
         ),
         CheckConstraint(
-            "source_type IN ('brokerage_statement', 'provider_export', 'owner_reconciliation')",
+            "source_type IN ('brokerage_statement', 'provider_api', 'provider_export', "
+            "'owner_reconciliation')",
             name="ck_cashflow_source_attestations_source_type",
+        ),
+        CheckConstraint(
+            "broker_archive_coverage IS NULL OR broker_archive_coverage IN "
+            "('unasserted', 'provider_asserted')",
+            name="ck_cashflow_source_attestations_broker_archive_coverage",
         ),
         CheckConstraint(
             "length(source_sha256) = 64",
@@ -761,6 +860,9 @@ class CashFlowSourceAttestation(Base):
     coverage_start: Mapped[date] = mapped_column(Date, nullable=False)
     coverage_end: Mapped[date] = mapped_column(Date, nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Provider API rows set this explicitly. NULL legacy statement/export rows
+    # retain source-type semantics and are interpreted by the coverage reader.
+    broker_archive_coverage: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_reference: Mapped[str] = mapped_column(String(512), nullable=False)
     source_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -893,6 +995,36 @@ class CashFlowSourceEvent(Base):
     source_amount_sign_basis: Mapped[str] = mapped_column(String(32), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     source_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class CashFlowSourceAttestationEventLink(Base):
+    """Many-to-many membership for window-independent provider Source events.
+
+    Statement imports retain their original one-attestation event ownership.
+    Provider records can recur in overlapping API windows, so their canonical
+    event is linked to each delivery attestation without duplicating identity
+    or reconciliation decisions.
+    """
+
+    __tablename__ = "cashflow_source_attestation_event_links"
+    __table_args__ = (
+        Index(
+            "ix_cashflow_source_attestation_event_links_event",
+            "source_event_id",
+        ),
+    )
+
+    attestation_id: Mapped[int] = mapped_column(
+        ForeignKey("cashflow_source_attestations.attestation_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_event_id: Mapped[str] = mapped_column(
+        ForeignKey("cashflow_source_events.source_event_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

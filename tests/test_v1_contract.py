@@ -106,7 +106,7 @@ def test_accounts_contract(client, session):
     data = resp.json()
 
     meta = data["meta"]
-    assert meta["schema_version"] == "1.2.0"
+    assert meta["schema_version"] == "1.4.0"
     assert meta["as_of"] == _FRESH.isoformat()
     assert sorted(meta["source_providers"]) == ["plaid", "snaptrade"]
     assert meta["is_partial"] is False
@@ -224,7 +224,7 @@ def test_analytics_positioning_v1(client, session):
     resp = client.get("/api/v1/analytics/positioning")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["meta"]["schema_version"] == "1.2.0"
+    assert data["meta"]["schema_version"] == "1.4.0"
     assert data["meta"]["methodology"] == "positioning.value_weighted_cuts"
     assert float(data["positioning"]["total_value"]) == 10000.0
     assert float(data["equity_fraction"]["equity_fraction"]) == 0.9
@@ -235,7 +235,7 @@ def test_health(client, session):
     resp = client.get("/api/v1/health")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["schema_version"] == "1.2.0"
+    assert data["schema_version"] == "1.4.0"
     assert data["database_ok"] is True
     # Schema was created by Base.metadata.create_all — no alembic_version table;
     # health reports that honestly instead of guessing.

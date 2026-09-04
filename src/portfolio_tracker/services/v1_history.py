@@ -36,7 +36,7 @@ from portfolio_tracker.schemas import (
     CashFlowSourceCoverageOut,
     CashFlowTransactionOrigin,
 )
-from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
+from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.cashflow_source_coverage import (
     assess_cashflow_source_coverage,
     source_coverage_out,
@@ -46,6 +46,7 @@ from portfolio_tracker.services.external_flow_ledger import (
     effective_classification,
     load_transaction_overrides,
 )
+from portfolio_tracker.services.performance import performance_account_ids
 from portfolio_tracker.services.positioning import classify_asset_type
 from portfolio_tracker.services.v1_accounts import build_accounts_result
 from portfolio_tracker.services.v1_common import V1AccountCoverage, V1Meta, build_meta
@@ -332,7 +333,7 @@ def build_cash_flows_page(
     generated_at: datetime | None = None,
 ) -> CashFlowsV1Result:
     start, end = _bounded_window(start_date, end_date, TRANSACTIONS_DEFAULT_DAYS)
-    accts = valued_account_ids(session)
+    accts = performance_account_ids(session, start, end)
     links = {"transactions": "/api/v1/transactions"}
     meta = _history_meta(
         session,

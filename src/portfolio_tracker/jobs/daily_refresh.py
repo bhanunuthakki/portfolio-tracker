@@ -111,8 +111,9 @@ def run() -> int:
 
         from portfolio_tracker.jobs import benchmarks
 
-        # 30-day rolling pull is enough to keep the latest closes fresh
-        # without re-fetching years of static history every day.
+        # A 30-day rolling pull keeps current revisions fresh. When a policy
+        # revision is still required, benchmarks.run automatically expands the
+        # one-time fetch/validation to the canonical two-year return horizon.
         rows = benchmarks.run(today - _td(days=30), today)
         print(f"[daily_refresh]   benchmarks: {rows} rows upserted")
     except Exception:

@@ -14,6 +14,7 @@ Resources:
   * ``GET /api/v1/position-snapshots``   — historical observed holdings
   * ``GET /api/v1/securities``           — security master + Classification
   * ``GET /api/v1/data-quality``         — machine-readable data-quality findings
+  * ``GET /api/v1/valuation-observations/{key}`` — sanitized valuation provenance
   * ``GET /api/v1/analytics/positioning``— Positioning cuts + equity fraction
   * ``GET /api/v1/analytics/performance``— Modified-Dietz TWR vs benchmarks
   * ``GET /api/v1/analytics/position-performance`` — fail-closed position comparison
@@ -31,19 +32,22 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.config import get_settings
 from portfolio_tracker.db import get_session
-from portfolio_tracker.models import HoldingSnapshot, Item
-from portfolio_tracker.schemas import DataQualityReportOut
+from portfolio_tracker.models import AccountValuationObservation, HoldingSnapshot, Item
+from portfolio_tracker.schemas import AccountValuationProvenanceOut, DataQualityReportOut
 from portfolio_tracker.services import data_quality as data_quality_service
 from portfolio_tracker.services import performance as performance_service
+from portfolio_tracker.services.account_valuations import (
+    stored_account_valuation_observation_payload,
+)
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.beta import compute_beta
 from portfolio_tracker.services.drawdown import compute_drawdown
@@ -299,6 +303,51 @@ def data_quality_v1(session: Annotated[Session, Depends(get_session)]) -> DataQu
     return DataQualityV1Result(meta=meta, report=report)
 
 
+@router.get(
+    "/valuation-observations/{observation_key}",
+    response_model=AccountValuationProvenanceOut,
+)
+def valuation_observation_provenance(
+    session: Annotated[Session, Depends(get_session)],
+    observation_key: Annotated[
+        str,
+        Path(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+    ],
+) -> AccountValuationProvenanceOut:
+    """Resolve a receipt key to sanitized broker/statement source metadata."""
+    observation = session.scalar(
+        select(AccountValuationObservation).where(
+            AccountValuationObservation.observation_key == observation_key
+        )
+    )
+    if observation is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "valuation observation not found")
+    try:
+        stored_account_valuation_observation_payload(observation)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "valuation observation failed integrity validation",
+        ) from exc
+    return AccountValuationProvenanceOut(
+        observation_key=observation.observation_key,
+        account_id=observation.account_id,
+        as_of_date=observation.as_of_date,
+        as_of_at=observation.as_of_at,
+        currency=observation.currency,
+        source_kind=cast(
+            Literal["provider_api", "brokerage_statement", "provider_export"],
+            observation.source_kind,
+        ),
+        source_provider=observation.source_provider,
+        has_source_record_id=observation.source_record_id is not None,
+        source_payload_sha256=observation.source_payload_sha256,
+        fetched_at=observation.fetched_at,
+        is_complete=observation.is_complete,
+        is_empty=observation.is_empty,
+    )
+
+
 @router.get("/analytics/performance", response_model=PerformanceV1Result)
 def analytics_performance(
     session: Annotated[Session, Depends(get_session)],
@@ -310,10 +359,12 @@ def analytics_performance(
 ) -> PerformanceV1Result:
     """Modified-Dietz TWR + benchmark counterfactuals (same calculation as the
     legacy `/api/portfolio/performance`, now enveloped and versioned)."""
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = end_date - timedelta(days=365)
+    start_date, end_date = performance_service.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=include_backfill,
+    )
     series = performance_service.compute_performance_series(
         session, start_date, end_date, Decimal(str(reserve_amount)), exclude_index_etfs
     )
@@ -350,10 +401,12 @@ def analytics_risk(
 ) -> RiskV1Result:
     """Beta/alpha/R², Sharpe/Sortino, tracking error, volatility, plus max
     drawdown and recovery — one risk read for consumers."""
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = end_date - timedelta(days=365)
+    start_date, end_date = performance_service.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     beta = compute_beta(
         session,
         start_date,
@@ -386,10 +439,12 @@ def analytics_beta(
     versa — see `/analytics/drawdown`). `/analytics/risk` still returns both
     together for consumers that want one call.
     """
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = end_date - timedelta(days=365)
+    start_date, end_date = performance_service.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     beta = compute_beta(
         session,
         start_date,
@@ -416,10 +471,12 @@ def analytics_drawdown(
     regression, so a consumer needing only loss-shaped risk gets it without
     the regression's cost.
     """
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = end_date - timedelta(days=365)
+    start_date, end_date = performance_service.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     drawdown = compute_drawdown(
         session, start_date, end_date, Decimal(str(reserve_amount)), exclude_index_etfs
     )

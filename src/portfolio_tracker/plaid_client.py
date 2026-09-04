@@ -20,13 +20,20 @@ module stays cheap to import. Same rationale as `_ensure_snaptrade` in
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict
 
 from portfolio_tracker.config import PlaidEnvironment, get_settings
+from portfolio_tracker.provider_delivery import (
+    ProviderDeliveryError,
+    ProviderDeliveryIncompleteError,
+    ProviderDeliveryMetadata,
+    ProviderPayloadError,
+    build_provider_delivery_metadata,
+)
 
 if TYPE_CHECKING:
     # Type-only: `from __future__ import annotations` keeps every annotation
@@ -42,6 +49,19 @@ class PlaidAccount(BaseModel):
     subtype: str | None = None
     mask: str | None = None
     currency: str = "USD"
+    provider_total_value: Decimal | None = None
+    provider_available_cash: Decimal | None = None
+    # Direct provider freshness/availability facts only.  A missing timestamp
+    # is not replaced with fetch time: Plaid documents holdings balances as
+    # potentially cached and exposes last_updated_datetime only for a narrow
+    # institution set.
+    provider_balance_as_of: datetime | None = None
+    provider_account_status: str | None = None
+    provider_holdings_initial_sync_completed: bool | None = None
+    provider_holdings_last_successful_sync: datetime | None = None
+    provider_transactions_initial_sync_completed: bool | None = None
+    provider_transactions_last_successful_sync: date | None = None
+    provider_first_transaction_date: date | None = None
 
 
 class PlaidSecurity(BaseModel):
@@ -97,6 +117,11 @@ class InvestmentsTransactionsResponse(BaseModel):
     securities: list[PlaidSecurity]
     transactions: list[PlaidInvestmentTransaction] = []
     total_transactions: int
+    delivery: ProviderDeliveryMetadata | None = None
+
+
+_INVESTMENT_TRANSACTIONS_SOURCE_FORMAT = "plaid_investment_transactions_api"
+_INVESTMENT_TRANSACTIONS_PARSER_VERSION = "plaid_investment_tx.v1"
 
 
 def _build_client() -> plaid_api.PlaidApi:
@@ -150,7 +175,10 @@ def create_link_token(client_user_id: str) -> str:
             language="en",
         ),
     )
-    response = cast(Any, get_client().link_token_create(request))
+    try:
+        response = cast(Any, get_client().link_token_create(request))
+    except Exception:
+        raise ProviderDeliveryError("Plaid link token request failed") from None
     return str(response.link_token)
 
 
@@ -159,7 +187,10 @@ def exchange_public_token(public_token: str) -> tuple[str, str]:
     from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
 
     request = cast(Any, ItemPublicTokenExchangeRequest(public_token=public_token))
-    response = cast(Any, get_client().item_public_token_exchange(request))
+    try:
+        response = cast(Any, get_client().item_public_token_exchange(request))
+    except Exception:
+        raise ProviderDeliveryError("Plaid public token exchange failed") from None
     return str(response.access_token), str(response.item_id)
 
 
@@ -187,20 +218,23 @@ def _account_from_plaid(raw: object) -> PlaidAccount:
         cast("dict[str, object]", raw_balances) if isinstance(raw_balances, dict) else {}
     )
     return PlaidAccount(
-        plaid_account_id=str(data["account_id"]),
-        name=str(data["name"]),
+        plaid_account_id=_required_text(data, "account_id"),
+        name=_required_text(data, "name"),
         official_name=_opt_str(data.get("official_name")),
-        type=str(data["type"]),
+        type=_required_text(data, "type"),
         subtype=_opt_str(data.get("subtype")),
         mask=_opt_str(data.get("mask")),
         currency=str(balances.get("iso_currency_code") or "USD"),
+        provider_total_value=_opt_decimal(balances.get("current")),
+        provider_available_cash=_opt_decimal(balances.get("available")),
+        provider_balance_as_of=_opt_datetime(balances.get("last_updated_datetime")),
     )
 
 
 def _security_from_plaid(raw: object) -> PlaidSecurity:
     data = _to_plaid_dict(raw)
     return PlaidSecurity(
-        plaid_security_id=str(data["security_id"]),
+        plaid_security_id=_required_text(data, "security_id"),
         ticker=_opt_str(data.get("ticker_symbol")),
         cusip=_opt_str(data.get("cusip")),
         isin=_opt_str(data.get("isin")),
@@ -234,8 +268,8 @@ def _investment_tx_from_plaid(raw: object) -> PlaidInvestmentTransaction:
             f"investment transaction missing date: {data.get('investment_transaction_id')}"
         )
     return PlaidInvestmentTransaction(
-        plaid_investment_transaction_id=str(data["investment_transaction_id"]),
-        plaid_account_id=str(data["account_id"]),
+        plaid_investment_transaction_id=_required_text(data, "investment_transaction_id"),
+        plaid_account_id=_required_text(data, "account_id"),
         plaid_security_id=_opt_str(data.get("security_id")),
         date=tx_date,
         name=_opt_str(data.get("name")),
@@ -243,7 +277,7 @@ def _investment_tx_from_plaid(raw: object) -> PlaidInvestmentTransaction:
         amount=Decimal(str(data["amount"])),
         price=_opt_decimal(data.get("price")),
         fees=_opt_decimal(data.get("fees")),
-        type=str(data["type"]),
+        type=_required_text(data, "type"),
         subtype=_opt_str(data.get("subtype")),
         currency=str(data.get("iso_currency_code") or "USD"),
     )
@@ -253,6 +287,16 @@ def _opt_decimal(value: object) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _required_text(payload: dict[str, object], field: str) -> str:
+    value = payload.get(field)
+    if value is None:
+        raise ValueError(f"provider payload is missing required field {field}")
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"provider payload has empty required field {field}")
+    return text
 
 
 def _opt_str(value: object) -> str | None:
@@ -265,26 +309,45 @@ def _opt_str(value: object) -> str | None:
 def _opt_date(value: object) -> date | None:
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     if isinstance(value, str):
         return date.fromisoformat(value)
-    return None
+    raise ValueError("provider date field has invalid type")
+
+
+def _opt_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    raise ValueError("provider datetime field has invalid type")
 
 
 def get_holdings(access_token: str) -> HoldingsResponse:
     from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 
     request = cast(Any, InvestmentsHoldingsGetRequest(access_token=access_token))
-    response = cast(Any, get_client().investments_holdings_get(request))
-    item_dict = _to_plaid_dict(response.item)
-    return HoldingsResponse(
-        accounts=[_account_from_plaid(a) for a in response.accounts],
-        securities=[_security_from_plaid(s) for s in response.securities],
-        holdings=[_holding_from_plaid(h) for h in response.holdings],
-        item_id=str(item_dict["item_id"]),
-        institution_id=_opt_str(item_dict.get("institution_id")),
-    )
+    try:
+        response = cast(Any, get_client().investments_holdings_get(request))
+    except Exception:
+        raise ProviderDeliveryError("Plaid holdings request failed") from None
+    try:
+        item_dict = _to_plaid_dict(response.item)
+        return HoldingsResponse(
+            accounts=[_account_from_plaid(a) for a in response.accounts],
+            securities=[_security_from_plaid(s) for s in response.securities],
+            holdings=[_holding_from_plaid(h) for h in response.holdings],
+            item_id=str(item_dict["item_id"]),
+            institution_id=_opt_str(item_dict.get("institution_id")),
+        )
+    except Exception:
+        raise ProviderPayloadError("Plaid holdings payload failed validation") from None
 
 
 def get_investment_transactions(
@@ -302,10 +365,11 @@ def get_investment_transactions(
 
     page_size = 500
     all_tx: list[PlaidInvestmentTransaction] = []
-    accounts: list[PlaidAccount] = []
-    securities: list[PlaidSecurity] = []
-    total: int = 0
+    accounts_by_id: dict[str, PlaidAccount] = {}
+    securities_by_id: dict[str, PlaidSecurity] = {}
+    total: int | None = None
     offset = 0
+    page_count = 0
     client = get_client()
     while True:
         request = cast(
@@ -317,18 +381,69 @@ def get_investment_transactions(
                 options=InvestmentsTransactionsGetRequestOptions(count=page_size, offset=offset),
             ),
         )
-        response = cast(Any, client.investments_transactions_get(request))
-        if offset == 0:
-            accounts = [_account_from_plaid(a) for a in response.accounts]
-            securities = [_security_from_plaid(s) for s in response.securities]
-            total = response.total_investment_transactions
-        all_tx.extend(_investment_tx_from_plaid(t) for t in response.investment_transactions)
-        offset += len(response.investment_transactions)
-        if offset >= total or not response.investment_transactions:
+        try:
+            response = cast(Any, client.investments_transactions_get(request))
+        except Exception:
+            # Provider exceptions can retain request context. Do not propagate
+            # an access-token-bearing body into logs or tracebacks.
+            raise ProviderDeliveryError("Plaid investment transaction request failed") from None
+        page_count += 1
+        try:
+            raw_total = response.total_investment_transactions
+        except Exception:
+            raise ProviderPayloadError("Plaid pagination total is missing") from None
+        page_total = _provider_total(raw_total, provider="Plaid")
+        if total is None:
+            total = page_total
+        elif page_total != total:
+            raise ProviderDeliveryIncompleteError(
+                "Plaid transaction delivery total changed during pagination"
+            )
+        try:
+            for raw_account in response.accounts:
+                account = _account_from_plaid(raw_account)
+                accounts_by_id[account.plaid_account_id] = account
+            for raw_security in response.securities:
+                security = _security_from_plaid(raw_security)
+                securities_by_id[security.plaid_security_id] = security
+            page_rows = list(response.investment_transactions)
+        except Exception:
+            raise ProviderPayloadError("Plaid transaction page failed validation") from None
+        if not page_rows and offset < total:
+            raise ProviderDeliveryIncompleteError(
+                f"Plaid transaction delivery stopped early: reported={total}, fetched={offset}"
+            )
+        for index, raw_transaction in enumerate(page_rows, start=offset):
+            try:
+                all_tx.append(_investment_tx_from_plaid(raw_transaction))
+            except Exception:
+                raise ProviderPayloadError(
+                    f"Plaid transaction payload failed validation at offset {index}"
+                ) from None
+        offset += len(page_rows)
+        if offset >= total:
             break
+    delivery = build_provider_delivery_metadata(
+        provider="plaid",
+        source_format=_INVESTMENT_TRANSACTIONS_SOURCE_FORMAT,
+        parser_version=_INVESTMENT_TRANSACTIONS_PARSER_VERSION,
+        requested_start_date=start_date,
+        requested_end_date=end_date,
+        page_count=page_count,
+        provider_reported_total=total,
+        record_ids=[tx.plaid_investment_transaction_id for tx in all_tx],
+        normalized_records=[tx.model_dump(mode="json") for tx in all_tx],
+    )
     return InvestmentsTransactionsResponse(
-        accounts=accounts,
-        securities=securities,
+        accounts=list(accounts_by_id.values()),
+        securities=list(securities_by_id.values()),
         transactions=all_tx,
         total_transactions=total,
+        delivery=delivery,
     )
+
+
+def _provider_total(value: object, *, provider: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ProviderPayloadError(f"{provider} pagination total is invalid")
+    return value

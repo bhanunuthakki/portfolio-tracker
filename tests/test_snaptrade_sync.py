@@ -15,14 +15,23 @@ Everything external is monkeypatched to Plaid-shaped fakes:
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from sqlalchemy import select
 
 from portfolio_tracker import snaptrade_client
-from portfolio_tracker.models import Account, HoldingSnapshot, Item, Security
+from portfolio_tracker.models import (
+    Account,
+    AccountValuationObservation,
+    CashFlowSourceGap,
+    CashFlowSourceGapReason,
+    HoldingSnapshot,
+    Item,
+    Security,
+)
 from portfolio_tracker.plaid_client import PlaidAccount, PlaidHolding, PlaidSecurity
+from portfolio_tracker.provider_delivery import build_provider_delivery_metadata
 from portfolio_tracker.snaptrade_client import (
     SnapTradeBrokerageAuthorization,
     SnapTradeHoldingsResponse,
@@ -50,6 +59,14 @@ def _fake_accounts(_creds: object, _auth_id: object) -> list[tuple[str, PlaidAcc
                 plaid_account_id=_ST_ACCOUNT_ID,
                 name="Fidelity Brokerage",
                 type="investment",
+                provider_total_value=Decimal("1234.56"),
+                provider_holdings_last_successful_sync=datetime(
+                    date.today().year,
+                    date.today().month,
+                    date.today().day,
+                    12,
+                    tzinfo=UTC,
+                ),
             ),
         )
     ]
@@ -76,7 +93,44 @@ def _fake_holdings(_creds: object, _account_id: object) -> SnapTradeHoldingsResp
 def _fake_activities(
     _creds: object, _account_id: object, _start: object, _end: object
 ) -> SnapTradeTransactionsResponse:
-    return SnapTradeTransactionsResponse(accounts=[], securities=[], transactions=[])
+    assert isinstance(_start, date)
+    assert isinstance(_end, date)
+    return SnapTradeTransactionsResponse(
+        accounts=[],
+        securities=[],
+        transactions=[],
+        total_transactions=0,
+        delivery=build_provider_delivery_metadata(
+            provider="snaptrade",
+            source_format="snaptrade_account_activities_api",
+            parser_version="snaptrade_account_activity.v1",
+            requested_start_date=_start,
+            requested_end_date=_end,
+            page_count=1,
+            provider_reported_total=0,
+            record_ids=[],
+            normalized_records=[],
+        ),
+    )
+
+
+def _fake_holdings_with_direct_cash(
+    _creds: object, _account_id: object
+) -> SnapTradeHoldingsResponse:
+    response = _fake_holdings(_creds, _account_id)
+    return response.model_copy(
+        update={
+            "accounts": [
+                PlaidAccount(
+                    plaid_account_id=_ST_ACCOUNT_ID,
+                    name="Fidelity Brokerage",
+                    type="investment",
+                    provider_total_value=None,
+                    provider_available_cash=Decimal("78.90"),
+                )
+            ]
+        }
+    )
 
 
 def _patch_snaptrade(monkeypatch) -> object:
@@ -163,6 +217,17 @@ def test_sync_deletes_fully_exited_position_on_same_day_resync(session, monkeypa
     assert result.accounts_synced == 1
     assert result.items_synced == 1
 
+    valuation = session.execute(select(AccountValuationObservation)).scalar_one()
+    assert valuation.account_id == account.account_id
+    assert valuation.as_of_date == today
+    assert valuation.total_value == Decimal("1234.56")
+    assert valuation.cash_value is None
+    assert valuation.source_provider == "snaptrade"
+    assert valuation.source_record_id == _ST_ACCOUNT_ID
+    assert valuation.is_complete is True
+    assert valuation.is_empty is False
+    assert len(valuation.source_payload_sha256 or "") == 64
+
 
 def test_holding_from_snaptrade_cost_basis_is_total_not_per_share():
     # SnapTrade gives average_purchase_price PER SHARE; cost_basis must be
@@ -180,7 +245,99 @@ def test_holding_from_snaptrade_cost_basis_is_total_not_per_share():
     assert holding.cost_basis == Decimal(1000)  # 100/share × 10, NOT 100
 
 
+def test_sync_combines_account_list_total_with_holdings_cash(session, monkeypatch):
+    route_mod = _patch_snaptrade(monkeypatch)
+    monkeypatch.setattr(snaptrade_client, "get_holdings", _fake_holdings_with_direct_cash)
+
+    route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+
+    valuation = session.execute(select(AccountValuationObservation)).scalar_one()
+    assert valuation.total_value == Decimal("1234.56")
+    assert valuation.cash_value == Decimal("78.90")
+    assert valuation.source_reference == (
+        "account_information.list_user_accounts[].balance.total+get_user_holdings.balances[].cash;"
+        "as_of=sync_status.holdings.last_successful_sync"
+    )
+
+
+def test_sync_total_without_provider_as_of_is_non_certifying(session, monkeypatch):
+    route_mod = _patch_snaptrade(monkeypatch)
+    monkeypatch.setattr(
+        snaptrade_client,
+        "list_user_accounts",
+        lambda _creds, _auth_id: [
+            (
+                _ST_ACCOUNT_ID,
+                PlaidAccount(
+                    plaid_account_id=_ST_ACCOUNT_ID,
+                    name="Fidelity Brokerage",
+                    type="investment",
+                    provider_total_value=Decimal("1234.56"),
+                ),
+            )
+        ],
+    )
+
+    route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+
+    valuation = session.execute(select(AccountValuationObservation)).scalar_one()
+    assert valuation.is_complete is False
+    assert valuation.is_empty is False
+    assert valuation.as_of_at is None
+    assert "cached_as_fetched_no_provider_as_of" in valuation.source_reference
+
+
+def test_sync_does_not_infer_account_total_from_holdings(session, monkeypatch):
+    route_mod = _patch_snaptrade(monkeypatch)
+    monkeypatch.setattr(
+        snaptrade_client,
+        "list_user_accounts",
+        lambda _creds, _auth_id: [
+            (
+                _ST_ACCOUNT_ID,
+                PlaidAccount(
+                    plaid_account_id=_ST_ACCOUNT_ID,
+                    name="Fidelity Brokerage",
+                    type="investment",
+                    provider_total_value=None,
+                ),
+            )
+        ],
+    )
+
+    route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+
+    assert session.scalar(select(AccountValuationObservation)) is None
+
+
 def test_holding_from_snaptrade_cost_basis_none_when_no_avg_price():
     raw = {"units": "10", "price": "150", "currency": {"code": "USD"}}
     holding = snaptrade_client._holding_from_snaptrade(raw, "acct", "sec")
     assert holding.cost_basis is None
+
+
+def test_disabled_authorization_never_writes_complete_current_holdings(session, monkeypatch):
+    route_mod = _patch_snaptrade(monkeypatch)
+    monkeypatch.setattr(
+        snaptrade_client,
+        "list_brokerage_authorizations",
+        lambda _creds: [
+            SnapTradeBrokerageAuthorization(
+                authorization_id=_AUTH_ID,
+                brokerage_name="Fidelity",
+                disabled=True,
+                disabled_at=datetime(2026, 9, 1, tzinfo=UTC),
+            )
+        ],
+    )
+
+    result = route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+
+    valuation = session.execute(select(AccountValuationObservation)).scalar_one()
+    assert valuation.is_complete is False
+    assert valuation.is_empty is False
+    assert "provider_state_unavailable" in valuation.source_reference
+    assert session.scalar(select(HoldingSnapshot)) is None
+    gap = session.execute(select(CashFlowSourceGap)).scalar_one()
+    assert gap.reason_code == CashFlowSourceGapReason.PROVIDER_HISTORY_UNAVAILABLE
+    assert result.holdings_written == 0

@@ -205,6 +205,9 @@ class CashFlowSourceAttestationOut(BaseModel):
     coverage_start: date
     coverage_end: date
     source_type: str
+    broker_archive_coverage: Literal[
+        "unasserted", "provider_asserted", "statement_attested", "owner_asserted"
+    ]
     source_reference: str
     source_sha256: str
     captured_at: datetime
@@ -234,11 +237,16 @@ class CashFlowAccountSourceCoverageOut(BaseModel):
     covered_ranges: list[SourceCoverageRangeOut]
     uncovered_ranges: list[SourceCoverageRangeOut]
     attestation_keys: list[str]
+    broker_archive_status: Literal["complete", "partial", "unasserted"]
+    broker_archive_covered_ranges: list[SourceCoverageRangeOut]
+    broker_archive_uncovered_ranges: list[SourceCoverageRangeOut]
 
 
 class CashFlowSourceCoverageOut(BaseModel):
     status: str
     is_complete: bool
+    broker_archive_status: Literal["complete", "partial", "unasserted"]
+    broker_archive_is_complete: bool
     requested_start_date: date
     requested_end_date: date
     required_start_date: date | None
@@ -297,12 +305,35 @@ class PerformanceBenchmarkEquation(BaseModel):
     price_inputs: list[PerformanceBenchmarkPriceInput]
 
 
+class AccountValuationProvenanceOut(BaseModel):
+    """Sanitized source metadata for one immutable valuation observation.
+
+    Provider account locators and raw balance values remain out of this lookup;
+    the performance receipt already carries the value used by the equation.
+    """
+
+    observation_key: str
+    account_id: int
+    as_of_date: date
+    as_of_at: datetime | None
+    currency: str
+    source_kind: Literal["provider_api", "brokerage_statement", "provider_export"]
+    source_provider: str
+    has_source_record_id: bool
+    source_payload_sha256: str | None
+    fetched_at: datetime
+    is_complete: bool
+    is_empty: bool
+
+
 class PerformanceEquationReceipt(BaseModel):
     """Atomic, reproducible bridge for one whole-portfolio calculation."""
 
     calculation_id: str
     external_flow_ledger_id: str
     portfolio_valuation_input_id: str
+    opening_valuation_observation_keys: list[str] = Field(default_factory=list[str])
+    ending_valuation_observation_keys: list[str] = Field(default_factory=list[str])
     included_account_ids: list[int]
     requested_start_date: date
     requested_end_date: date
@@ -328,6 +359,12 @@ class PerformanceEquationReceipt(BaseModel):
 
     @model_validator(mode="after")
     def validate_exact_identities(self) -> PerformanceEquationReceipt:
+        for keys in (
+            self.opening_valuation_observation_keys,
+            self.ending_valuation_observation_keys,
+        ):
+            if len(keys) != len(set(keys)):
+                raise ValueError("valuation observation keys must be unique")
         net_flow = sum((flow.amount for flow in self.dated_external_cashflows), Decimal(0))
         if net_flow != self.net_external_cashflow_in:
             raise ValueError("dated external cashflows do not reconcile to net flow")
@@ -409,22 +446,22 @@ class PerformanceSeries(BaseModel):
     methodology_version: Literal["2"]
     calculation_status: Literal["available", "unavailable"]
     reconstruction_certification: Literal[
-        "observed_certified", "modeled_provisional", "unavailable"
+        "observed_certified", "source_provisional", "modeled_provisional", "unavailable"
     ] = "unavailable"
     calculation_reason_codes: list[str]
     start_date: date
     end_date: date
     base_value: Decimal
     points: list[PerformancePoint]
-    # The earliest date in the window that's an OBSERVED forward snapshot
-    # (not a transaction-walk reconstruction). Anything before this is
-    # modeled. None when the entire window is reconstructed.
+    # The earliest date in the window with an observed complete holdings or
+    # whole-account valuation boundary (not transaction-walk reconstruction).
+    # Anything before this is modeled. None when the window is reconstructed.
     earliest_observed_date: date | None = None
     # Net external cashflow into the portfolio over the window (positive = in).
     # Surfaced so the UI can show contributions alongside total return.
     net_external_cashflow_in: Decimal | None
     # Separate from structural ledger validity: approved source evidence must
-    # cover every valued account over the exact (start, end] flow window.
+    # cover every valuation account over the exact (start, end] flow window.
     source_coverage: CashFlowSourceCoverageOut
     # Whether the start value is suspiciously low vs the end value (suggests
     # the backfill is missing pre-existing positions). Frontend renders a
@@ -434,11 +471,23 @@ class PerformanceSeries(BaseModel):
     # estimate, not broker-observed evidence. `None` means the requested
     # boundary could not be supported and the calculation is unavailable.
     opening_value_provenance: (
-        Literal["observed_complete_snapshot", "modeled_transaction_walkback"] | None
+        Literal[
+            "observed_complete_snapshot",
+            "observed_account_valuation",
+            "modeled_transaction_walkback",
+        ]
+        | None
     )
     ending_value_provenance: (
-        Literal["observed_complete_snapshot", "modeled_transaction_walkback"] | None
+        Literal[
+            "observed_complete_snapshot",
+            "observed_account_valuation",
+            "modeled_transaction_walkback",
+        ]
+        | None
     )
+    opening_valuation_observation_keys: list[str] = Field(default_factory=list[str])
+    ending_valuation_observation_keys: list[str] = Field(default_factory=list[str])
     # Exact account universe whose value and flows were paired by the return
     # engine. Empty only when no valued account universe could be established.
     valuation_account_ids: list[int]

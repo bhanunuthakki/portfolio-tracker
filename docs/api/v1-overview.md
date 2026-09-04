@@ -39,6 +39,7 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/position-snapshots` | Historical observed holdings rows with `origin` markers (`broker` vs `manual` gap-fill); default window 90 days |
 | `GET /api/v1/securities` | Security master: identifiers, cash-equivalent flag, asset type, sector/region Classification with source |
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
+| `GET /api/v1/valuation-observations/{observation_key}` | Resolve a performance receipt key to sanitized valuation-source metadata; raw provider account locators and balance values are intentionally omitted |
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
 | `GET /api/v1/analytics/performance` | Modified-Dietz TWR vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields unless exact requested opening/ending valuations, approved source evidence for every valued account over `(start, end]`, priceable external flows, and exact same-day or immediately previous U.S.-market closes are all available |
 | `GET /api/v1/analytics/position-performance` | Split-normalized invested-position price/trade return and per-ticker dollar alpha vs cash-flow-matched price-return counterfactuals (`position_alpha.split_normalized_price_trade_modified_dietz` v3); derived fields are null with stable reason codes when share movements or price provenance cannot be reconciled |
@@ -55,6 +56,10 @@ flows, ending value, investment gain, shared Modified-Dietz denominator,
 portfolio return, and SPY/QQQ/configured-policy counterfactual gains, returns,
 dollar alpha, and percentage-point alpha. Opaque SHA-256 identifiers bind the
 receipt to its flow-ledger, valuation, and resolved benchmark-price inputs.
+Opening and ending observation keys can be resolved through
+`/api/v1/valuation-observations/{observation_key}` to recover the source kind,
+provider, capture time, and payload digest without exposing a statement/API
+reference, source-row locator, or provider account locator.
 Each benchmark equation also exposes the target date, actual source close date,
 positive close value, whether resolution used the same day or the immediately
 previous U.S. market close, and `return_basis` (`total_return_adjusted` or the
@@ -71,12 +76,18 @@ activity on the broker-observation anchor date), so the portfolio path and all
 matched benchmark books do not place one economic flow on different days.
 `reconstruction_certification` is independent of mathematical availability:
 `observed_certified` means the opening and ending boundaries are complete broker
-snapshots, `modeled_provisional` means the opening is a transaction walkback,
-and `unavailable` means the series did not pass the existing fail-closed gates.
+snapshots and broker-archive flow coverage is complete; `source_provisional`
+means the calculation is available from complete provider delivery but the
+provider did not assert possession of the broker's complete archive;
+`modeled_provisional` means the opening is a transaction walkback; and
+`unavailable` means the series did not pass the existing fail-closed gates.
 A modeled opening remains provisional until position activity, account
 lifecycle, broker cash/account-total closure, and eligible on-or-before-date
 historical prices are all proven; the current schema does not claim those
-additional closure proofs. Unavailable results set the receipt and all derived point fields to null and
+additional closure proofs. Available source-provisional results carry
+`broker_archive_coverage_not_complete`, and `source_coverage` exposes global,
+per-account, and per-attestation archive status/ranges separately from provider
+delivery completeness. Unavailable results set the receipt and all derived point fields to null and
 return stable reason codes such as `portfolio_start_value_unavailable`,
 `portfolio_end_value_unavailable`, `spy_benchmark_price_unavailable`,
 `qqq_benchmark_price_unavailable`, `policy_benchmark_price_unavailable`, and
@@ -99,10 +110,12 @@ resource is purely about not paying for work you discard.
 
 ### Analytics envelope semantics
 
-For `analytics/*` responses, `meta.as_of` is the underlying **holdings
-observation date**, not the query window end — a calculation run today over a
-week-old book reads as stale (PRD §9.3). The calculation's own window travels
-in the payload (`series.start_date`/`end_date` etc.).
+For `analytics/*` responses, `meta.as_of` is the underlying broker observation
+date, not the calculation run date. For an available performance result this
+is the exact ending valuation boundary, whether it came from complete holdings
+or complete whole-account totals; a calculation run today over a week-old book
+therefore reads as stale (PRD §9.3). The calculation's own window travels in
+the payload (`series.start_date`/`end_date` etc.).
 
 The raw performance, position-performance, beta, and drawdown result objects
 also carry required `methodology` and `methodology_version` literals. This lets
@@ -124,14 +137,15 @@ legacy 5,000-row transactions ceiling does not apply to v1. A malformed
 cursor returns the structured `INVALID_CURSOR` error (below).
 
 For `cash-flows`, `net_external_cashflow_in` always describes the complete
-requested window, not the current page. The ledger uses the same valued-account
-universe as performance and exposes transaction origin, provider, rule,
+requested window, not the current page. The ledger uses the same return-account
+universe as performance—all active investment accounts plus any active account
+with an in-window investment transaction—and exposes transaction origin, provider, rule,
 component transaction, source-event/attestation/decision lineage, and
 historical-price provenance. Statement supplementals are explicitly labeled
 `statement_supplement` with a brokerage-statement provider; they are never
 presented as aggregator-derived. `structural_is_complete` says whether the stored
 rows can be classified and valued. `source_coverage` separately reports whether
-every valued account has current, owner-approved evidence for every date in the
+every return account has current, owner-approved evidence for every date in the
 end-of-day flow window `(start, end]`, including evidence reference/hash,
 capture and approval times, supersession, and explicit gaps. `is_complete` is
 true only when both checks pass; absence of ledger issues never implies source
@@ -177,7 +191,7 @@ Every decision-support response carries a `meta` block:
 
 ```jsonc
 "meta": {
-  "schema_version": "1.2.0",          // semver; MAJOR change ⇒ fail closed
+  "schema_version": "1.4.0",          // semver; MAJOR change ⇒ fail closed
   "generated_at": "2026-07-23T06:00:00Z",
   "as_of": "2026-07-22",              // observation date; null ⇒ no data
   "currency": "USD",

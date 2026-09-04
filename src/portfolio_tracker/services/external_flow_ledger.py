@@ -24,6 +24,7 @@ from portfolio_tracker.models import (
     Account,
     CashFlowReconciliationDecision,
     CashFlowSourceAttestation,
+    CashFlowSourceAttestationEventLink,
     CashFlowSourceEvent,
     InvestmentTransaction,
     InvestmentTransactionType,
@@ -396,7 +397,7 @@ def _provenance_state(
     the legacy heuristic path. Only a current, approved, non-provisional,
     resolved decision can put its target back into the effective ledger.
     """
-    source_rows = session.execute(
+    direct_source_rows = session.execute(
         select(CashFlowSourceEvent, CashFlowSourceAttestation)
         .join(
             CashFlowSourceAttestation,
@@ -404,19 +405,40 @@ def _provenance_state(
         )
         .where(CashFlowSourceAttestation.account_id.in_(accounts))
     ).all()
+    linked_source_rows = session.execute(
+        select(CashFlowSourceEvent, CashFlowSourceAttestation)
+        .join(
+            CashFlowSourceAttestationEventLink,
+            CashFlowSourceAttestationEventLink.source_event_id
+            == CashFlowSourceEvent.source_event_id,
+        )
+        .join(
+            CashFlowSourceAttestation,
+            CashFlowSourceAttestation.attestation_id
+            == CashFlowSourceAttestationEventLink.attestation_id,
+        )
+        .where(CashFlowSourceAttestation.account_id.in_(accounts))
+    ).all()
+    source_rows = [*direct_source_rows, *linked_source_rows]
     if not source_rows:
         return {}, frozenset(), ()
 
-    events = {event.source_event_id: (event, attestation) for event, attestation in source_rows}
-    events_by_attestation: dict[int, list[CashFlowSourceEvent]] = defaultdict(list)
+    memberships_by_event: dict[
+        str, dict[int, tuple[CashFlowSourceEvent, CashFlowSourceAttestation]]
+    ] = defaultdict(dict)
+    events_by_attestation: dict[int, dict[str, CashFlowSourceEvent]] = defaultdict(dict)
     attestations: dict[int, CashFlowSourceAttestation] = {}
     for event, attestation in source_rows:
-        events_by_attestation[attestation.attestation_id].append(event)
+        memberships_by_event[event.source_event_id][attestation.attestation_id] = (
+            event,
+            attestation,
+        )
+        events_by_attestation[attestation.attestation_id][event.source_event_id] = event
         attestations[attestation.attestation_id] = attestation
     decisions = (
         session.execute(
             select(CashFlowReconciliationDecision).where(
-                CashFlowReconciliationDecision.source_event_id.in_(events)
+                CashFlowReconciliationDecision.source_event_id.in_(memberships_by_event)
             )
         )
         .scalars()
@@ -440,7 +462,7 @@ def _provenance_state(
         if (
             attestation.source_event_set_sha256 is not None
             and attestation.source_event_set_sha256
-            != canonical_source_event_set_sha256(tuple(attestation_events))
+            != canonical_source_event_set_sha256(tuple(attestation_events.values()))
         ):
             invalid_attestation_ids.add(attestation_id)
             if attestation.coverage_end > start_date and attestation.coverage_start <= end_date:
@@ -452,6 +474,24 @@ def _provenance_state(
                         (),
                     )
                 )
+    events: dict[str, tuple[CashFlowSourceEvent, CashFlowSourceAttestation]] = {}
+    for source_event_id, memberships in memberships_by_event.items():
+        current_valid = [
+            membership
+            for membership in memberships.values()
+            if membership[1].superseded_at is None
+            and membership[1].superseded_by_attestation_id is None
+            and membership[1].attestation_id not in invalid_attestation_ids
+        ]
+        candidates = current_valid or list(memberships.values())
+        # Keep the first still-current evidence membership as the canonical
+        # receipt lineage. A later sliding-window capture may corroborate the
+        # same stable provider event, but must not churn an otherwise identical
+        # performance receipt merely because its requested range changed.
+        events[source_event_id] = min(
+            candidates,
+            key=lambda membership: membership[1].attestation_id,
+        )
     target_owners: dict[str, list[str]] = defaultdict(list)
     for source_event_id, (event, attestation) in events.items():
         if (

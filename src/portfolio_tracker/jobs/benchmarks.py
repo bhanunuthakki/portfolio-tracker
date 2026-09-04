@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from portfolio_tracker.db import SessionLocal
 from portfolio_tracker.models import Benchmark, PolicyState, PolicyWeight
+from portfolio_tracker.services.performance import benchmark_source_date
 
 # The 11 SPDR Select Sector ETFs — one per GICS sector. Stored like benchmarks
 # so the Brinson allocation/selection attribution (`services.brinson`) can value
@@ -49,12 +50,20 @@ _SECTOR_ETFS: tuple[str, ...] = (
 # references the "^IRX" symbol except `beta._window_risk_free`).
 _DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX", *_SECTOR_ETFS)
 
+# Policy status is global rather than window-qualified. A required revision can
+# therefore become ``current`` only after the longest first-class performance
+# lookback (two years) is available, not merely the 30-day maintenance pull.
+_POLICY_SUPPORTED_HORIZON_DAYS = 730
+
 
 class PolicyBenchmarkCoverageError(RuntimeError):
     """The requested window lacks data for one or more policy components."""
 
-    def __init__(self, missing_tickers: tuple[str, ...]) -> None:
-        self.missing_tickers = missing_tickers
+    reason_code = "policy_benchmark_date_coverage_incomplete"
+
+    def __init__(self, missing_dates_by_ticker: dict[str, tuple[date, ...]]) -> None:
+        self.missing_dates_by_ticker = missing_dates_by_ticker
+        self.missing_tickers = tuple(sorted(missing_dates_by_ticker))
         super().__init__("policy benchmark coverage incomplete")
 
 
@@ -66,15 +75,21 @@ def run(start_date: date, end_date: date) -> int:
         target_revision = (
             state.revision if state is not None and state.benchmark_status == "required" else None
         )
+        coverage_start_date = (
+            min(start_date, end_date - timedelta(days=_POLICY_SUPPORTED_HORIZON_DAYS))
+            if target_revision is not None
+            else start_date
+        )
         symbols = sorted(set(_DEFAULT_BENCHMARKS) | policy_tickers)
+        fetch_start_date = benchmark_source_date(coverage_start_date)
         for symbol in symbols:
-            rows_written += _fetch_symbol(session, symbol, start_date, end_date)
+            rows_written += _fetch_symbol(session, symbol, fetch_start_date, end_date)
         if target_revision is not None:
             _complete_policy_recomputation(
                 session,
                 policy_revision=target_revision,
                 policy_tickers=policy_tickers,
-                start_date=start_date,
+                start_date=coverage_start_date,
                 end_date=end_date,
             )
         session.commit()
@@ -82,7 +97,11 @@ def run(start_date: date, end_date: date) -> int:
 
 
 def _policy_tickers(session: Session) -> set[str]:
-    rows = session.execute(select(PolicyWeight.ticker)).scalars().all()
+    rows = (
+        session.execute(select(PolicyWeight.ticker).where(PolicyWeight.weight_bps > 0))
+        .scalars()
+        .all()
+    )
     return {t for t in rows if t}
 
 
@@ -94,27 +113,34 @@ def _complete_policy_recomputation(
     start_date: date,
     end_date: date,
 ) -> bool:
-    """Clear one unchanged policy revision only after component coverage exists."""
+    """Clear one unchanged revision only after every required close exists.
+
+    Checking for merely one row per ticker can mark a multi-year policy
+    recomputation current despite holes at its opening, ending, or intervening
+    dates. Requiring every market close needed by the requested calendar
+    window also covers weekend/holiday targets through their preceding close.
+    """
     session.flush()
-    missing = tuple(
-        sorted(
-            ticker
-            for ticker in policy_tickers
-            if session.scalar(
-                select(Benchmark.symbol)
-                .where(
+    required_dates = _required_benchmark_source_dates(start_date, end_date)
+    missing_dates_by_ticker: dict[str, tuple[date, ...]] = {}
+    for ticker in sorted(policy_tickers):
+        covered_dates = set(
+            session.execute(
+                select(Benchmark.date).where(
                     Benchmark.symbol == ticker,
-                    Benchmark.date >= start_date,
-                    Benchmark.date <= end_date,
+                    Benchmark.date.in_(required_dates),
                     Benchmark.total_return_close.is_not(None),
+                    Benchmark.total_return_close > 0,
                 )
-                .limit(1)
             )
-            is None
+            .scalars()
+            .all()
         )
-    )
-    if missing:
-        raise PolicyBenchmarkCoverageError(missing)
+        missing_dates = tuple(day for day in required_dates if day not in covered_dates)
+        if missing_dates:
+            missing_dates_by_ticker[ticker] = missing_dates
+    if missing_dates_by_ticker:
+        raise PolicyBenchmarkCoverageError(missing_dates_by_ticker)
     result = cast(
         CursorResult[Any],
         session.execute(
@@ -131,6 +157,20 @@ def _complete_policy_recomputation(
         ),
     )
     return result.rowcount == 1
+
+
+def _required_benchmark_source_dates(start_date: date, end_date: date) -> tuple[date, ...]:
+    """Unique market closes required to value every date in the window."""
+    if end_date < start_date:
+        return ()
+    return tuple(
+        sorted(
+            {
+                benchmark_source_date(start_date + timedelta(days=offset))
+                for offset in range((end_date - start_date).days + 1)
+            }
+        )
+    )
 
 
 def _fetch_symbol(session: Session, symbol: str, start_date: date, end_date: date) -> int:

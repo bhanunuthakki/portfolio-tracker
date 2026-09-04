@@ -22,7 +22,7 @@
     },
     "methodology": "position_alpha.split_normalized_price_trade_modified_dietz",
     "methodology_version": "3",
-    "schema_version": "1.2.0",
+    "schema_version": "1.4.0",
     "source_providers": [
       "plaid",
       "snaptrade"

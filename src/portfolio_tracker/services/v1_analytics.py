@@ -41,12 +41,16 @@ def _analytics_meta(
     links: dict[str, str],
     methodology_version: str = "1",
     included_account_ids: frozenset[int] | None = None,
+    as_of_override: date | None = None,
     warnings: list[V1Warning] | None = None,
     today: date | None = None,
     generated_at: datetime | None = None,
 ) -> V1Meta:
-    accounts_meta = build_accounts_result(session, today=today, generated_at=generated_at).meta
+    accounts_result = build_accounts_result(session, today=today, generated_at=generated_at)
+    accounts_meta = accounts_result.meta
     coverage = accounts_meta.account_coverage
+    source_providers = accounts_meta.source_providers
+    last_successful_sync_at = accounts_meta.last_successful_sync_at
     if included_account_ids is not None:
         previously_included = set(coverage.included_account_ids)
         coverage = V1AccountCoverage(
@@ -56,11 +60,23 @@ def _analytics_meta(
             ),
             lagging_account_ids=sorted(set(coverage.lagging_account_ids) & included_account_ids),
         )
+        included_accounts = [
+            account
+            for account in accounts_result.accounts
+            if account.account_id in included_account_ids
+        ]
+        source_providers = sorted({account.provider for account in included_accounts})
+        sync_times = [
+            account.last_successful_sync_at
+            for account in included_accounts
+            if account.last_successful_sync_at is not None
+        ]
+        last_successful_sync_at = max(sync_times) if sync_times else None
     return build_meta(
-        as_of=accounts_meta.as_of,
-        source_providers=accounts_meta.source_providers,
+        as_of=as_of_override or accounts_meta.as_of,
+        source_providers=source_providers,
         coverage=coverage,
-        last_successful_sync_at=accounts_meta.last_successful_sync_at,
+        last_successful_sync_at=last_successful_sync_at,
         warnings=warnings or [],
         links=links,
         methodology=methodology,
@@ -146,7 +162,18 @@ def performance_meta(
             "risk": "/api/v1/analytics/risk",
             "cash_flows": "/api/v1/cash-flows",
         },
-        included_account_ids=valued_account_ids(session),
+        included_account_ids=(
+            frozenset(series.valuation_account_ids)
+            if series is not None
+            else valued_account_ids(session)
+        ),
+        as_of_override=(
+            series.end_date
+            if series is not None
+            and series.ending_value_provenance
+            in {"observed_complete_snapshot", "observed_account_valuation"}
+            else None
+        ),
         warnings=warnings,
         today=today,
         generated_at=generated_at,

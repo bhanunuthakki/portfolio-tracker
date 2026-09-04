@@ -391,10 +391,12 @@ def performance_series(
         ),
     ),
 ) -> PerformanceSeries:
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = _default_start_date(session, end_date, include_backfill)
+    start_date, end_date = performance.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=include_backfill,
+    )
     return performance.compute_performance_series(
         session,
         start_date,
@@ -402,52 +404,6 @@ def performance_series(
         Decimal(str(reserve_amount)),
         exclude_index_etfs,
     )
-
-
-# Forward snapshots needed before the default chart drops the 365-day
-# backfill fallback. Below this, the chart isn't useful on its own — we
-# blend in a year of transaction-walk reconstruction to give context.
-_MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT = 7
-
-
-def _default_start_date(session: Session, end_date: date, include_backfill: bool) -> date:
-    """Default chart window — chosen to balance "useful on day one" against
-    "doesn't silently show modeled values as observed".
-
-    Behavior:
-      * `include_backfill=True` → anchor on the earliest transaction date,
-        capped at ~2 years (Plaid investment-tx retention).
-      * Else, if you have ≥ N distinct forward snapshot dates → start at
-        the earliest snapshot. Extends naturally as the snapshotter runs.
-      * Else (fresh install or just a few snapshots) → fall back to 365-day
-        transaction-walk backfill so the chart isn't a single dot. The UI
-        shows the backfill caveat in the chart caption either way.
-    """
-    accts = active_account_ids(session)
-    if not accts:
-        return end_date - timedelta(days=365)
-    earliest_snap = session.execute(
-        select(func.min(HoldingSnapshot.snapshot_date)).where(HoldingSnapshot.account_id.in_(accts))
-    ).scalar_one_or_none()
-    earliest_tx = session.execute(
-        select(func.min(InvestmentTransaction.date)).where(
-            InvestmentTransaction.account_id.in_(accts)
-        )
-    ).scalar_one_or_none()
-
-    if include_backfill and earliest_tx is not None:
-        candidates = [d for d in (earliest_snap, earliest_tx) if d is not None]
-        return max(min(candidates), end_date - timedelta(days=730))
-
-    snap_count = session.execute(
-        select(func.count(func.distinct(HoldingSnapshot.snapshot_date))).where(
-            HoldingSnapshot.account_id.in_(accts)
-        )
-    ).scalar_one()
-    if snap_count >= _MIN_FORWARD_SNAPSHOTS_FOR_OBSERVED_DEFAULT and earliest_snap is not None:
-        return earliest_snap
-
-    return end_date - timedelta(days=365)
 
 
 @router.get("/drawdown", response_model=drawdown_service.DrawdownResult)
@@ -461,10 +417,12 @@ def drawdown_metrics(
     """Loss-shaped risk over the cashflow-neutral return index: max drawdown,
     underwater curve, time-to-recovery, and Calmar (annualized return / |maxDD|).
     Same windowing as /performance; defaults to a snapshot-derived window."""
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = _default_start_date(session, end_date, include_backfill=False)
+    start_date, end_date = performance.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     return drawdown_service.compute_drawdown(
         session,
         start_date,
@@ -640,10 +598,12 @@ def beta_endpoint(
     risk metrics reflect real tail risk, and only >50% single-day moves —
     suspected price-data errors — are excluded and enumerated in `notes`.
     """
-    if end_date is None:
-        end_date = date.today()
-    if start_date is None:
-        start_date = end_date - timedelta(days=365)
+    start_date, end_date = performance.resolve_performance_window(
+        session,
+        start_date,
+        end_date,
+        include_backfill=False,
+    )
     return beta_service.compute_beta(
         session,
         start_date,

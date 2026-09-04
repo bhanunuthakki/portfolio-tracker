@@ -15,7 +15,10 @@ return.
 
 The system has one authority for each kind of fact:
 
-1. Complete broker observations own observed opening and ending values.
+1. Complete broker account-valuation observations own observed opening and
+   ending whole-account values. Each observation preserves its exact effective
+   date/timestamp, capture time, provider or statement source, source locator,
+   source-record identity, and payload hashes.
 2. `investment_transactions` owns normalized economic activity.
 3. Cash-flow source attestations and source events own immutable evidence from
    statements, provider exports, and owner-approved reconciliations.
@@ -29,6 +32,11 @@ Private source filenames, account identities, provider transaction IDs, row
 locators, amounts, and descriptions stay in the private database or ignored
 mode-0600 artifacts. The committed tree contains only schemas, rules, tests,
 and sanitized examples.
+
+The public valuation-provenance lookup accepts an opaque observation key and
+returns only source kind/provider, dates, completeness flags, capture time, and
+payload digest. It deliberately omits the private source reference, row
+locator, provider account locator, record ID, and balance values.
 
 ## Source precedence
 
@@ -81,6 +89,25 @@ candidate-row count and every candidate has exactly one disposition:
 with zero candidates may certify only when the parser records zero candidates;
 an empty hand-authored event list is insufficient.
 
+For provider APIs, pagination continues until the provider-declared total is
+fetched. Duplicate IDs, malformed records, count mismatches, changed economic
+fields under an existing transaction ID, and unrecognized activity fail
+closed. The resulting attestation proves complete delivery of what the
+provider returned for the requested account/range; it explicitly does **not**
+claim that the provider possesses the broker's complete archive. The persisted
+`broker_archive_coverage` is `unasserted` unless a provider explicitly asserts
+the full requested range or a statement/owner authority attests it. Statement
+evidence can fill provider-archive uncertainty without being relabeled as
+provider-delivered evidence. Arithmetic may remain available on complete
+provider delivery, but its certification is `source_provisional` with
+`broker_archive_coverage_not_complete` until archival coverage closes.
+
+Provider source-event identity is based on provider, stable account identity,
+and provider record ID—not on the requested sliding window. Overlapping daily
+captures link to the same immutable event and current decision, keeping the
+flow ID and equation receipt stable while each delivery attestation retains its
+own range and record-set hash.
+
 An `ACATI` statement row with `Amount="--"`, an instrument, and a nonzero
 quantity is an in-kind transfer, not a zero-dollar cash flow. Source coverage
 continues to describe the full statement. Manifest schema v3 separately binds
@@ -99,7 +126,26 @@ encode the cash-versus-in-kind distinction.
 
 ## Reconstruction
 
-For each account/security, quantities are reconstructed on a common
+The calculation universe contains every active investment account plus any
+account with activity in the requested window. A missing boundary or source
+coverage for any included account makes the result unavailable; the calculator
+does not silently narrow the book to the accounts that happened to have data.
+
+Boundary values use one matched basis for both ends:
+
+- complete whole-account totals for the identical account universe at both
+  exact boundaries; or
+- complete broker holdings at both ends, including a transaction-walked opening
+  when the observed opening is unavailable.
+
+The calculator never combines a whole-account total at one end with a
+holdings-only value at the other. An index-ETF exclusion also requires holdings
+support at both boundaries because a whole-account total cannot reveal the
+excluded amount. When multiple observations exist for one account/date, the
+latest capture is authoritative; a later incomplete capture cannot be hidden
+by an older complete one.
+
+For each account/security, modeled quantities are reconstructed on a common
 split-adjusted basis:
 
 ```text
@@ -125,13 +171,30 @@ The portfolio and every matched benchmark receive the identical dated
 external-flow set. A deposit/reversal pair may net to zero while still changing
 weighted capital between its two dates.
 
+Provider snapshot jobs append account-valuation observations; they never infer
+a broker total from the sum of holdings. Historical statement or provider-export
+totals enter only through the strict manifest importer documented in
+`docs/account_valuation_import.md`. Its dry-run plan binds the exact source
+bytes, account mapping, row locators, values, completeness status, current
+database state, and affected row count. Apply requires a verified restorable
+backup, the approved plan digest, locked revalidation, and an atomic append-only
+commit.
+
+If a provider omits its own balance/holdings as-of timestamp, the fetch date is
+retained only as receipt metadata. The guessed calendar date is stored as an
+incomplete observation and cannot certify an exact return boundary. A later
+dated provider capture or statement observation is required for whole-account
+boundary use. Stored observations are rehashed before selection or lookup;
+payload/key drift fails closed.
+
 ## Certification
 
 An observed boundary is not inferred from the presence of one holding row. A
 certified reconstruction ultimately requires:
 
 - exact requested and returned boundaries;
-- a complete ending broker observation;
+- a complete matched-basis opening and ending broker observation or a clearly
+  labeled provisional transaction-walked opening;
 - explicit account inclusion intervals;
 - complete external-flow and full-activity coverage;
 - one disposition per source candidate;
@@ -148,6 +211,20 @@ Until full activity, account-lifecycle, cash/control-total, and price gates are
 implemented and satisfied, a mathematically computable modeled opening is
 reported as provisional rather than certified. No provisional label may be
 upgraded merely because the arithmetic equation residual is zero.
+
+`observed_certified` requires observed matched boundaries and complete broker
+archive coverage for the cash-flow interval. `source_provisional` means the
+equation is available and its provider delivery is count-complete, but the
+broker's full archive is not independently asserted. `modeled_provisional`
+means the opening boundary itself is a transaction walkback. `unavailable`
+means a required valuation, structural flow, source-delivery, price, or
+benchmark gate failed.
+
+The current implementation does not yet model historical account inclusion
+intervals independently of current account state. It therefore fails closed
+when the active-account universe lacks evidence, and a formerly active account
+that has since been removed still requires explicit lifecycle evidence before
+the relevant historical window can be certified.
 
 ## Safe writes and recovery
 

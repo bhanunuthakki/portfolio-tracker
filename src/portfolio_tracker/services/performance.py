@@ -22,10 +22,11 @@ headline comparison; position-level results are supporting attribution.
 
 Two-stage construction:
 
-  1. **Daily portfolio value** is sourced from `holdings_snapshots` going
-     forward; for dates predating the first snapshot, it's reconstructed by
-     walking `investment_transactions` backward and valuing each position
-     against `prices` (yfinance backfill).
+  1. **Daily portfolio value** uses one matched basis per calculation. Complete
+     whole-account totals are used only when both exact boundaries cover the
+     same full account universe. Otherwise complete `holdings_snapshots` are
+     used, with earlier dates reconstructed by walking
+     `investment_transactions` backward against historical `prices`.
 
   2. **Modified Dietz** is evaluated per date over the window via the formula
      above; the result is rebased to an index for the chart.
@@ -38,7 +39,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -48,6 +49,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from portfolio_tracker.models import (
+    INVESTMENT_ACCOUNT_TYPES,
+    Account,
+    AccountValuationObservation,
     Benchmark,
     HoldingSnapshot,
     InvestmentTransaction,
@@ -65,7 +69,10 @@ from portfolio_tracker.schemas import (
     PerformanceSeries,
 )
 from portfolio_tracker.services import external_flow_ledger
-from portfolio_tracker.services.active_items import valued_account_ids
+from portfolio_tracker.services.account_valuations import (
+    stored_account_valuation_observation_payload,
+)
+from portfolio_tracker.services.active_items import active_account_ids, valued_account_ids
 from portfolio_tracker.services.cashflow_source_coverage import (
     assess_cashflow_source_coverage,
     source_coverage_out,
@@ -88,12 +95,23 @@ _PORTFOLIO_START_VALUE_UNAVAILABLE = "portfolio_start_value_unavailable"
 _PORTFOLIO_END_VALUE_UNAVAILABLE = "portfolio_end_value_unavailable"
 _PARTIAL_SNAPSHOT_START_DATE = "partial_snapshot_start_date"
 _PARTIAL_SNAPSHOT_END_DATE = "partial_snapshot_end_date"
+_PARTIAL_ACCOUNT_VALUATION_START_DATE = "partial_account_valuation_start_date"
+_PARTIAL_ACCOUNT_VALUATION_END_DATE = "partial_account_valuation_end_date"
+_ACCOUNT_VALUATION_INTEGRITY_INVALID = "account_valuation_integrity_invalid"
 _MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE = "modeled_opening_account_coverage_incomplete"
 _MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE = "modeled_opening_valuation_coverage_incomplete"
 _UNPRICEABLE_HOLDING_SNAPSHOT = "unpriceable_holding_snapshot"
+_ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE = "portfolio_account_universe_coverage_incomplete"
+_ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED = "account_valuation_index_exclusion_unsupported"
+_PERFORMANCE_WINDOW_TOO_SHORT = "performance_window_too_short"
 
-_ValueProvenance = Literal["observed_complete_snapshot", "modeled_transaction_walkback"]
+_ValueProvenance = Literal[
+    "observed_complete_snapshot",
+    "observed_account_valuation",
+    "modeled_transaction_walkback",
+]
 _OBSERVED_VALUE: _ValueProvenance = "observed_complete_snapshot"
+_ACCOUNT_VALUATION_OBSERVED: _ValueProvenance = "observed_account_valuation"
 _MODELED_VALUE: _ValueProvenance = "modeled_transaction_walkback"
 _SPY_BENCHMARK_PRICE_UNAVAILABLE = "spy_benchmark_price_unavailable"
 _QQQ_BENCHMARK_PRICE_UNAVAILABLE = "qqq_benchmark_price_unavailable"
@@ -103,6 +121,7 @@ _POLICY_BENCHMARK_PRICE_UNAVAILABLE = "policy_benchmark_price_unavailable"
 # or, for a weekend/known US-market holiday, the immediately preceding close.
 _BENCHMARK_QUERY_LOOKBACK_DAYS = 7
 _EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE = "external_flow_source_coverage_incomplete"
+_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE = "broker_archive_coverage_not_complete"
 
 
 @dataclass(frozen=True)
@@ -120,6 +139,95 @@ class _PortfolioValueAssessment:
     provenance: dict[date, _ValueProvenance]
     valuation_account_ids: tuple[int, ...]
     calculation_reason_codes: tuple[str, ...]
+    observation_keys: dict[date, tuple[str, ...]] = field(
+        default_factory=lambda: dict[date, tuple[str, ...]]()
+    )
+
+
+def latest_complete_portfolio_observation_date(session: Session) -> date | None:
+    """Latest exact date with a complete whole-portfolio observation."""
+    valuation_universe = performance_account_ids(session, date.min, date.max)
+    account_valuations = _complete_account_valuations_by_date(
+        session, date.min, date.max, account_ids=valuation_universe
+    )
+    snapshot_candidates = _snapshot_dates(
+        session, date.min, date.max, account_ids=valuation_universe
+    )
+    snapshot_dates = _complete_snapshot_dates(
+        session, snapshot_candidates, account_ids=valuation_universe
+    )
+    candidates = set(snapshot_dates) | set(account_valuations)
+    return max(candidates) if candidates else None
+
+
+def resolve_performance_window(
+    session: Session,
+    start_date: date | None,
+    end_date: date | None,
+    *,
+    include_backfill: bool,
+) -> tuple[date, date]:
+    """Resolve omitted performance boundaries without changing explicit ones.
+
+    An omitted end uses the latest complete broker observation when available,
+    preventing a stale-but-valid portfolio from being compared with a future
+    ``date.today()`` boundary that has no valuation. ``date.today()`` remains
+    only the empty-dataset fallback.
+    """
+    latest_observation = latest_complete_portfolio_observation_date(session)
+    resolved_end = end_date or latest_observation or date.today()
+    account_ids = performance_account_ids(session, date.min, resolved_end)
+    snapshot_candidates = _snapshot_dates(session, date.min, resolved_end, account_ids=account_ids)
+    complete_snapshots = _complete_snapshot_dates(
+        session, snapshot_candidates, account_ids=account_ids
+    )
+    account_valuations = _complete_account_valuations_by_date(
+        session, date.min, resolved_end, account_ids=account_ids
+    )
+    snapshot_dates = set(complete_snapshots)
+    valuation_dates = set(account_valuations)
+
+    if start_date is not None:
+        if end_date is not None:
+            return start_date, resolved_end
+        # Preserve the caller's exact opening and choose the latest closing
+        # boundary that can use the same valuation basis when one exists.
+        matching_ends: list[date] = []
+        if start_date in snapshot_dates:
+            matching_ends.extend(day for day in snapshot_dates if day >= start_date)
+        if start_date in valuation_dates:
+            matching_ends.extend(day for day in valuation_dates if day >= start_date)
+        modeled_default_end = max(snapshot_dates) if snapshot_dates else resolved_end
+        return start_date, max(matching_ends, default=modeled_default_end)
+
+    if not account_ids:
+        return resolved_end - timedelta(days=365), resolved_end
+
+    if include_backfill and snapshot_dates:
+        latest_snapshot = max(snapshot_dates)
+        earliest_transaction = session.scalar(
+            select(func.min(InvestmentTransaction.date)).where(
+                InvestmentTransaction.account_id.in_(account_ids),
+                InvestmentTransaction.date <= latest_snapshot,
+            )
+        )
+        if earliest_transaction is not None:
+            earliest_candidate = min(min(snapshot_dates), earliest_transaction)
+            return max(earliest_candidate, latest_snapshot - timedelta(days=730)), latest_snapshot
+
+    # Choose one observed basis end-to-end. A union can accidentally pair an
+    # old account total with a newer holdings snapshot (or vice versa), which
+    # is precisely the mixed-basis calculation the evaluator rejects.
+    candidate_windows = [
+        (min(days), max(days)) for days in (snapshot_dates, valuation_dates) if days
+    ]
+    if candidate_windows:
+        return max(
+            candidate_windows,
+            key=lambda window: ((window[1] - window[0]).days, window[1]),
+        )
+
+    return resolved_end - timedelta(days=365), resolved_end
 
 
 # `transfer` is Plaid's catch-all for asset movements. EXTERNAL transfers
@@ -248,7 +356,10 @@ def compute_performance_series(
     and add them to the cashflow series used for both Modified Dietz on
     V_active and for the synthetic benchmarks.
     """
-    account_ids = valued_account_ids(session)
+    value_assessment = _daily_portfolio_value_assessment(
+        session, start_date, end_date, exclude_index_etfs
+    )
+    account_ids = frozenset(value_assessment.valuation_account_ids)
     source_coverage = assess_cashflow_source_coverage(
         session,
         start_date,
@@ -256,11 +367,12 @@ def compute_performance_series(
         account_ids=account_ids,
     )
     source_coverage_read = source_coverage_out(source_coverage)
-    value_assessment = _daily_portfolio_value_assessment(session, start_date, end_date)
     daily_value = value_assessment.values
     opening_provenance = value_assessment.provenance.get(start_date)
     ending_provenance = value_assessment.provenance.get(end_date)
-    cashflow_assessment = _daily_external_cashflow_assessment(session, start_date, end_date)
+    cashflow_assessment = _daily_external_cashflow_assessment(
+        session, start_date, end_date, account_ids
+    )
     daily_cashflow = cashflow_assessment.cashflows
     benchmark_series = _benchmark_series(session, start_date, end_date)
     benchmark_return_basis = _benchmark_return_basis(session, start_date, end_date)
@@ -271,13 +383,15 @@ def compute_performance_series(
     # packet instead of revealing ledger and benchmark gaps one retry at a time.
     boundary_reason_codes = set(value_assessment.calculation_reason_codes)
     boundary_reason_codes.update(cashflow_assessment.calculation_reason_codes)
+    if start_date >= end_date:
+        boundary_reason_codes.add(_PERFORMANCE_WINDOW_TOO_SHORT)
     if not daily_value:
         boundary_reason_codes.add(_NO_PORTFOLIO_VALUES)
     if start_date not in daily_value:
         boundary_reason_codes.add(_PORTFOLIO_START_VALUE_UNAVAILABLE)
     if end_date not in daily_value:
         boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
-    if daily_value and ending_provenance != _OBSERVED_VALUE:
+    if daily_value and not _is_observed_value(ending_provenance):
         boundary_reason_codes.add(_PORTFOLIO_END_VALUE_UNAVAILABLE)
     if not source_coverage.is_complete:
         boundary_reason_codes.add(_EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE)
@@ -298,10 +412,11 @@ def compute_performance_series(
         boundary_reason_codes.add(_POLICY_BENCHMARK_PRICE_UNAVAILABLE)
 
     has_valuation_boundary_failure = (
-        not daily_value
+        start_date >= end_date
+        or not daily_value
         or start_date not in daily_value
         or end_date not in daily_value
-        or ending_provenance != _OBSERVED_VALUE
+        or not _is_observed_value(ending_provenance)
         or bool(value_assessment.calculation_reason_codes)
     )
     if has_valuation_boundary_failure:
@@ -330,9 +445,15 @@ def compute_performance_series(
             ],
             earliest_observed_date=_earliest_observed_date(session, start_date, end_date),
             net_external_cashflow_in=None,
-            backfill_start_unreliable=(opening_provenance != _OBSERVED_VALUE),
+            backfill_start_unreliable=(not _is_observed_value(opening_provenance)),
             opening_value_provenance=opening_provenance,
             ending_value_provenance=ending_provenance,
+            opening_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(start_date, ())
+            ),
+            ending_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(end_date, ())
+            ),
             valuation_account_ids=list(value_assessment.valuation_account_ids),
             equation_receipt=None,
             source_coverage=source_coverage_read,
@@ -455,18 +576,26 @@ def compute_performance_series(
             net_external_cashflow_in=None,
             source_coverage=source_coverage_read,
             backfill_start_unreliable=(
-                opening_provenance != _OBSERVED_VALUE
+                not _is_observed_value(opening_provenance)
                 or _is_start_value_unreliable(base_value, end_value)
             ),
             opening_value_provenance=(
                 opening_provenance
-                if opening_provenance in {_OBSERVED_VALUE, _MODELED_VALUE}
+                if opening_provenance
+                in {_OBSERVED_VALUE, _ACCOUNT_VALUATION_OBSERVED, _MODELED_VALUE}
                 else None
             ),
             ending_value_provenance=(
                 ending_provenance
-                if ending_provenance in {_OBSERVED_VALUE, _MODELED_VALUE}
+                if ending_provenance
+                in {_OBSERVED_VALUE, _ACCOUNT_VALUATION_OBSERVED, _MODELED_VALUE}
                 else None
+            ),
+            opening_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(start_date, ())
+            ),
+            ending_valuation_observation_keys=list(
+                value_assessment.observation_keys.get(end_date, ())
             ),
             valuation_account_ids=list(value_assessment.valuation_account_ids),
             equation_receipt=None,
@@ -527,19 +656,33 @@ def compute_performance_series(
         policy_return_pct=policy_returns.get(end_date),
         policy_price_inputs=policy_price_inputs,
         cashflow_assessment=cashflow_assessment,
+        valuation_observation_keys=value_assessment.observation_keys,
         benchmark_return_basis=benchmark_return_basis,
         reserve=reserve,
         exclude_index_etfs=exclude_index_etfs,
     )
 
+    opening_is_observed = _is_observed_value(opening_provenance)
+    reconstruction_certification = (
+        "modeled_provisional"
+        if not opening_is_observed
+        else (
+            "observed_certified"
+            if source_coverage.broker_archive_is_complete
+            else "source_provisional"
+        )
+    )
+    calculation_reason_codes = (
+        []
+        if source_coverage.broker_archive_is_complete
+        else [_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE]
+    )
     return PerformanceSeries(
         methodology="performance.modified_dietz",
         methodology_version="2",
         calculation_status="available",
-        reconstruction_certification=(
-            "observed_certified" if opening_provenance == _OBSERVED_VALUE else "modeled_provisional"
-        ),
-        calculation_reason_codes=[],
+        reconstruction_certification=reconstruction_certification,
+        calculation_reason_codes=calculation_reason_codes,
         start_date=start_date,
         end_date=end_date,
         base_value=base_value_adj,
@@ -548,11 +691,15 @@ def compute_performance_series(
         net_external_cashflow_in=sum(daily_cashflow.values(), Decimal(0)),
         source_coverage=source_coverage_read,
         backfill_start_unreliable=(
-            opening_provenance != _OBSERVED_VALUE
+            not _is_observed_value(opening_provenance)
             or _is_start_value_unreliable(base_value, end_value)
         ),
         opening_value_provenance=opening_provenance,
         ending_value_provenance=ending_provenance,
+        opening_valuation_observation_keys=list(
+            value_assessment.observation_keys.get(start_date, ())
+        ),
+        ending_valuation_observation_keys=list(value_assessment.observation_keys.get(end_date, ())),
         valuation_account_ids=list(value_assessment.valuation_account_ids),
         equation_receipt=equation_receipt,
     )
@@ -568,6 +715,10 @@ def _stable_input_id(namespace: str, rows: Iterable[tuple[object, ...]]) -> str:
             digest.update(len(encoded).to_bytes(8, "big"))
             digest.update(encoded)
     return f"sha256:{digest.hexdigest()}"
+
+
+def _is_observed_value(provenance: _ValueProvenance | None) -> bool:
+    return provenance in {_OBSERVED_VALUE, _ACCOUNT_VALUATION_OBSERVED}
 
 
 def _price_input_id(
@@ -658,6 +809,7 @@ def _build_equation_receipt(
     policy_return_pct: Decimal | None,
     policy_price_inputs: dict[str, dict[date, tuple[date, Decimal]]],
     cashflow_assessment: _CashflowAssessment,
+    valuation_observation_keys: dict[date, tuple[str, ...]],
     benchmark_return_basis: dict[str, dict[date, str]],
     reserve: Decimal,
     exclude_index_etfs: bool,
@@ -669,7 +821,14 @@ def _build_equation_receipt(
     denominator = _modified_dietz_denominator_at(start_date, end_date, daily_cashflow, base_value)
     portfolio_value_input_id = _stable_input_id(
         "performance-portfolio-valuations",
-        ((value_date, daily_value[value_date]) for value_date in sorted_dates),
+        (
+            (
+                value_date,
+                daily_value[value_date],
+                *valuation_observation_keys.get(value_date, ()),
+            )
+            for value_date in sorted_dates
+        ),
     )
     flow_ledger_id = _stable_input_id(
         "performance-external-flow-window",
@@ -813,6 +972,8 @@ def _build_equation_receipt(
         calculation_id=calculation_id,
         external_flow_ledger_id=flow_ledger_id,
         portfolio_valuation_input_id=portfolio_value_input_id,
+        opening_valuation_observation_keys=list(valuation_observation_keys.get(start_date, ())),
+        ending_valuation_observation_keys=list(valuation_observation_keys.get(end_date, ())),
         included_account_ids=list(cashflow_assessment.account_ids),
         requested_start_date=start_date,
         requested_end_date=end_date,
@@ -1354,7 +1515,16 @@ def _earliest_observed_date(session: Session, start_date: date, end_date: date) 
     any) come from transaction-walk reconstruction. Returns None if no complete
     full-book snapshot lives in the window.
     """
-    complete = _complete_snapshot_dates(session, _snapshot_dates(session, start_date, end_date))
+    account_ids = performance_account_ids(session, start_date, end_date)
+    complete_snapshots = _complete_snapshot_dates(
+        session,
+        _snapshot_dates(session, start_date, end_date, account_ids=account_ids),
+        account_ids=account_ids,
+    )
+    complete_account_valuations = _complete_account_valuations_by_date(
+        session, start_date, end_date, account_ids=account_ids
+    )
+    complete = set(complete_snapshots) | set(complete_account_valuations)
     return min(complete) if complete else None
 
 
@@ -1372,10 +1542,15 @@ def _is_start_value_unreliable(base_value: Decimal, end_value: Decimal) -> bool:
 
 
 def _daily_external_cashflow_assessment(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    account_ids: frozenset[int] | None = None,
 ) -> _CashflowAssessment:
     """Project the canonical ledger into the performance calculation contract."""
-    ledger = external_flow_ledger.build_external_flow_ledger(session, start_date, end_date)
+    ledger = external_flow_ledger.build_external_flow_ledger(
+        session, start_date, end_date, account_ids=account_ids
+    )
     issue_reason_codes = {
         "share_transfer_missing_security": _EXTERNAL_SHARE_MOVEMENT_MISSING_SECURITY,
         "share_transfer_missing_ticker": _EXTERNAL_SHARE_MOVEMENT_MISSING_TICKER,
@@ -1730,12 +1905,15 @@ def effective_classification(
 def _daily_portfolio_value(  # pyright: ignore[reportUnusedFunction]
     session: Session, start_date: date, end_date: date
 ) -> dict[date, Decimal]:
-    """Daily total portfolio value across two certified sources:
+    """Daily total portfolio value across three certified sources:
 
-    1. **`holdings_snapshots`** (forward) — real broker data for the date.
-       Authoritative whenever it exists. Includes the day's late-arriving
-       SnapTrade pulls if the daily-refresh cron has run.
-    2. **Transaction walk-back** — reconstructs anything still missing
+    1. **Whole-account observations** — immutable broker totals, including
+       cash and explicitly empty accounts. Accepted only as an exact-date,
+       complete set across the account universe.
+    2. **`holdings_snapshots`** (forward) — real broker data for the date.
+       Used when no complete whole-account set exists for the date. Includes
+       the day's late-arriving SnapTrade pulls if the daily-refresh cron ran.
+    3. **Transaction walk-back** — reconstructs anything still missing
        before the earliest snapshot, with cash adjustment so V_start
        doesn't collapse on net deployment.
 
@@ -1747,8 +1925,125 @@ def _daily_portfolio_value(  # pyright: ignore[reportUnusedFunction]
     return _daily_portfolio_value_assessment(session, start_date, end_date).values
 
 
+def performance_account_ids(session: Session, start_date: date, end_date: date) -> frozenset[int]:
+    """Every active investment account plus active in-window transaction accounts.
+
+    Coverage is intentionally defined from the linked account inventory, not
+    from whichever value rows happened to arrive. Otherwise an unsynchronized
+    account and all of its cash flows disappear from both sides of the return
+    equation and the reduced book can be mislabeled complete.
+    """
+    active = active_account_ids(session)
+    if not active:
+        return frozenset()
+    investment_accounts = frozenset(
+        session.execute(
+            select(Account.account_id).where(
+                Account.account_id.in_(active), Account.type.in_(INVESTMENT_ACCOUNT_TYPES)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    transaction_accounts = frozenset(
+        session.execute(
+            select(InvestmentTransaction.account_id)
+            .where(InvestmentTransaction.account_id.in_(active))
+            .where(InvestmentTransaction.date >= start_date)
+            .where(InvestmentTransaction.date <= end_date)
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    return investment_accounts | transaction_accounts
+
+
+def _complete_account_valuations_by_date(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> dict[date, tuple[AccountValuationObservation, ...]]:
+    """Exact-date account totals only when the entire universe is present."""
+    if account_ids is None:
+        account_ids = performance_account_ids(session, start_date, end_date)
+    if not account_ids:
+        return {}
+    observations = session.scalars(
+        select(AccountValuationObservation)
+        .where(AccountValuationObservation.account_id.in_(account_ids))
+        .where(AccountValuationObservation.as_of_date >= start_date)
+        .where(AccountValuationObservation.as_of_date <= end_date)
+        .where(AccountValuationObservation.currency == "USD")
+        .order_by(
+            AccountValuationObservation.as_of_date,
+            AccountValuationObservation.account_id,
+            AccountValuationObservation.fetched_at.desc(),
+            AccountValuationObservation.valuation_observation_id.desc(),
+        )
+    )
+    selected_by_date: dict[date, dict[int, AccountValuationObservation]] = defaultdict(dict)
+    invalid_by_date: dict[date, set[int]] = defaultdict(set)
+    for observation in observations:
+        try:
+            stored_account_valuation_observation_payload(observation)
+        except (TypeError, ValueError):
+            # An immutable receipt whose key no longer commits to its fields is
+            # not valuation evidence. The assessment below emits a stable
+            # integrity reason instead of silently using the tampered value.
+            invalid_by_date[observation.as_of_date].add(observation.account_id)
+            selected_by_date[observation.as_of_date].pop(observation.account_id, None)
+            continue
+        if observation.account_id in invalid_by_date[observation.as_of_date]:
+            continue
+        selected_by_date[observation.as_of_date].setdefault(observation.account_id, observation)
+    complete: dict[date, tuple[AccountValuationObservation, ...]] = {}
+    for candidate, selected in selected_by_date.items():
+        if set(selected) == set(account_ids) and all(row.is_complete for row in selected.values()):
+            complete[candidate] = tuple(selected[account_id] for account_id in sorted(account_ids))
+    return complete
+
+
+def _has_account_valuation_on_date(
+    session: Session, boundary_date: date, account_ids: frozenset[int] | None = None
+) -> bool:
+    account_ids = account_ids or performance_account_ids(session, boundary_date, boundary_date)
+    if not account_ids:
+        return False
+    return (
+        session.scalar(
+            select(AccountValuationObservation.valuation_observation_id)
+            .where(AccountValuationObservation.account_id.in_(account_ids))
+            .where(AccountValuationObservation.as_of_date == boundary_date)
+            .limit(1)
+        )
+        is not None
+    )
+
+
+def _has_invalid_account_valuation_on_date(
+    session: Session, boundary_date: date, account_ids: frozenset[int]
+) -> bool:
+    observations = session.scalars(
+        select(AccountValuationObservation)
+        .where(AccountValuationObservation.account_id.in_(account_ids))
+        .where(AccountValuationObservation.as_of_date == boundary_date)
+    )
+    for observation in observations:
+        try:
+            stored_account_valuation_observation_payload(observation)
+        except (TypeError, ValueError):
+            return True
+    return False
+
+
 def _daily_portfolio_value_assessment(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    exclude_index_etfs: bool = False,
 ) -> _PortfolioValueAssessment:
     """Return daily values with boundary lineage and fail-closed coverage.
 
@@ -1757,43 +2052,87 @@ def _daily_portfolio_value_assessment(
     the current dataset still has a complete full-book reconstruction anchor.
     A partial observed boundary is never papered over with a cache row.
     """
-    accts = valued_account_ids(session)
-    account_ids = tuple(sorted(accts))
-    forward = _forward_values_from_snapshots(session, start_date, end_date)
-    merged: dict[date, Decimal] = dict(forward)
-    provenance: dict[date, _ValueProvenance] = {d: _OBSERVED_VALUE for d in forward}
-
-    snapshot_candidates = _snapshot_dates(session, start_date, end_date)
-    partial = partial_snapshot_dates(session, snapshot_candidates)
-    unpriceable = unpriceable_snapshot_dates(session, snapshot_candidates)
+    valuation_accounts = performance_account_ids(session, start_date, end_date)
+    complete_account_valuations = _complete_account_valuations_by_date(
+        session, start_date, end_date, account_ids=valuation_accounts
+    )
+    account_ids = tuple(sorted(valuation_accounts))
+    forward = _forward_values_from_snapshots(
+        session, start_date, end_date, account_ids=valuation_accounts
+    )
+    has_total_start = start_date in complete_account_valuations
+    has_total_end = end_date in complete_account_valuations
+    has_holding_boundaries = start_date in forward and end_date in forward
+    use_account_total_basis = (
+        has_total_start and has_total_end and not (exclude_index_etfs and has_holding_boundaries)
+    )
     reasons: set[str] = set()
-    for unsupported_date in set(partial) | unpriceable:
-        merged.pop(unsupported_date, None)
-        provenance.pop(unsupported_date, None)
-    if start_date in partial:
-        reasons.add(_PARTIAL_SNAPSHOT_START_DATE)
-    if end_date in partial:
-        reasons.add(_PARTIAL_SNAPSHOT_END_DATE)
-    if unpriceable:
-        reasons.add(_UNPRICEABLE_HOLDING_SNAPSHOT)
 
-    if (
+    if use_account_total_basis:
+        merged = {
+            valuation_date: sum((row.total_value for row in rows), Decimal(0))
+            for valuation_date, rows in complete_account_valuations.items()
+        }
+        provenance: dict[date, _ValueProvenance] = {
+            valuation_date: _ACCOUNT_VALUATION_OBSERVED
+            for valuation_date in complete_account_valuations
+        }
+        if exclude_index_etfs:
+            reasons.add(_ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED)
+    else:
+        merged = dict(forward)
+        provenance = {d: _OBSERVED_VALUE for d in forward}
+
+    observation_keys: dict[date, tuple[str, ...]] = {}
+    if use_account_total_basis:
+        observation_keys = {
+            valuation_date: tuple(sorted(row.observation_key for row in rows))
+            for valuation_date, rows in complete_account_valuations.items()
+        }
+
+    snapshot_candidates = _snapshot_dates(
+        session, start_date, end_date, account_ids=valuation_accounts
+    )
+    partial: dict[date, frozenset[int]] = partial_snapshot_dates(
+        session, snapshot_candidates, account_ids=valuation_accounts
+    )
+    unpriceable: set[date] = unpriceable_snapshot_dates(
+        session, snapshot_candidates, account_ids=valuation_accounts
+    )
+    if use_account_total_basis:
+        partial = {}
+        unpriceable = set()
+    for unsupported_date in set(partial) | unpriceable:
+        if provenance.get(unsupported_date) == _OBSERVED_VALUE:
+            merged.pop(unsupported_date, None)
+            provenance.pop(unsupported_date, None)
+    if start_date in partial and start_date not in complete_account_valuations:
+        reasons.add(_PARTIAL_SNAPSHOT_START_DATE)
+    if end_date in partial and end_date not in complete_account_valuations:
+        reasons.add(_PARTIAL_SNAPSHOT_END_DATE)
+    if any(day not in complete_account_valuations for day in unpriceable):
+        reasons.add(_UNPRICEABLE_HOLDING_SNAPSHOT)
+    if not use_account_total_basis and (
         snapshot_candidates
         and start_date < min(snapshot_candidates)
-        and _reconstruction_anchor_date(session) is None
+        and start_date not in complete_account_valuations
+        and _reconstruction_anchor_date(session, account_ids=valuation_accounts) is None
     ):
         reasons.add(_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE)
 
     # Backfill is anchored on the earliest *real* snapshot, so figure out
     # whether we still have a gap at the start of the window.
     earliest_known = min(merged.keys()) if merged else None
-    if earliest_known is None or earliest_known > start_date:
+    if not use_account_total_basis and (earliest_known is None or earliest_known > start_date):
         backfill_end = (
             earliest_known - timedelta(days=1) if earliest_known is not None else end_date
         )
-        backfill = _backfill_values_from_transactions(session, start_date, backfill_end)
+        backfill = _backfill_values_from_transactions(
+            session, start_date, backfill_end, account_ids=valuation_accounts
+        )
         if (
-            start_date < (_reconstruction_anchor_date(session) or start_date)
+            start_date
+            < (_reconstruction_anchor_date(session, account_ids=valuation_accounts) or start_date)
             and start_date not in backfill
         ):
             reasons.add(_MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE)
@@ -1805,27 +2144,73 @@ def _daily_portfolio_value_assessment(
     # A partial broker observation is evidence that the date is incomplete;
     # never replace it with a modeled/cache value after gap filling.
     for unsupported_date in set(partial) | unpriceable:
-        merged.pop(unsupported_date, None)
-        provenance.pop(unsupported_date, None)
+        if provenance.get(unsupported_date) == _OBSERVED_VALUE:
+            merged.pop(unsupported_date, None)
+            provenance.pop(unsupported_date, None)
 
     if (
         provenance.get(start_date) == _MODELED_VALUE
-        and _reconstruction_anchor_date(session) is None
+        and _reconstruction_anchor_date(session, account_ids=valuation_accounts) is None
     ):
         reasons.add(_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE)
         merged.pop(start_date, None)
         provenance.pop(start_date, None)
+
+    # Incomplete or integrity-invalid account totals matter only when no
+    # complete holdings/reconstruction boundary survived. A rejected optional
+    # total must not poison an independently complete matched basis.
+    if start_date not in merged and _has_account_valuation_on_date(
+        session, start_date, valuation_accounts
+    ):
+        reasons.add(_PARTIAL_ACCOUNT_VALUATION_START_DATE)
+    if end_date not in merged and _has_account_valuation_on_date(
+        session, end_date, valuation_accounts
+    ):
+        reasons.add(_PARTIAL_ACCOUNT_VALUATION_END_DATE)
+    if (
+        start_date not in merged
+        and _has_invalid_account_valuation_on_date(session, start_date, valuation_accounts)
+    ) or (
+        end_date not in merged
+        and end_date != start_date
+        and _has_invalid_account_valuation_on_date(session, end_date, valuation_accounts)
+    ):
+        reasons.add(_ACCOUNT_VALUATION_INTEGRITY_INVALID)
+    if valuation_accounts and (
+        (
+            start_date not in merged
+            and (
+                start_date in snapshot_candidates
+                or _has_account_valuation_on_date(session, start_date, valuation_accounts)
+            )
+        )
+        or (
+            end_date not in merged
+            and (
+                end_date in snapshot_candidates
+                or _has_account_valuation_on_date(session, end_date, valuation_accounts)
+            )
+        )
+    ):
+        reasons.add(_ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE)
 
     return _PortfolioValueAssessment(
         values=merged,
         provenance=provenance,
         valuation_account_ids=account_ids,
         calculation_reason_codes=tuple(sorted(reasons)),
+        observation_keys=observation_keys,
     )
 
 
-def _snapshot_dates(session: Session, start_date: date, end_date: date) -> set[date]:
-    accts = valued_account_ids(session)
+def _snapshot_dates(
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> set[date]:
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return set()
     return set(
@@ -1841,11 +2226,16 @@ def _snapshot_dates(session: Session, start_date: date, end_date: date) -> set[d
     )
 
 
-def partial_snapshot_dates(session: Session, candidates: set[date]) -> dict[date, frozenset[int]]:
+def partial_snapshot_dates(
+    session: Session,
+    candidates: set[date],
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> dict[date, frozenset[int]]:
     """Return snapshot dates missing one or more valued accounts."""
     if not candidates:
         return {}
-    accts = valued_account_ids(session)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     reported: dict[date, set[int]] = defaultdict(set)
     for on_date, account_id in session.execute(
         select(HoldingSnapshot.snapshot_date, HoldingSnapshot.account_id)
@@ -1861,19 +2251,29 @@ def partial_snapshot_dates(session: Session, candidates: set[date]) -> dict[date
     }
 
 
-def _complete_snapshot_dates(session: Session, candidates: set[date]) -> frozenset[date]:
+def _complete_snapshot_dates(
+    session: Session,
+    candidates: set[date],
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> frozenset[date]:
     return frozenset(
         candidates
-        - set(partial_snapshot_dates(session, candidates))
-        - unpriceable_snapshot_dates(session, candidates)
+        - set(partial_snapshot_dates(session, candidates, account_ids=account_ids))
+        - unpriceable_snapshot_dates(session, candidates, account_ids=account_ids)
     )
 
 
-def unpriceable_snapshot_dates(session: Session, candidates: set[date]) -> set[date]:
+def unpriceable_snapshot_dates(
+    session: Session,
+    candidates: set[date],
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> set[date]:
     """Dates containing a nonzero holding with no usable broker valuation."""
     if not candidates:
         return set()
-    accts = valued_account_ids(session)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return set()
     return set(
@@ -1891,17 +2291,24 @@ def unpriceable_snapshot_dates(session: Session, candidates: set[date]) -> set[d
     )
 
 
-def _reconstruction_anchor_date(session: Session) -> date | None:
+def _reconstruction_anchor_date(
+    session: Session, *, account_ids: frozenset[int] | None = None
+) -> date | None:
     """Earliest snapshot date covering the complete valued-account universe."""
-    candidates = _snapshot_dates(session, date.min, date.max)
-    complete = _complete_snapshot_dates(session, candidates)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
+    candidates = _snapshot_dates(session, date.min, date.max, account_ids=accts)
+    complete = _complete_snapshot_dates(session, candidates, account_ids=accts)
     return min(complete) if complete else None
 
 
 def _forward_values_from_snapshots(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
 ) -> dict[date, Decimal]:
-    accts = valued_account_ids(session)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -1917,7 +2324,11 @@ def _forward_values_from_snapshots(
         .where(HoldingSnapshot.account_id.in_(accts))
     ).all()
 
-    complete = _complete_snapshot_dates(session, {d for d, _v, _q, _p, _a in rows})
+    complete = _complete_snapshot_dates(
+        session,
+        {d for d, _v, _q, _p, _a in rows},
+        account_ids=accts,
+    )
 
     totals: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
     for snap_date, value, quantity, price, _account_id in rows:
@@ -1931,7 +2342,11 @@ def _forward_values_from_snapshots(
 
 
 def _backfill_values_from_transactions(
-    session: Session, start_date: date, end_date: date
+    session: Session,
+    start_date: date,
+    end_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
 ) -> dict[date, Decimal]:
     """Reconstruct daily portfolio values walking transactions backward.
 
@@ -1950,14 +2365,14 @@ def _backfill_values_from_transactions(
 
     Daily total = positions × historical_prices  +  cash_adjustment[d].
     """
-    accts = valued_account_ids(session)
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return {}
-    anchor_date = _reconstruction_anchor_date(session)
+    anchor_date = _reconstruction_anchor_date(session, account_ids=accts)
     if anchor_date is None:
         return {}
 
-    positions = _anchor_positions(session, anchor_date)
+    positions = _anchor_positions(session, anchor_date, account_ids=accts)
     cash_equivalent_security_ids = frozenset(
         session.execute(select(Security.security_id).where(Security.is_cash_equivalent.is_(True)))
         .scalars()
@@ -2070,8 +2485,13 @@ def _backfill_values_from_transactions(
     )
 
 
-def _anchor_positions(session: Session, anchor_date: date) -> dict[int, Decimal]:
-    accts = valued_account_ids(session)
+def _anchor_positions(
+    session: Session,
+    anchor_date: date,
+    *,
+    account_ids: frozenset[int] | None = None,
+) -> dict[int, Decimal]:
+    accts = account_ids if account_ids is not None else valued_account_ids(session)
     if not accts:
         return {}
     rows = session.execute(
@@ -2401,6 +2821,11 @@ def _expected_benchmark_source_date(target_date: date) -> date:
     while not _is_us_market_session(source_date):
         source_date -= timedelta(days=1)
     return source_date
+
+
+def benchmark_source_date(target_date: date) -> date:
+    """Return the exact market-close date required to value ``target_date``."""
+    return _expected_benchmark_source_date(target_date)
 
 
 def _benchmark_price_point(

@@ -100,7 +100,7 @@
     },
     "methodology": "cash_flow.twr_classification",
     "methodology_version": "2",
-    "schema_version": "1.2.0",
+    "schema_version": "1.4.0",
     "source_providers": [
       "plaid",
       "snaptrade"
@@ -116,6 +116,14 @@
         "attestation_keys": [
           "fixture-source-coverage-1"
         ],
+        "broker_archive_covered_ranges": [
+          {
+            "end_date": "2026-07-23",
+            "start_date": "2026-06-24"
+          }
+        ],
+        "broker_archive_status": "complete",
+        "broker_archive_uncovered_ranges": [],
         "covered_ranges": [
           {
             "end_date": "2026-07-23",
@@ -130,6 +138,14 @@
         "attestation_keys": [
           "fixture-source-coverage-2"
         ],
+        "broker_archive_covered_ranges": [
+          {
+            "end_date": "2026-07-23",
+            "start_date": "2026-06-24"
+          }
+        ],
+        "broker_archive_status": "complete",
+        "broker_archive_uncovered_ranges": [],
         "covered_ranges": [
           {
             "end_date": "2026-07-23",
@@ -144,6 +160,14 @@
         "attestation_keys": [
           "fixture-source-coverage-3"
         ],
+        "broker_archive_covered_ranges": [
+          {
+            "end_date": "2026-07-23",
+            "start_date": "2026-06-24"
+          }
+        ],
+        "broker_archive_status": "complete",
+        "broker_archive_uncovered_ranges": [],
         "covered_ranges": [
           {
             "end_date": "2026-07-23",
@@ -162,6 +186,7 @@
         "account_mapping_confidence": "exact",
         "approved_at": "2026-07-22T12:00:00",
         "attestation_key": "fixture-source-coverage-1",
+        "broker_archive_coverage": "provider_asserted",
         "captured_at": "2026-07-22T12:00:00",
         "cashflow_candidate_count": 0,
         "coverage_end": "2026-07-23",
@@ -170,10 +195,10 @@
         "lifecycle_status": "approved",
         "manifest_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
         "methodology_version": "2",
-        "parser_version": "fixture-v2",
+        "parser_version": "test-v1",
         "persisted_source_event_count": 0,
         "source_event_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "source_format": "synthetic_provider_export",
+        "source_format": "synthetic",
         "source_reference": "synthetic:fixture-export-1",
         "source_row_count": 0,
         "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -190,6 +215,7 @@
         "account_mapping_confidence": "exact",
         "approved_at": "2026-07-22T12:00:00",
         "attestation_key": "fixture-source-coverage-2",
+        "broker_archive_coverage": "provider_asserted",
         "captured_at": "2026-07-22T12:00:00",
         "cashflow_candidate_count": 0,
         "coverage_end": "2026-07-23",
@@ -198,10 +224,10 @@
         "lifecycle_status": "approved",
         "manifest_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
         "methodology_version": "2",
-        "parser_version": "fixture-v2",
+        "parser_version": "test-v1",
         "persisted_source_event_count": 0,
         "source_event_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "source_format": "synthetic_provider_export",
+        "source_format": "synthetic",
         "source_reference": "synthetic:fixture-export-2",
         "source_row_count": 0,
         "source_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
@@ -218,6 +244,7 @@
         "account_mapping_confidence": "exact",
         "approved_at": "2026-07-22T12:00:00",
         "attestation_key": "fixture-source-coverage-3",
+        "broker_archive_coverage": "provider_asserted",
         "captured_at": "2026-07-22T12:00:00",
         "cashflow_candidate_count": 0,
         "coverage_end": "2026-07-23",
@@ -226,10 +253,10 @@
         "lifecycle_status": "approved",
         "manifest_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
         "methodology_version": "2",
-        "parser_version": "fixture-v2",
+        "parser_version": "test-v1",
         "persisted_source_event_count": 0,
         "source_event_set_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "source_format": "synthetic_provider_export",
+        "source_format": "synthetic",
         "source_reference": "synthetic:fixture-export-3",
         "source_row_count": 0,
         "source_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
@@ -240,6 +267,8 @@
         "validation_reason_codes": []
       }
     ],
+    "broker_archive_is_complete": true,
+    "broker_archive_status": "complete",
     "is_complete": true,
     "requested_end_date": "2026-07-23",
     "requested_start_date": "2026-06-23",

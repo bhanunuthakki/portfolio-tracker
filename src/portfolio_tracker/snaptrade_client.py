@@ -24,7 +24,8 @@ import.
 from __future__ import annotations
 
 import time
-from datetime import date
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
@@ -36,6 +37,13 @@ from portfolio_tracker.plaid_client import (
     PlaidHolding,
     PlaidInvestmentTransaction,
     PlaidSecurity,
+)
+from portfolio_tracker.provider_delivery import (
+    ProviderDeliveryError,
+    ProviderDeliveryIncompleteError,
+    ProviderDeliveryMetadata,
+    ProviderPayloadError,
+    build_provider_delivery_metadata,
 )
 
 if TYPE_CHECKING:
@@ -56,6 +64,8 @@ class SnapTradeUserCredentials(BaseModel):
 class SnapTradeBrokerageAuthorization(BaseModel):
     authorization_id: str
     brokerage_name: str | None = None
+    disabled: bool | None = None
+    disabled_at: datetime | None = None
 
 
 class SnapTradeHoldingsResponse(BaseModel):
@@ -68,6 +78,13 @@ class SnapTradeTransactionsResponse(BaseModel):
     accounts: list[PlaidAccount]
     securities: list[PlaidSecurity]
     transactions: list[PlaidInvestmentTransaction]
+    total_transactions: int = 0
+    delivery: ProviderDeliveryMetadata | None = None
+
+
+_ACCOUNT_ACTIVITIES_SOURCE_FORMAT = "snaptrade_account_activities_api"
+_ACCOUNT_ACTIVITIES_PARSER_VERSION = "snaptrade_account_activity.v1"
+_ACCOUNT_ACTIVITIES_PAGE_SIZE = 1000
 
 
 _client: SnapTrade | None = None
@@ -192,30 +209,59 @@ def login_url(creds: SnapTradeUserCredentials, custom_redirect: str | None = Non
     kwargs: dict[str, Any] = {"user_id": creds.user_id, "user_secret": creds.user_secret}
     if custom_redirect is not None:
         kwargs["custom_redirect"] = custom_redirect
-    response = get_client().authentication.login_snap_trade_user(**kwargs)
+    try:
+        response = get_client().authentication.login_snap_trade_user(**kwargs)
+    except SnapTradeNotConfiguredError:
+        raise
+    except Exception:
+        raise ProviderDeliveryError("SnapTrade login URL request failed") from None
     body = _body(response)
     redirect = cast(object, body.get("redirectURI") if isinstance(body, dict) else body)
     if not isinstance(redirect, str):
-        raise RuntimeError(f"unexpected SnapTrade login response shape: {body!r}")
+        raise ProviderPayloadError("SnapTrade login response is missing a redirect URL")
     return redirect
 
 
 def list_brokerage_authorizations(
     creds: SnapTradeUserCredentials,
 ) -> list[SnapTradeBrokerageAuthorization]:
-    response = get_client().connections.list_brokerage_authorizations(
-        user_id=creds.user_id, user_secret=creds.user_secret
-    )
-    body = _body(response)
-    items = cast("list[Any]", body if isinstance(body, list) else body.get("data", []))
-    out: list[SnapTradeBrokerageAuthorization] = []
-    for raw in items:
-        out.append(
-            SnapTradeBrokerageAuthorization(
-                authorization_id=str(raw["id"]),
-                brokerage_name=_opt_str(_dig(raw, ["brokerage", "name"])),
-            )
+    try:
+        response = get_client().connections.list_brokerage_authorizations(
+            user_id=creds.user_id, user_secret=creds.user_secret
         )
+    except SnapTradeNotConfiguredError:
+        raise
+    except Exception:
+        # The generated SDK sends user_secret in the query string. Never
+        # propagate its credential-bearing request URL through an exception.
+        raise ProviderDeliveryError("SnapTrade authorization request failed") from None
+    body = _body(response)
+    items = _snaptrade_list_payload(body, label="authorization")
+    out: list[SnapTradeBrokerageAuthorization] = []
+    for index, raw in enumerate(items):
+        if not isinstance(raw, Mapping):
+            raise ProviderPayloadError(
+                f"SnapTrade authorization payload failed validation at offset {index}"
+            )
+        payload = dict(cast("Mapping[str, Any]", raw))
+        authorization_id = payload.get("id")
+        if not isinstance(authorization_id, str) or not authorization_id:
+            raise ProviderPayloadError(
+                f"SnapTrade authorization payload failed validation at offset {index}"
+            )
+        try:
+            out.append(
+                SnapTradeBrokerageAuthorization(
+                    authorization_id=authorization_id,
+                    brokerage_name=_opt_str(_dig(payload, ["brokerage", "name"])),
+                    disabled=_opt_bool(payload.get("disabled")),
+                    disabled_at=_opt_datetime(payload.get("disabled_date")),
+                )
+            )
+        except Exception:
+            raise ProviderPayloadError(
+                f"SnapTrade authorization payload failed validation at offset {index}"
+            ) from None
     return out
 
 
@@ -228,33 +274,66 @@ def list_user_accounts(
     If `authorization_id` is provided, only accounts under that connection
     are returned.
     """
-    response = get_client().account_information.list_user_accounts(
-        user_id=creds.user_id, user_secret=creds.user_secret
-    )
+    try:
+        response = get_client().account_information.list_user_accounts(
+            user_id=creds.user_id, user_secret=creds.user_secret
+        )
+    except SnapTradeNotConfiguredError:
+        raise
+    except Exception:
+        raise ProviderDeliveryError("SnapTrade account list request failed") from None
     body = _body(response)
-    rows = cast("list[Any]", body if isinstance(body, list) else body.get("data", []))
+    rows = _snaptrade_list_payload(body, label="account")
     out: list[tuple[str, PlaidAccount]] = []
-    for raw in rows:
+    for index, raw in enumerate(rows):
+        if not isinstance(raw, Mapping):
+            raise ProviderPayloadError(
+                f"SnapTrade account payload failed validation at offset {index}"
+            )
+        raw = dict(cast("Mapping[str, Any]", raw))
         if (
             authorization_id is not None
             and str(raw.get("brokerage_authorization", "")) != authorization_id
         ):
             continue
-        account_id = str(raw["id"])
-        out.append((account_id, _account_from_snaptrade(raw)))
+        try:
+            account_id = str(raw["id"])
+            out.append((account_id, _account_from_snaptrade(raw)))
+        except Exception:
+            raise ProviderPayloadError(
+                f"SnapTrade account payload failed validation at offset {index}"
+            ) from None
     return out
 
 
 def get_holdings(
     creds: SnapTradeUserCredentials, snaptrade_account_id: str
 ) -> SnapTradeHoldingsResponse:
-    response = get_client().account_information.get_user_holdings(
-        user_id=creds.user_id,
-        user_secret=creds.user_secret,
-        account_id=snaptrade_account_id,
-    )
-    body = _body(response)
-    accounts = [_account_from_snaptrade(body["account"])] if "account" in body else []
+    try:
+        response = get_client().account_information.get_user_holdings(
+            user_id=creds.user_id,
+            user_secret=creds.user_secret,
+            account_id=snaptrade_account_id,
+        )
+    except SnapTradeNotConfiguredError:
+        raise
+    except Exception:
+        raise ProviderDeliveryError("SnapTrade holdings request failed") from None
+    raw_body = _body(response)
+    if not isinstance(raw_body, Mapping):
+        raise ProviderPayloadError("SnapTrade holdings response is not an object")
+    body = dict(cast("Mapping[str, Any]", raw_body))
+    accounts: list[PlaidAccount] = []
+    if "account" in body:
+        account = _account_from_snaptrade(body["account"])
+        account = account.model_copy(
+            update={
+                "provider_available_cash": _snaptrade_available_cash(
+                    body.get("balances"), account.currency
+                )
+            }
+        )
+        accounts.append(account)
     raw_positions = body.get("positions", [])
     securities: dict[str, PlaidSecurity] = {}
     holdings: list[PlaidHolding] = []
@@ -282,26 +361,75 @@ def get_account_activities(
         "account_id": snaptrade_account_id,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
+        "limit": _ACCOUNT_ACTIVITIES_PAGE_SIZE,
     }
-    response = get_client().account_information.get_account_activities(**activity_kwargs)
-    body = _body(response)
-    rows = cast("list[Any]", body if isinstance(body, list) else body.get("data", []))
     securities: dict[str, PlaidSecurity] = {}
     transactions: list[PlaidInvestmentTransaction] = []
-    for raw in rows:
-        symbol_payload = raw.get("symbol") or raw.get("option_symbol")
-        plaid_security_id: str | None = None
-        if isinstance(symbol_payload, dict):
-            sec = _security_from_snaptrade(cast("dict[str, Any]", symbol_payload))
-            securities[sec.plaid_security_id] = sec
-            plaid_security_id = sec.plaid_security_id
-        tx = _transaction_from_snaptrade(raw, snaptrade_account_id, plaid_security_id)
-        if tx is not None:
-            transactions.append(tx)
+    total: int | None = None
+    offset = 0
+    page_count = 0
+    while True:
+        try:
+            response = get_client().account_information.get_account_activities(
+                **activity_kwargs,
+                offset=offset,
+            )
+        except SnapTradeNotConfiguredError:
+            raise
+        except Exception:
+            # The generated SDK sends user_secret as a query parameter, so its
+            # raw exception may contain the credentialed URL.
+            raise ProviderDeliveryError("SnapTrade account activity request failed") from None
+        body = _body(response)
+        rows, page_total = _snaptrade_activity_page(body)
+        page_count += 1
+        if total is None:
+            total = page_total
+        elif page_total != total:
+            raise ProviderDeliveryIncompleteError(
+                "SnapTrade transaction delivery total changed during pagination"
+            )
+        if not rows and offset < total:
+            raise ProviderDeliveryIncompleteError(
+                f"SnapTrade transaction delivery stopped early: reported={total}, fetched={offset}"
+            )
+        for index, raw_row in enumerate(rows, start=offset):
+            raw = dict(raw_row)
+            try:
+                symbol_payload = raw.get("symbol") or raw.get("option_symbol")
+                plaid_security_id: str | None = None
+                if isinstance(symbol_payload, Mapping):
+                    symbol_mapping = cast("Mapping[str, Any]", symbol_payload)
+                    sec = _security_from_snaptrade(dict(symbol_mapping))
+                    securities[sec.plaid_security_id] = sec
+                    plaid_security_id = sec.plaid_security_id
+                transactions.append(
+                    _transaction_from_snaptrade(raw, snaptrade_account_id, plaid_security_id)
+                )
+            except Exception:
+                raise ProviderPayloadError(
+                    f"SnapTrade activity payload failed validation at offset {index}"
+                ) from None
+        offset += len(rows)
+        if offset >= total:
+            break
+    delivery = build_provider_delivery_metadata(
+        provider="snaptrade",
+        source_format=_ACCOUNT_ACTIVITIES_SOURCE_FORMAT,
+        parser_version=_ACCOUNT_ACTIVITIES_PARSER_VERSION,
+        requested_start_date=start_date,
+        requested_end_date=end_date,
+        page_count=page_count,
+        provider_reported_total=total,
+        record_ids=[tx.plaid_investment_transaction_id for tx in transactions],
+        normalized_records=[tx.model_dump(mode="json") for tx in transactions],
+    )
     return SnapTradeTransactionsResponse(
         accounts=[],
         securities=list(securities.values()),
         transactions=transactions,
+        total_transactions=total,
+        delivery=delivery,
     )
 
 
@@ -309,7 +437,27 @@ def get_account_activities(
 
 
 def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
-    snaptrade_account_id = str(raw["id"])
+    raw_account_id = raw.get("id")
+    if not isinstance(raw_account_id, str) or not raw_account_id:
+        raise ValueError("account is missing a provider account id")
+    snaptrade_account_id = raw_account_id
+    raw_account_status = _opt_str(raw.get("status"))
+    account_status = raw_account_status.lower() if raw_account_status is not None else None
+    holdings_initial_sync = _opt_bool(
+        _dig(raw, ["sync_status", "holdings", "initial_sync_completed"])
+    )
+    holdings_last_sync = _opt_datetime(
+        _dig(raw, ["sync_status", "holdings", "last_successful_sync"])
+    )
+    transactions_initial_sync = _opt_bool(
+        _dig(raw, ["sync_status", "transactions", "initial_sync_completed"])
+    )
+    transactions_last_sync = _opt_date(
+        _dig(raw, ["sync_status", "transactions", "last_successful_sync"])
+    )
+    first_transaction_date = _opt_date(
+        _dig(raw, ["sync_status", "transactions", "first_transaction_date"])
+    )
     return PlaidAccount(
         plaid_account_id=snaptrade_account_id,
         name=str(raw.get("name") or raw.get("number") or snaptrade_account_id),
@@ -320,13 +468,26 @@ def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
         ),
         mask=_opt_str(raw.get("number")),
         currency=str(_dig(raw, ["balance", "total", "currency"]) or "USD"),
+        provider_total_value=_to_decimal(_dig(raw, ["balance", "total", "amount"])),
+        provider_available_cash=None,
+        provider_account_status=account_status,
+        provider_holdings_initial_sync_completed=holdings_initial_sync,
+        provider_holdings_last_successful_sync=holdings_last_sync,
+        provider_transactions_initial_sync_completed=transactions_initial_sync,
+        provider_transactions_last_successful_sync=transactions_last_sync,
+        provider_first_transaction_date=first_transaction_date,
     )
 
 
 def _security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
     symbol = raw.get("symbol")
     symbol_dict = cast("dict[str, Any]", symbol if isinstance(symbol, dict) else raw)
-    symbol_id = str(symbol_dict.get("id") or symbol_dict.get("symbol") or "unknown")
+    raw_symbol_id = (
+        symbol_dict.get("id") or symbol_dict.get("symbol") or symbol_dict.get("raw_symbol")
+    )
+    if raw_symbol_id is None or not str(raw_symbol_id).strip():
+        raise ValueError("security is missing a provider symbol id")
+    symbol_id = str(raw_symbol_id).strip()
     return PlaidSecurity(
         plaid_security_id=f"snaptrade:{symbol_id}",
         ticker=_opt_str(symbol_dict.get("symbol") or symbol_dict.get("raw_symbol")),
@@ -368,15 +529,22 @@ def _holding_from_snaptrade(
 
 def _transaction_from_snaptrade(
     raw: dict[str, Any], plaid_account_id: str, plaid_security_id: str | None
-) -> PlaidInvestmentTransaction | None:
-    tx_id = raw.get("id") or raw.get("trade_date")
-    if tx_id is None:
-        return None
+) -> PlaidInvestmentTransaction:
+    tx_id = raw.get("id")
+    if not isinstance(tx_id, str) or not tx_id:
+        raise ValueError("activity is missing a provider record id")
     tx_date = _opt_date(raw.get("trade_date") or raw.get("settlement_date"))
     if tx_date is None:
-        return None
-    raw_type = str(raw.get("type", "")).upper()
+        raise ValueError("activity is missing an effective date")
+    raw_type_value = raw.get("type")
+    if not isinstance(raw_type_value, str) or not raw_type_value.strip():
+        raise ValueError("activity is missing a type")
+    raw_type = raw_type_value.upper()
     canonical_type, subtype = _classify_activity(raw_type)
+    # SnapTrade declares amount nullable for valid in-kind transfers and
+    # corporate actions. Preserve those rows as zero-cash events; their units
+    # still drive the position walk-back and in-kind flow valuation.
+    amount = _to_decimal(raw.get("amount")) or Decimal(0)
     return PlaidInvestmentTransaction(
         plaid_investment_transaction_id=f"snaptrade:{tx_id}",
         plaid_account_id=plaid_account_id,
@@ -384,7 +552,7 @@ def _transaction_from_snaptrade(
         date=tx_date,
         name=_opt_str(raw.get("description")),
         quantity=_to_decimal(raw.get("units")) or Decimal(0),
-        amount=_to_decimal(raw.get("amount")) or Decimal(0),
+        amount=amount,
         price=_to_decimal(raw.get("price")),
         fees=_to_decimal(raw.get("fee")),
         type=canonical_type,
@@ -407,11 +575,29 @@ _ACTIVITY_MAP: dict[str, tuple[str, str | None]] = {
     "TRANSFER": ("transfer", "transfer"),
     "FEE": ("fee", "fee"),
     "TAX": ("fee", "tax"),
+    "SUBSTITUTE_DIVIDEND": ("cash", "substitute_dividend"),
+    "REI": ("cash", "rei"),
+    "STOCK_DIVIDEND": ("transfer", "stock distribution"),
+    "OPTIONEXPIRATION": ("cash", "optionexpiration"),
+    "OPTIONASSIGNMENT": ("cash", "optionassignment"),
+    "OPTIONEXERCISE": ("transfer", "exercise"),
+    "EXTERNAL_ASSET_TRANSFER_IN": ("cash", "external_asset_transfer_in"),
+    "EXTERNAL_ASSET_TRANSFER_OUT": ("cash", "external_asset_transfer_out"),
+    "SPLIT": ("cash", "split"),
 }
 
 
 def _classify_activity(raw_type: str) -> tuple[str, str | None]:
-    return _ACTIVITY_MAP.get(raw_type.upper(), ("cash", raw_type.lower() or None))
+    normalized = raw_type.upper()
+    classification = _ACTIVITY_MAP.get(normalized)
+    if classification is not None:
+        return classification
+    # SnapTrade documents this enum as open-ended and may return the
+    # brokerage's raw label. Preserve that row without promoting it to
+    # Plaid's cash/transfer types; downstream cash-flow logic will leave it
+    # unclassified until an explicit rule or owner decision exists.
+    preserved = normalized.lower()
+    return preserved, preserved
 
 
 # ---- low-level helpers --------------------------------------------------
@@ -427,6 +613,59 @@ def _body(response: object) -> Any:
     if body is None:
         return cast(Any, response)
     return body
+
+
+def _snaptrade_activity_page(body: object) -> tuple[list[Mapping[str, Any]], int]:
+    if not isinstance(body, Mapping):
+        raise ProviderPayloadError("SnapTrade activity response is not a paginated object")
+    payload = cast("Mapping[str, object]", body)
+    rows_value = payload.get("data")
+    pagination_value = payload.get("pagination")
+    if not isinstance(rows_value, list) or not isinstance(pagination_value, Mapping):
+        raise ProviderDeliveryIncompleteError(
+            "SnapTrade activity response is missing pagination metadata"
+        )
+    rows = cast("list[object]", rows_value)
+    pagination = cast("Mapping[str, object]", pagination_value)
+    total = pagination.get("total")
+    if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+        raise ProviderPayloadError("SnapTrade pagination total is invalid")
+    if any(not isinstance(row, Mapping) for row in rows):
+        raise ProviderPayloadError("SnapTrade activity page contains an invalid row")
+    return cast("list[Mapping[str, Any]]", rows), total
+
+
+def _snaptrade_list_payload(body: object, *, label: str) -> list[Any]:
+    if isinstance(body, list):
+        return cast("list[Any]", body)
+    if isinstance(body, Mapping):
+        rows = cast("Mapping[str, object]", body).get("data")
+        if isinstance(rows, list):
+            return cast("list[Any]", rows)
+    raise ProviderPayloadError(f"SnapTrade {label} response is not a list")
+
+
+def _snaptrade_available_cash(raw_balances: object, account_currency: str) -> Decimal | None:
+    """Sum direct cash balances in the account's reporting currency only."""
+    if not isinstance(raw_balances, list):
+        return None
+    values: list[Decimal] = []
+    for raw_balance in cast("list[object]", raw_balances):
+        if not isinstance(raw_balance, Mapping):
+            continue
+        balance = cast("Mapping[str, object]", raw_balance)
+        raw_currency = balance.get("currency")
+        currency: object | None
+        if isinstance(raw_currency, Mapping):
+            currency = cast("Mapping[str, object]", raw_currency).get("code")
+        else:
+            currency = raw_currency
+        if str(currency or "") != account_currency:
+            continue
+        value = _to_decimal(balance.get("cash"))
+        if value is not None:
+            values.append(value)
+    return sum(values, Decimal(0)) if values else None
 
 
 def _opt_str(value: object) -> str | None:
@@ -447,12 +686,33 @@ def _to_decimal(value: object) -> Decimal | None:
 def _opt_date(value: object) -> date | None:
     if value is None:
         return None
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     if isinstance(value, str):
         # SnapTrade returns ISO strings, sometimes with time component.
         return date.fromisoformat(value[:10])
-    return None
+    raise ValueError("provider date field has invalid type")
+
+
+def _opt_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    raise ValueError("provider datetime field has invalid type")
+
+
+def _opt_bool(value: object) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ValueError("provider boolean field has invalid type")
+    return value
 
 
 def _dig(payload: object, path: list[str]) -> object | None:

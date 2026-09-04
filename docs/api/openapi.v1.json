@@ -186,6 +186,97 @@
         "title": "AccountV1",
         "type": "object"
       },
+      "AccountValuationProvenanceOut": {
+        "description": "Sanitized source metadata for one immutable valuation observation.\n\nProvider account locators and raw balance values remain out of this lookup;\nthe performance receipt already carries the value used by the equation.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "integer"
+          },
+          "as_of_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of At"
+          },
+          "as_of_date": {
+            "format": "date",
+            "title": "As Of Date",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "fetched_at": {
+            "format": "date-time",
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "has_source_record_id": {
+            "title": "Has Source Record Id",
+            "type": "boolean"
+          },
+          "is_complete": {
+            "title": "Is Complete",
+            "type": "boolean"
+          },
+          "is_empty": {
+            "title": "Is Empty",
+            "type": "boolean"
+          },
+          "observation_key": {
+            "title": "Observation Key",
+            "type": "string"
+          },
+          "source_kind": {
+            "enum": [
+              "provider_api",
+              "brokerage_statement",
+              "provider_export"
+            ],
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "source_payload_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Payload Sha256"
+          },
+          "source_provider": {
+            "title": "Source Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observation_key",
+          "account_id",
+          "as_of_date",
+          "as_of_at",
+          "currency",
+          "source_kind",
+          "source_provider",
+          "has_source_record_id",
+          "source_payload_sha256",
+          "fetched_at",
+          "is_complete",
+          "is_empty"
+        ],
+        "title": "AccountValuationProvenanceOut",
+        "type": "object"
+      },
       "AccountsV1Result": {
         "properties": {
           "accounts": {
@@ -464,6 +555,29 @@
             "title": "Attestation Keys",
             "type": "array"
           },
+          "broker_archive_covered_ranges": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCoverageRangeOut"
+            },
+            "title": "Broker Archive Covered Ranges",
+            "type": "array"
+          },
+          "broker_archive_status": {
+            "enum": [
+              "complete",
+              "partial",
+              "unasserted"
+            ],
+            "title": "Broker Archive Status",
+            "type": "string"
+          },
+          "broker_archive_uncovered_ranges": {
+            "items": {
+              "$ref": "#/components/schemas/SourceCoverageRangeOut"
+            },
+            "title": "Broker Archive Uncovered Ranges",
+            "type": "array"
+          },
           "covered_ranges": {
             "items": {
               "$ref": "#/components/schemas/SourceCoverageRangeOut"
@@ -488,7 +602,10 @@
           "status",
           "covered_ranges",
           "uncovered_ranges",
-          "attestation_keys"
+          "attestation_keys",
+          "broker_archive_status",
+          "broker_archive_covered_ranges",
+          "broker_archive_uncovered_ranges"
         ],
         "title": "CashFlowAccountSourceCoverageOut",
         "type": "object"
@@ -578,6 +695,16 @@
           },
           "attestation_key": {
             "title": "Attestation Key",
+            "type": "string"
+          },
+          "broker_archive_coverage": {
+            "enum": [
+              "unasserted",
+              "provider_asserted",
+              "statement_attested",
+              "owner_asserted"
+            ],
+            "title": "Broker Archive Coverage",
             "type": "string"
           },
           "captured_at": {
@@ -741,6 +868,7 @@
           "coverage_start",
           "coverage_end",
           "source_type",
+          "broker_archive_coverage",
           "source_reference",
           "source_sha256",
           "captured_at",
@@ -770,6 +898,19 @@
             },
             "title": "Attestations",
             "type": "array"
+          },
+          "broker_archive_is_complete": {
+            "title": "Broker Archive Is Complete",
+            "type": "boolean"
+          },
+          "broker_archive_status": {
+            "enum": [
+              "complete",
+              "partial",
+              "unasserted"
+            ],
+            "title": "Broker Archive Status",
+            "type": "string"
           },
           "is_complete": {
             "title": "Is Complete",
@@ -817,6 +958,8 @@
         "required": [
           "status",
           "is_complete",
+          "broker_archive_status",
+          "broker_archive_is_complete",
           "requested_start_date",
           "requested_end_date",
           "required_start_date",
@@ -2097,6 +2240,13 @@
             "title": "Dated External Cashflows",
             "type": "array"
           },
+          "ending_valuation_observation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ending Valuation Observation Keys",
+            "type": "array"
+          },
           "ending_value": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Ending Value",
@@ -2127,6 +2277,13 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Net External Cashflow In",
             "type": "string"
+          },
+          "opening_valuation_observation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Opening Valuation Observation Keys",
+            "type": "array"
           },
           "opening_value": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -2487,11 +2644,19 @@
             "title": "End Date",
             "type": "string"
           },
+          "ending_valuation_observation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Ending Valuation Observation Keys",
+            "type": "array"
+          },
           "ending_value_provenance": {
             "anyOf": [
               {
                 "enum": [
                   "observed_complete_snapshot",
+                  "observed_account_valuation",
                   "modeled_transaction_walkback"
                 ],
                 "type": "string"
@@ -2534,11 +2699,19 @@
             ],
             "title": "Net External Cashflow In"
           },
+          "opening_valuation_observation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Opening Valuation Observation Keys",
+            "type": "array"
+          },
           "opening_value_provenance": {
             "anyOf": [
               {
                 "enum": [
                   "observed_complete_snapshot",
+                  "observed_account_valuation",
                   "modeled_transaction_walkback"
                 ],
                 "type": "string"
@@ -2560,6 +2733,7 @@
             "default": "unavailable",
             "enum": [
               "observed_certified",
+              "source_provisional",
               "modeled_provisional",
               "unavailable"
             ],
@@ -4527,7 +4701,7 @@
   "info": {
     "description": "Versioned consumer-read contract for portfolio facts. See docs/api/v1-overview.md for envelope and freshness semantics.",
     "title": "Portfolio Data Service API",
-    "version": "1.2.0"
+    "version": "1.4.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -5587,6 +5761,52 @@
           }
         },
         "summary": "Transactions V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/valuation-observations/{observation_key}": {
+      "get": {
+        "description": "Resolve a receipt key to sanitized broker/statement source metadata.",
+        "operationId": "valuation_observation_provenance_api_v1_valuation_observations__observation_key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "observation_key",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 64,
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Observation Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountValuationProvenanceOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Valuation Observation Provenance",
         "tags": [
           "v1"
         ]

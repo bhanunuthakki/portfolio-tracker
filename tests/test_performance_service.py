@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from portfolio_tracker.models import (
     Account,
+    AccountValuationObservation,
     Benchmark,
     CashFlowReconciliationDecision,
     CashFlowSourceAttestation,
@@ -67,31 +68,39 @@ def _tx(
     )
 
 
-def _approve_source_coverage(session, account: Account, start: date, end: date) -> None:
-    session.add(
-        CashFlowSourceAttestation(
-            attestation_key=f"synthetic-performance-{account.account_id}-{start}-{end}",
-            account_id=account.account_id,
-            coverage_start=start + timedelta(days=1),
-            coverage_end=end,
-            source_type="provider_export",
-            source_reference="synthetic:performance-test",
-            source_sha256="a" * 64,
-            captured_at=datetime(2026, 1, 1, tzinfo=UTC),
-            approved_at=datetime(2026, 1, 2, tzinfo=UTC),
-            methodology_version="1",
-            account_identity_sha256="b" * 64,
-            account_mapping_basis="owner_confirmed",
-            account_mapping_confidence="exact",
-            source_format="synthetic",
-            parser_version="test-v1",
-            source_timezone="UTC",
-            source_row_count=0,
-            cashflow_candidate_count=0,
-            source_event_set_sha256=canonical_source_event_set_sha256(()),
-            manifest_sha256="d" * 64,
-        )
+def _approve_source_coverage(
+    session,
+    account: Account,
+    start: date,
+    end: date,
+    *,
+    broker_archive_coverage: str = "provider_asserted",
+) -> CashFlowSourceAttestation:
+    attestation = CashFlowSourceAttestation(
+        attestation_key=f"synthetic-performance-{account.account_id}-{start}-{end}",
+        account_id=account.account_id,
+        coverage_start=start + timedelta(days=1),
+        coverage_end=end,
+        source_type="provider_export",
+        source_reference="synthetic:performance-test",
+        source_sha256="a" * 64,
+        captured_at=datetime(2026, 1, 1, tzinfo=UTC),
+        approved_at=datetime(2026, 1, 2, tzinfo=UTC),
+        methodology_version="1",
+        account_identity_sha256="b" * 64,
+        account_mapping_basis="owner_confirmed",
+        account_mapping_confidence="exact",
+        source_format="synthetic",
+        parser_version="test-v1",
+        source_timezone="UTC",
+        source_row_count=0,
+        cashflow_candidate_count=0,
+        source_event_set_sha256=canonical_source_event_set_sha256(()),
+        manifest_sha256="d" * 64,
+        broker_archive_coverage=broker_archive_coverage,
     )
+    session.add(attestation)
+    return attestation
 
 
 # ---------------------------------------------------------------------------
@@ -1444,7 +1453,7 @@ def test_whole_account_performance_uses_priceable_share_transfer_cashflow(sessio
             Benchmark(symbol="QQQ", date=end, close=Decimal(110)),
         ]
     )
-    _approve_source_coverage(session, account, start, end)
+    source_attestation = _approve_source_coverage(session, account, start, end)
     session.commit()
 
     result = compute_performance_series(session, start, end)
@@ -1454,6 +1463,17 @@ def test_whole_account_performance_uses_priceable_share_transfer_cashflow(sessio
     assert result.net_external_cashflow_in == Decimal(1000)
     assert result.points[-1].portfolio_return_pct == 0
     assert result.points[-1].spy_return_pct is not None
+
+    source_attestation.broker_archive_coverage = "unasserted"
+    session.flush()
+    provisional = compute_performance_series(session, start, end)
+
+    assert provisional.calculation_status == "available"
+    assert provisional.reconstruction_certification == "source_provisional"
+    assert provisional.calculation_reason_codes == ["broker_archive_coverage_not_complete"]
+    assert provisional.points[-1].portfolio_return_pct == result.points[-1].portfolio_return_pct
+    assert provisional.source_coverage is not None
+    assert provisional.source_coverage.broker_archive_is_complete is False
 
 
 def test_whole_account_performance_rejects_nonpositive_dietz_denominator(session):
@@ -1770,6 +1790,23 @@ def test_performance_reports_supported_modeled_opening_provenance(session):
             close=Decimal(100),
             source=PriceSource.YFINANCE.value,
             adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+        )
+    )
+    session.add(
+        AccountValuationObservation(
+            observation_key="8" * 64,
+            account_id=account.account_id,
+            as_of_date=end,
+            total_value=Decimal(110),
+            cash_value=Decimal(0),
+            currency="USD",
+            source_kind="provider_api",
+            source_provider="plaid",
+            source_reference="accounts[].balances.current",
+            source_record_id="modeled-account",
+            fetched_at=datetime(2026, 1, 3, 20, tzinfo=UTC),
+            is_complete=True,
+            is_empty=False,
         )
     )
     _approve_source_coverage(session, account, start, end)

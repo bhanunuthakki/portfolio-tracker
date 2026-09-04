@@ -26,7 +26,12 @@ from portfolio_tracker.jobs._helpers import (
     upsert_account,
     upsert_security,
 )
-from portfolio_tracker.models import HoldingSnapshot, Item, ItemSource
+from portfolio_tracker.models import AccountValuationSourceKind, HoldingSnapshot, Item, ItemSource
+from portfolio_tracker.services.account_valuations import (
+    NewAccountValuationObservation,
+    canonical_account_balance_source_sha256,
+    record_account_valuation_observation,
+)
 
 
 def run() -> int:
@@ -58,6 +63,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         return 0
     access_token = decrypt_token(item.plaid_access_token_encrypted)
     response = plaid_client.get_holdings(access_token)
+    fetched_at = datetime.now(UTC)
 
     plaid_account_to_id: dict[str, int] = {}
     for plaid_account in response.accounts:
@@ -65,6 +71,58 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
             continue
         account = upsert_account(session, item.item_id, plaid_account)
         plaid_account_to_id[plaid_account.plaid_account_id] = account.account_id
+
+    holding_account_ids = {holding.plaid_account_id for holding in response.holdings}
+    for plaid_account in response.accounts:
+        account_id = plaid_account_to_id.get(plaid_account.plaid_account_id)
+        total_value = plaid_account.provider_total_value
+        if account_id is None or total_value is None:
+            continue
+        cash_value = plaid_account.provider_available_cash
+        balance_as_of = plaid_account.provider_balance_as_of
+        valuation_date = balance_as_of.date() if balance_as_of is not None else snapshot_date
+        has_exact_provider_as_of = balance_as_of is not None
+        source_reference = "investments/holdings/get.accounts[].balances"
+        if balance_as_of is not None:
+            source_reference += ".last_updated_datetime"
+        else:
+            # Plaid documents holdings balances as potentially cached. The
+            # fetch timestamp is evidence of receipt, not a fabricated balance
+            # as-of timestamp when the provider omits last_updated_datetime.
+            source_reference += ";cached_as_fetched_no_provider_as_of"
+        is_empty = (
+            has_exact_provider_as_of
+            and total_value == 0
+            and (cash_value is None or cash_value == 0)
+            and plaid_account.plaid_account_id not in holding_account_ids
+        )
+        record_account_valuation_observation(
+            session,
+            NewAccountValuationObservation(
+                account_id=account_id,
+                as_of_date=valuation_date,
+                as_of_at=balance_as_of,
+                total_value=total_value,
+                cash_value=cash_value,
+                currency=plaid_account.currency.upper(),
+                source_kind=AccountValuationSourceKind.PROVIDER_API,
+                source_provider="plaid",
+                source_reference=source_reference,
+                source_record_id=plaid_account.plaid_account_id,
+                source_payload_sha256=canonical_account_balance_source_sha256(
+                    source_provider="plaid",
+                    provider_account_id=plaid_account.plaid_account_id,
+                    source_reference=source_reference,
+                    as_of_date=valuation_date,
+                    total_value=total_value,
+                    cash_value=cash_value,
+                    currency=plaid_account.currency.upper(),
+                ),
+                fetched_at=fetched_at,
+                is_complete=has_exact_provider_as_of,
+                is_empty=is_empty,
+            ),
+        )
 
     plaid_security_to_id: dict[str, int] = {}
     for plaid_security in response.securities:
@@ -102,7 +160,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         )
         rows_written += 1
 
-    item.last_refreshed_at = datetime.now(UTC)
+    item.last_refreshed_at = fetched_at
     return rows_written
 
 

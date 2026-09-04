@@ -20,6 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,6 +28,7 @@ from sqlalchemy.orm import Session
 from portfolio_tracker.models import (
     CashFlowReconciliationDecision,
     CashFlowSourceAttestation,
+    CashFlowSourceAttestationEventLink,
     CashFlowSourceEvent,
     CashFlowSourceGap,
 )
@@ -41,9 +43,29 @@ from portfolio_tracker.schemas import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CERTIFYING_PARSER_VERSIONS: dict[str, frozenset[str]] = {
     "robinhood_activity_csv": frozenset({"robinhood_activity_csv.v4"}),
+    "plaid_investment_transactions_api": frozenset({"plaid_investment_tx.v1"}),
+    "snaptrade_account_activities_api": frozenset({"snaptrade_account_activity.v1"}),
+    # Existing deterministic fixtures exercise the same validation path.
+    "synthetic": frozenset({"test-v1"}),
 }
 
 DateRange = tuple[date, date]
+BrokerArchiveCoverage = Literal[
+    "unasserted", "provider_asserted", "statement_attested", "owner_asserted"
+]
+BrokerArchiveStatus = Literal["complete", "partial", "unasserted"]
+
+
+def _broker_archive_coverage(attestation: CashFlowSourceAttestation) -> BrokerArchiveCoverage:
+    """Return archive assurance independently from API delivery completeness."""
+
+    if attestation.source_type == "brokerage_statement":
+        return "statement_attested"
+    if attestation.source_type == "owner_reconciliation":
+        return "owner_asserted"
+    if attestation.broker_archive_coverage == "provider_asserted":
+        return "provider_asserted"
+    return "unasserted"
 
 
 def _canonical_digest(payload: object) -> str:
@@ -130,6 +152,7 @@ class SourceAttestationEvidence:
     coverage_start: date
     coverage_end: date
     source_type: str
+    broker_archive_coverage: BrokerArchiveCoverage
     source_reference: str
     source_sha256: str
     captured_at: datetime
@@ -160,12 +183,17 @@ class AccountSourceCoverage:
     covered_ranges: tuple[DateRange, ...]
     uncovered_ranges: tuple[DateRange, ...]
     attestation_keys: tuple[str, ...]
+    broker_archive_status: BrokerArchiveStatus
+    broker_archive_covered_ranges: tuple[DateRange, ...]
+    broker_archive_uncovered_ranges: tuple[DateRange, ...]
 
 
 @dataclass(frozen=True)
 class CashFlowSourceCoverageAssessment:
     status: str
     is_complete: bool
+    broker_archive_status: BrokerArchiveStatus
+    broker_archive_is_complete: bool
     requested_start_date: date
     requested_end_date: date
     required_start_date: date | None
@@ -181,6 +209,8 @@ def source_coverage_out(
     return CashFlowSourceCoverageOut(
         status=assessment.status,
         is_complete=assessment.is_complete,
+        broker_archive_status=assessment.broker_archive_status,
+        broker_archive_is_complete=assessment.broker_archive_is_complete,
         requested_start_date=assessment.requested_start_date,
         requested_end_date=assessment.requested_end_date,
         required_start_date=assessment.required_start_date,
@@ -198,6 +228,15 @@ def source_coverage_out(
                     for start, end in account.uncovered_ranges
                 ],
                 attestation_keys=list(account.attestation_keys),
+                broker_archive_status=account.broker_archive_status,
+                broker_archive_covered_ranges=[
+                    SourceCoverageRangeOut(start_date=start, end_date=end)
+                    for start, end in account.broker_archive_covered_ranges
+                ],
+                broker_archive_uncovered_ranges=[
+                    SourceCoverageRangeOut(start_date=start, end_date=end)
+                    for start, end in account.broker_archive_uncovered_ranges
+                ],
             )
             for account in assessment.accounts
         ],
@@ -208,6 +247,7 @@ def source_coverage_out(
                 coverage_start=row.coverage_start,
                 coverage_end=row.coverage_end,
                 source_type=row.source_type,
+                broker_archive_coverage=row.broker_archive_coverage,
                 source_reference=row.source_reference,
                 source_sha256=row.source_sha256,
                 captured_at=row.captured_at,
@@ -314,10 +354,9 @@ def _validation_reason_codes(
     if attestation.account_mapping_confidence == "provisional":
         reasons.add("source_attestation_account_mapping_provisional")
     accepted_parser_versions = _CERTIFYING_PARSER_VERSIONS.get(attestation.source_format or "")
-    if (
-        accepted_parser_versions is not None
-        and attestation.parser_version not in accepted_parser_versions
-    ):
+    if accepted_parser_versions is None:
+        reasons.add("source_attestation_source_format_unsupported")
+    elif attestation.parser_version not in accepted_parser_versions:
         reasons.add("source_attestation_parser_version_unsupported")
     if attestation.cashflow_candidate_count != len(events):
         reasons.add("source_attestation_candidate_count_mismatch")
@@ -351,7 +390,17 @@ def _validation_reason_codes(
         if not decision_date_basis_matches_source(decision, event):
             reasons.add("source_attestation_event_effective_date_basis_mismatch")
         if decision.resolution_kind == "unresolved":
-            reasons.add("source_attestation_event_decision_unresolved")
+            event_date = event.activity_date or event.process_date or event.settlement_date
+            if event_date is None or not any(
+                gap.reason_code == "unresolved_classification"
+                and gap.gap_start <= event_date <= gap.gap_end
+                for gap in gaps
+            ):
+                reasons.add("source_attestation_event_unresolved_gap_missing")
+            # A correctly localized unresolved decision is represented by the
+            # explicit gap. It invalidates that date, not the attestation's
+            # independently resolved coverage outside the gap.
+            continue
         if decision.confidence == "provisional":
             reasons.add("source_attestation_event_decision_provisional")
     return tuple(sorted(reasons))
@@ -376,6 +425,8 @@ def assess_cashflow_source_coverage(
         return CashFlowSourceCoverageAssessment(
             status="complete",
             is_complete=True,
+            broker_archive_status="complete",
+            broker_archive_is_complete=True,
             requested_start_date=start_date,
             requested_end_date=end_date,
             required_start_date=None if required_start > end_date else required_start,
@@ -387,6 +438,9 @@ def assess_cashflow_source_coverage(
                     covered_ranges=(),
                     uncovered_ranges=(),
                     attestation_keys=(),
+                    broker_archive_status="complete",
+                    broker_archive_covered_ranges=(),
+                    broker_archive_uncovered_ranges=(),
                 )
                 for account_id in sorted(account_ids)
             ),
@@ -410,7 +464,7 @@ def assess_cashflow_source_coverage(
     )
     attestation_ids = [row.attestation_id for row in rows]
     gaps_by_attestation: dict[int, list[CashFlowSourceGap]] = defaultdict(list)
-    events_by_attestation: dict[int, list[CashFlowSourceEvent]] = defaultdict(list)
+    event_map_by_attestation: dict[int, dict[str, CashFlowSourceEvent]] = defaultdict(dict)
     current_decisions: dict[str, list[CashFlowReconciliationDecision]] = defaultdict(list)
     if attestation_ids:
         gap_rows = (
@@ -441,8 +495,25 @@ def assess_cashflow_source_coverage(
             .all()
         )
         for event in event_rows:
-            events_by_attestation[event.attestation_id].append(event)
-        event_ids = [event.source_event_id for event in event_rows]
+            event_map_by_attestation[event.attestation_id][event.source_event_id] = event
+        linked_event_rows = session.execute(
+            select(CashFlowSourceAttestationEventLink.attestation_id, CashFlowSourceEvent)
+            .join(
+                CashFlowSourceEvent,
+                CashFlowSourceEvent.source_event_id
+                == CashFlowSourceAttestationEventLink.source_event_id,
+            )
+            .where(CashFlowSourceAttestationEventLink.attestation_id.in_(attestation_ids))
+            .order_by(
+                CashFlowSourceAttestationEventLink.attestation_id,
+                CashFlowSourceEvent.source_event_id,
+            )
+        ).all()
+        for attestation_id, event in linked_event_rows:
+            event_map_by_attestation[attestation_id][event.source_event_id] = event
+        event_ids = sorted(
+            {event_id for events in event_map_by_attestation.values() for event_id in events}
+        )
         if event_ids:
             decision_rows = (
                 session.execute(
@@ -478,10 +549,11 @@ def assess_cashflow_source_coverage(
 
     evidence: list[SourceAttestationEvidence] = []
     coverable_by_account: dict[int, list[DateRange]] = defaultdict(list)
+    archive_coverable_by_account: dict[int, list[DateRange]] = defaultdict(list)
     keys_by_account: dict[int, list[str]] = defaultdict(list)
     for row in rows:
         raw_gaps = tuple(gaps_by_attestation[row.attestation_id])
-        raw_events = tuple(events_by_attestation[row.attestation_id])
+        raw_events = tuple(event_map_by_attestation[row.attestation_id].values())
         validation_reasons = _validation_reason_codes(
             row,
             raw_gaps,
@@ -501,6 +573,7 @@ def assess_cashflow_source_coverage(
                 coverage_start=row.coverage_start,
                 coverage_end=row.coverage_end,
                 source_type=row.source_type,
+                broker_archive_coverage=_broker_archive_coverage(row),
                 source_reference=row.source_reference,
                 source_sha256=row.source_sha256,
                 captured_at=row.captured_at,
@@ -540,18 +613,31 @@ def assess_cashflow_source_coverage(
         clipped = (max(row.coverage_start, required_start), min(row.coverage_end, end_date))
         gap_ranges = tuple((gap.gap_start, gap.gap_end) for gap in raw_gaps)
         coverable_by_account[row.account_id].extend(_subtract_ranges(clipped, gap_ranges))
+        if _broker_archive_coverage(row) != "unasserted":
+            archive_coverable_by_account[row.account_id].extend(
+                _subtract_ranges(clipped, gap_ranges)
+            )
         keys_by_account[row.account_id].append(row.attestation_key)
 
     account_results: list[AccountSourceCoverage] = []
     for account_id in sorted(account_ids):
         covered = _merge_ranges(coverable_by_account[account_id])
         uncovered = _uncovered_ranges((required_start, end_date), covered)
+        archive_covered = _merge_ranges(archive_coverable_by_account[account_id])
+        archive_uncovered = _uncovered_ranges((required_start, end_date), archive_covered)
         if not uncovered:
             status = "complete"
         elif covered:
             status = "partial"
         else:
             status = "missing"
+        archive_status: BrokerArchiveStatus
+        if not archive_uncovered:
+            archive_status = "complete"
+        elif archive_covered:
+            archive_status = "partial"
+        else:
+            archive_status = "unasserted"
         account_results.append(
             AccountSourceCoverage(
                 account_id=account_id,
@@ -559,6 +645,9 @@ def assess_cashflow_source_coverage(
                 covered_ranges=covered,
                 uncovered_ranges=uncovered,
                 attestation_keys=tuple(keys_by_account[account_id]),
+                broker_archive_status=archive_status,
+                broker_archive_covered_ranges=archive_covered,
+                broker_archive_uncovered_ranges=archive_uncovered,
             )
         )
 
@@ -569,9 +658,21 @@ def assess_cashflow_source_coverage(
         overall_status = "partial"
     else:
         overall_status = "missing"
+    archive_complete = all(
+        account.broker_archive_status == "complete" for account in account_results
+    )
+    archive_status: BrokerArchiveStatus
+    if archive_complete:
+        archive_status = "complete"
+    elif any(account.broker_archive_covered_ranges for account in account_results):
+        archive_status = "partial"
+    else:
+        archive_status = "unasserted"
     return CashFlowSourceCoverageAssessment(
         status=overall_status,
         is_complete=complete,
+        broker_archive_status=archive_status,
+        broker_archive_is_complete=archive_complete,
         requested_start_date=start_date,
         requested_end_date=end_date,
         required_start_date=required_start,
