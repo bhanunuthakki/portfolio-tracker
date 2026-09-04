@@ -79,6 +79,11 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         if account_id is None or total_value is None:
             continue
         cash_value = plaid_account.provider_available_cash
+        balance_currency = plaid_account.provider_balance_currency
+        if balance_currency is None:
+            # The account compatibility currency can default to USD, but a
+            # provider total without its own ISO currency is not certifiable.
+            continue
         balance_as_of = plaid_account.provider_balance_as_of
         valuation_date = balance_as_of.date() if balance_as_of is not None else snapshot_date
         has_exact_provider_as_of = balance_as_of is not None
@@ -104,7 +109,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
                 as_of_at=balance_as_of,
                 total_value=total_value,
                 cash_value=cash_value,
-                currency=plaid_account.currency.upper(),
+                currency=balance_currency,
                 source_kind=AccountValuationSourceKind.PROVIDER_API,
                 source_provider="plaid",
                 source_reference=source_reference,
@@ -116,7 +121,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
                     as_of_date=valuation_date,
                     total_value=total_value,
                     cash_value=cash_value,
-                    currency=plaid_account.currency.upper(),
+                    currency=balance_currency,
                 ),
                 fetched_at=fetched_at,
                 is_complete=has_exact_provider_as_of,

@@ -38,8 +38,12 @@ class UnsupportedProviderParserError(ProviderDeliveryError):
 
 
 _SUPPORTED_PROVIDER_PARSERS: dict[str, frozenset[str]] = {
-    "plaid_investment_transactions_api": frozenset({"plaid_investment_tx.v1"}),
-    "snaptrade_account_activities_api": frozenset({"snaptrade_account_activity.v1"}),
+    "plaid_investment_transactions_api": frozenset(
+        {"plaid_investment_tx.v1", "plaid_investment_tx.v2"}
+    ),
+    "snaptrade_account_activities_api": frozenset(
+        {"snaptrade_account_activity.v1", "snaptrade_account_activity.v2"}
+    ),
 }
 
 

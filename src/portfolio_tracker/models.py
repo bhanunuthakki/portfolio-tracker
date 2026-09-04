@@ -1307,6 +1307,71 @@ class CashFlowReconciliationRunTransactionMutation(Base):
     )
 
 
+class ProviderTransactionCorrectionReceipt(Base):
+    """Append-only authority for one owner-approved provider-row correction."""
+
+    __tablename__ = "provider_transaction_correction_receipts"
+    __table_args__ = (
+        CheckConstraint(
+            "source_provider IN ('plaid', 'snaptrade')",
+            name="ck_provider_tx_correction_receipts_provider",
+        ),
+        CheckConstraint(
+            "source_locator_kind = 'provider_record'",
+            name="ck_provider_tx_correction_receipts_locator_kind",
+        ),
+        CheckConstraint(
+            "decision_authority = 'owner_approved'",
+            name="ck_provider_tx_correction_receipts_authority",
+        ),
+        CheckConstraint(
+            "length(before_payload_sha256) = 64 AND length(after_payload_sha256) = 64 "
+            "AND length(delivery_record_set_sha256) = 64 AND length(backup_sha256) = 64 "
+            "AND length(preview_sha256) = 64",
+            name="ck_provider_tx_correction_receipts_sha256_lengths",
+        ),
+        CheckConstraint(
+            "length(changed_fields_json) > 2 AND length(before_payload_json) > 2 "
+            "AND length(after_payload_json) > 2",
+            name="ck_provider_tx_correction_receipts_payloads_present",
+        ),
+        Index(
+            "ix_provider_tx_correction_receipts_record",
+            "provider_record_id",
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("cashflow_reconciliation_runs.run_id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    provider_record_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "investment_transactions.plaid_investment_transaction_id",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.account_id", ondelete="RESTRICT"), nullable=False
+    )
+    source_provider: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_locator_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    changed_fields_json: Mapped[str] = mapped_column(Text, nullable=False)
+    before_payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    after_payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    before_payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    after_payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    delivery_record_set_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    decision_authority: Mapped[str] = mapped_column(String(32), nullable=False)
+    backup_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    preview_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class TickerOverride(Base):
     """User-supplied ticker symbol for a security Plaid returned without one.
 

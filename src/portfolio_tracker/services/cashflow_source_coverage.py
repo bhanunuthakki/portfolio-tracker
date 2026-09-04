@@ -43,8 +43,12 @@ from portfolio_tracker.schemas import (
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CERTIFYING_PARSER_VERSIONS: dict[str, frozenset[str]] = {
     "robinhood_activity_csv": frozenset({"robinhood_activity_csv.v4"}),
-    "plaid_investment_transactions_api": frozenset({"plaid_investment_tx.v1"}),
-    "snaptrade_account_activities_api": frozenset({"snaptrade_account_activity.v1"}),
+    "plaid_investment_transactions_api": frozenset(
+        {"plaid_investment_tx.v1", "plaid_investment_tx.v2"}
+    ),
+    "snaptrade_account_activities_api": frozenset(
+        {"snaptrade_account_activity.v1", "snaptrade_account_activity.v2"}
+    ),
     # Existing deterministic fixtures exercise the same validation path.
     "synthetic": frozenset({"test-v1"}),
 }

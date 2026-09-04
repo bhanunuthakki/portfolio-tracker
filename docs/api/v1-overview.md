@@ -95,6 +95,14 @@ return stable reason codes such as `portfolio_start_value_unavailable`,
 from current transactions, overrides, prices, and the complete observed anchor;
 unversioned `portfolio_values_daily` backfill cache rows are not consumed.
 
+Provider synchronization remains insert-only for existing transaction IDs.
+If a provider reuses an ID with changed normalized economics, synchronization
+fails closed and exposes a private correction plan to the local operator. A
+separate owner-approved service path can apply that exact preview only after
+verifying a restorable SQLite backup; it writes an append-only correction
+receipt. There is deliberately no public HTTP endpoint that can silently
+authorize this historical rewrite.
+
 **Deferred:** `GET/POST /api/v1/sync-runs` requires a run-log schema migration
 on the live database and ships with the Phase 3 migration batch (backup +
 preview + owner approval). Until then, sync recency comes from `health` and

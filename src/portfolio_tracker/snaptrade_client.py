@@ -37,6 +37,7 @@ from portfolio_tracker.plaid_client import (
     PlaidHolding,
     PlaidInvestmentTransaction,
     PlaidSecurity,
+    optional_provider_decimal,
 )
 from portfolio_tracker.provider_delivery import (
     ProviderDeliveryError,
@@ -83,8 +84,10 @@ class SnapTradeTransactionsResponse(BaseModel):
 
 
 _ACCOUNT_ACTIVITIES_SOURCE_FORMAT = "snaptrade_account_activities_api"
-_ACCOUNT_ACTIVITIES_PARSER_VERSION = "snaptrade_account_activity.v1"
+_ACCOUNT_ACTIVITIES_PARSER_VERSION = "snaptrade_account_activity.v2"
 _ACCOUNT_ACTIVITIES_PAGE_SIZE = 1000
+_MONEY_STORAGE_QUANTUM = Decimal("0.000001")
+_QUANTITY_STORAGE_QUANTUM = Decimal("0.0000000001")
 
 
 _client: SnapTrade | None = None
@@ -468,7 +471,11 @@ def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
         ),
         mask=_opt_str(raw.get("number")),
         currency=str(_dig(raw, ["balance", "total", "currency"]) or "USD"),
-        provider_total_value=_to_decimal(_dig(raw, ["balance", "total", "amount"])),
+        provider_balance_currency=str(_dig(raw, ["balance", "total", "currency"]) or "USD").upper(),
+        provider_total_value=optional_provider_decimal(
+            _dig(raw, ["balance", "total", "amount"]),
+            quantum=_MONEY_STORAGE_QUANTUM,
+        ),
         provider_available_cash=None,
         provider_account_status=account_status,
         provider_holdings_initial_sync_completed=holdings_initial_sync,
@@ -505,8 +512,10 @@ def _security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
 def _holding_from_snaptrade(
     raw: dict[str, Any], plaid_account_id: str, plaid_security_id: str
 ) -> PlaidHolding:
-    quantity = _to_decimal(raw.get("units")) or Decimal(0)
-    price = _to_decimal(raw.get("price"))
+    quantity = optional_provider_decimal(
+        raw.get("units"), quantum=_QUANTITY_STORAGE_QUANTUM
+    ) or Decimal(0)
+    price = optional_provider_decimal(raw.get("price"), quantum=_MONEY_STORAGE_QUANTUM)
     value = quantity * price if price is not None else None
     # SnapTrade reports `average_purchase_price` PER SHARE, but `cost_basis`
     # follows the Plaid convention of TOTAL dollars for the lot (every
@@ -514,7 +523,9 @@ def _holding_from_snaptrade(
     # it as total). Multiply by units so the column is aggregator-independent;
     # without this, SnapTrade-sourced cost basis is understated by a factor of
     # quantity unless a CostBasisOverride happens to mask it.
-    avg_price = _to_decimal(raw.get("average_purchase_price"))
+    avg_price = optional_provider_decimal(
+        raw.get("average_purchase_price"), quantum=_MONEY_STORAGE_QUANTUM
+    )
     cost_basis = avg_price * quantity if avg_price is not None else None
     return PlaidHolding(
         plaid_account_id=plaid_account_id,
@@ -544,17 +555,20 @@ def _transaction_from_snaptrade(
     # SnapTrade declares amount nullable for valid in-kind transfers and
     # corporate actions. Preserve those rows as zero-cash events; their units
     # still drive the position walk-back and in-kind flow valuation.
-    amount = _to_decimal(raw.get("amount")) or Decimal(0)
+    amount = optional_provider_decimal(
+        raw.get("amount"), quantum=_MONEY_STORAGE_QUANTUM
+    ) or Decimal(0)
     return PlaidInvestmentTransaction(
         plaid_investment_transaction_id=f"snaptrade:{tx_id}",
         plaid_account_id=plaid_account_id,
         plaid_security_id=plaid_security_id,
         date=tx_date,
         name=_opt_str(raw.get("description")),
-        quantity=_to_decimal(raw.get("units")) or Decimal(0),
+        quantity=optional_provider_decimal(raw.get("units"), quantum=_QUANTITY_STORAGE_QUANTUM)
+        or Decimal(0),
         amount=amount,
-        price=_to_decimal(raw.get("price")),
-        fees=_to_decimal(raw.get("fee")),
+        price=optional_provider_decimal(raw.get("price"), quantum=_MONEY_STORAGE_QUANTUM),
+        fees=optional_provider_decimal(raw.get("fee"), quantum=_MONEY_STORAGE_QUANTUM),
         type=canonical_type,
         subtype=subtype,
         currency=str(_dig(raw, ["currency", "code"]) or "USD"),
@@ -662,7 +676,7 @@ def _snaptrade_available_cash(raw_balances: object, account_currency: str) -> De
             currency = raw_currency
         if str(currency or "") != account_currency:
             continue
-        value = _to_decimal(balance.get("cash"))
+        value = optional_provider_decimal(balance.get("cash"), quantum=_MONEY_STORAGE_QUANTUM)
         if value is not None:
             values.append(value)
     return sum(values, Decimal(0)) if values else None
@@ -673,14 +687,6 @@ def _opt_str(value: object) -> str | None:
         return None
     text = str(value)
     return text if text else None
-
-
-def _to_decimal(value: object) -> Decimal | None:
-    if value is None:
-        return None
-    if isinstance(value, Decimal):
-        return value
-    return Decimal(str(value))
 
 
 def _opt_date(value: object) -> date | None:

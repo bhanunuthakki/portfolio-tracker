@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -40,6 +41,80 @@ def test_plaid_account_retains_direct_balance_last_updated_datetime() -> None:
     )
 
     assert account.provider_balance_as_of == datetime(2026, 9, 2, 18, 30, tzinfo=UTC)
+    assert account.provider_balance_currency == "USD"
+
+
+def test_plaid_account_normalizes_only_float_noise_at_storage_precision() -> None:
+    account = plaid_client._account_from_plaid(
+        _PlaidObject(
+            {
+                "account_id": "private-account-id",
+                "name": "Brokerage",
+                "type": "investment",
+                "balances": {
+                    "current": 4572868.000000001,
+                    "available": 29999.999999999996,
+                    "iso_currency_code": "usd",
+                    "last_updated_datetime": datetime(2026, 9, 2, 18, 30, tzinfo=UTC),
+                },
+            }
+        )
+    )
+
+    assert account.provider_total_value == Decimal("4572868.000000")
+    assert account.provider_available_cash == Decimal("30000.000000")
+    assert account.provider_balance_currency == "USD"
+
+
+def test_plaid_account_rejects_genuine_extra_precision_with_private_safe_diagnostic() -> None:
+    private_account_id = "private-account-id-must-not-be-logged"
+    private_value = "123.1234567"
+    with pytest.raises(plaid_client.PlaidAccountFieldNormalizationError) as raised:
+        plaid_client._account_from_plaid(
+            _PlaidObject(
+                {
+                    "account_id": private_account_id,
+                    "name": "Brokerage",
+                    "type": "investment",
+                    "balances": {
+                        "current": private_value,
+                        "iso_currency_code": "USD",
+                    },
+                }
+            )
+        )
+
+    public_message = str(raised.value)
+    assert private_account_id not in public_message
+    assert private_value not in public_message
+    assert "balances.current" in public_message
+    assert raised.value.private_diagnostic() == {
+        "provider": "plaid",
+        "provider_account_id": private_account_id,
+        "field": "balances.current",
+        "reason_code": "precision_exceeds_storage",
+    }
+
+
+def test_plaid_balance_as_of_rejects_timestamp_without_timezone() -> None:
+    with pytest.raises(
+        plaid_client.PlaidAccountFieldNormalizationError,
+        match=r"balances\.last_updated_datetime",
+    ):
+        plaid_client._account_from_plaid(
+            _PlaidObject(
+                {
+                    "account_id": "private-account-id",
+                    "name": "Brokerage",
+                    "type": "investment",
+                    "balances": {
+                        "current": 100.0,
+                        "iso_currency_code": "USD",
+                        "last_updated_datetime": "2026-09-02T18:30:00",
+                    },
+                }
+            )
+        )
 
 
 def test_snaptrade_normalization_retains_documented_sync_status() -> None:

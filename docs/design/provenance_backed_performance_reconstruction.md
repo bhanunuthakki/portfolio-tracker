@@ -108,6 +108,27 @@ captures link to the same immutable event and current decision, keeping the
 flow ID and equation receipt stable while each delivery attestation retains its
 own range and record-set hash.
 
+Provider transaction parser versions `plaid_investment_tx.v2` and
+`snaptrade_account_activity.v2` remove only binary floating-point transport
+noise when a numeric SDK value is within two machine ULPs of the database's
+declared six-decimal money or ten-decimal quantity grid. String and Decimal
+inputs retain every supplied digit, so genuine excess precision still fails
+closed. Earlier v1 attestations remain valid because they were already checked
+against the same storage grid; v2 records the new normalization semantics for
+new captures.
+
+An existing provider record ID with changed economics is never overwritten by
+ordinary synchronization. The conflict produces an exact private correction
+plan containing the provider record ID, changed field names, complete before
+and after payloads, and hashes. Applying that plan requires an owner-approved
+plan digest plus a byte-verified, integrity-checked SQLite backup and immutable
+preview. The database mutation and an append-only
+`provider_transaction_correction_receipts` row commit atomically. The receipt
+retains the provider record locator, delivery-set hash, changed fields,
+before/after payloads and hashes, approval time, and backup/preview hashes.
+This is a narrow correction authority, not permission for provider sync to
+edit historical rows silently.
+
 An `ACATI` statement row with `Amount="--"`, an instrument, and a nonzero
 quantity is an in-kind transfer, not a zero-dollar cash flow. Source coverage
 continues to describe the full statement. Manifest schema v3 separately binds
@@ -144,6 +165,12 @@ support at both boundaries because a whole-account total cannot reveal the
 excluded amount. When multiple observations exist for one account/date, the
 latest capture is authoritative; a later incomplete capture cannot be hidden
 by an older complete one.
+
+When the caller omits an ending date, the window is anchored to the latest
+complete broker observation—not the wall-clock date. Lookbacks such as 3m, 6m,
+1y, and 2y must be calculated backward from that resolved ending observation.
+An explicitly supplied date remains exact and fails closed if the corresponding
+valuation boundary is absent.
 
 For each account/security, modeled quantities are reconstructed on a common
 split-adjusted basis:

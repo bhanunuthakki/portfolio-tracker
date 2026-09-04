@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -49,6 +49,12 @@ from portfolio_tracker.services.cashflow_source_coverage import (
 )
 from portfolio_tracker.services.external_flow_ledger import classify_by_name
 
+if TYPE_CHECKING:
+    from portfolio_tracker.services.provider_transaction_corrections import (
+        ProviderTransactionCorrectionApproval,
+        ProviderTransactionCorrectionPlan,
+    )
+
 _METHODOLOGY_VERSION = "provider-api-v1"
 _SOURCE_TIMEZONE = "provider-date"
 _MONEY_QUANTUM = Decimal("0.000001")
@@ -78,6 +84,15 @@ _INTERNAL_TRANSFER_SUBTYPES = frozenset(
 
 class ProviderTransactionConflictError(ProviderDeliveryError):
     """Stored normalized economics disagree with the newly delivered record."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        correction_plan: ProviderTransactionCorrectionPlan | None = None,
+    ) -> None:
+        self.correction_plan = correction_plan
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -540,6 +555,8 @@ def _existing_capture_matches(
 def persist_provider_account_attestation(
     session: Session,
     capture: ProviderAccountTransactionCapture,
+    *,
+    transaction_correction_approval: ProviderTransactionCorrectionApproval | None = None,
 ) -> ProviderAttestationWriteResult:
     """Persist one account/range capture without committing the caller's transaction."""
     if session.get(Account, capture.account_id) is None:
@@ -585,6 +602,7 @@ def persist_provider_account_attestation(
     # parents before verifying their exact economics and inserting FK-dependent
     # Source events and decisions.
     session.flush()
+    conflicting_transaction_found = False
     for transaction in capture.transactions:
         stored = session.get(
             InvestmentTransaction,
@@ -597,9 +615,26 @@ def persist_provider_account_attestation(
             account_id=capture.account_id,
             security_id=expected_security_id,
         ):
+            conflicting_transaction_found = True
+            break
+    if conflicting_transaction_found:
+        from portfolio_tracker.services.provider_transaction_corrections import (
+            apply_provider_transaction_corrections,
+            preview_provider_transaction_corrections,
+        )
+
+        correction_plan = preview_provider_transaction_corrections(session, capture)
+        if transaction_correction_approval is None:
             raise ProviderTransactionConflictError(
-                "stored transaction conflicts with the count-verified provider payload"
+                "stored transaction conflicts with the count-verified provider payload",
+                correction_plan=correction_plan,
             )
+        apply_provider_transaction_corrections(
+            session,
+            capture,
+            correction_plan,
+            transaction_correction_approval,
+        )
 
     captured_at = _normalize_captured_at(capture.captured_at)
     normalized_rows = [transaction.model_dump(mode="json") for transaction in capture.transactions]

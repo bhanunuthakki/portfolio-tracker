@@ -20,8 +20,9 @@ module stays cheap to import. Same rationale as `_ensure_snaptrade` in
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import BaseModel, ConfigDict
@@ -49,6 +50,10 @@ class PlaidAccount(BaseModel):
     subtype: str | None = None
     mask: str | None = None
     currency: str = "USD"
+    # Exact ISO currency attached to balances.current/available. ``currency``
+    # remains the account compatibility field, but a missing/unofficial
+    # balance currency must not be silently certified as USD.
+    provider_balance_currency: str | None = None
     provider_total_value: Decimal | None = None
     provider_available_cash: Decimal | None = None
     # Direct provider freshness/availability facts only.  A missing timestamp
@@ -121,7 +126,36 @@ class InvestmentsTransactionsResponse(BaseModel):
 
 
 _INVESTMENT_TRANSACTIONS_SOURCE_FORMAT = "plaid_investment_transactions_api"
-_INVESTMENT_TRANSACTIONS_PARSER_VERSION = "plaid_investment_tx.v1"
+_INVESTMENT_TRANSACTIONS_PARSER_VERSION = "plaid_investment_tx.v2"
+_ACCOUNT_BALANCE_STORAGE_QUANTUM = Decimal("0.000001")
+_ACCOUNT_BALANCE_MAX_ABSOLUTE = Decimal("100000000000000")
+_TRANSACTION_MONEY_STORAGE_QUANTUM = Decimal("0.000001")
+_TRANSACTION_QUANTITY_STORAGE_QUANTUM = Decimal("0.0000000001")
+
+
+class PlaidAccountFieldNormalizationError(ProviderPayloadError):
+    """Safe public error with an opt-in private account diagnostic.
+
+    Stringification intentionally excludes the provider account identifier and
+    raw value. A local operator can inspect ``private_diagnostic()`` directly
+    and route that dictionary only to an owner-readable diagnostic artifact.
+    """
+
+    def __init__(self, *, account_id: str, field: str, reason_code: str) -> None:
+        self.account_id = account_id
+        self.field = field
+        self.reason_code = reason_code
+        super().__init__(
+            f"Plaid account field failed normalization: field={field}; reason={reason_code}"
+        )
+
+    def private_diagnostic(self) -> dict[str, str]:
+        return {
+            "provider": "plaid",
+            "provider_account_id": self.account_id,
+            "field": self.field,
+            "reason_code": self.reason_code,
+        }
 
 
 def _build_client() -> plaid_api.PlaidApi:
@@ -213,21 +247,32 @@ def _to_plaid_dict(raw: object) -> dict[str, object]:
 
 def _account_from_plaid(raw: object) -> PlaidAccount:
     data = _to_plaid_dict(raw)
+    account_id = _required_text(data, "account_id")
     raw_balances = data.get("balances")
     balances: dict[str, object] = (
         cast("dict[str, object]", raw_balances) if isinstance(raw_balances, dict) else {}
     )
+    balance_currency = _plaid_balance_currency(balances, account_id=account_id)
     return PlaidAccount(
-        plaid_account_id=_required_text(data, "account_id"),
+        plaid_account_id=account_id,
         name=_required_text(data, "name"),
         official_name=_opt_str(data.get("official_name")),
         type=_required_text(data, "type"),
         subtype=_opt_str(data.get("subtype")),
         mask=_opt_str(data.get("mask")),
-        currency=str(balances.get("iso_currency_code") or "USD"),
-        provider_total_value=_opt_decimal(balances.get("current")),
-        provider_available_cash=_opt_decimal(balances.get("available")),
-        provider_balance_as_of=_opt_datetime(balances.get("last_updated_datetime")),
+        currency=balance_currency or "USD",
+        provider_balance_currency=balance_currency,
+        provider_total_value=_plaid_account_money(
+            balances.get("current"), account_id=account_id, field="balances.current"
+        ),
+        provider_available_cash=_plaid_account_money(
+            balances.get("available"), account_id=account_id, field="balances.available"
+        ),
+        provider_balance_as_of=_plaid_balance_datetime(
+            balances.get("last_updated_datetime"),
+            account_id=account_id,
+            field="balances.last_updated_datetime",
+        ),
     )
 
 
@@ -252,10 +297,18 @@ def _holding_from_plaid(raw: object) -> PlaidHolding:
     return PlaidHolding(
         plaid_account_id=str(data["account_id"]),
         plaid_security_id=str(data["security_id"]),
-        quantity=Decimal(str(data["quantity"])),
-        institution_price=_opt_decimal(data.get("institution_price")),
-        institution_value=_opt_decimal(data.get("institution_value")),
-        cost_basis=_opt_decimal(data.get("cost_basis")),
+        quantity=normalize_provider_decimal(
+            data["quantity"], quantum=_TRANSACTION_QUANTITY_STORAGE_QUANTUM
+        ),
+        institution_price=optional_provider_decimal(
+            data.get("institution_price"), quantum=_TRANSACTION_MONEY_STORAGE_QUANTUM
+        ),
+        institution_value=optional_provider_decimal(
+            data.get("institution_value"), quantum=_TRANSACTION_MONEY_STORAGE_QUANTUM
+        ),
+        cost_basis=optional_provider_decimal(
+            data.get("cost_basis"), quantum=_TRANSACTION_MONEY_STORAGE_QUANTUM
+        ),
         currency=str(data.get("iso_currency_code") or "USD"),
     )
 
@@ -273,10 +326,18 @@ def _investment_tx_from_plaid(raw: object) -> PlaidInvestmentTransaction:
         plaid_security_id=_opt_str(data.get("security_id")),
         date=tx_date,
         name=_opt_str(data.get("name")),
-        quantity=Decimal(str(data.get("quantity", 0))),
-        amount=Decimal(str(data["amount"])),
-        price=_opt_decimal(data.get("price")),
-        fees=_opt_decimal(data.get("fees")),
+        quantity=normalize_provider_decimal(
+            data.get("quantity", 0), quantum=_TRANSACTION_QUANTITY_STORAGE_QUANTUM
+        ),
+        amount=normalize_provider_decimal(
+            data["amount"], quantum=_TRANSACTION_MONEY_STORAGE_QUANTUM
+        ),
+        price=optional_provider_decimal(
+            data.get("price"), quantum=_TRANSACTION_MONEY_STORAGE_QUANTUM
+        ),
+        fees=optional_provider_decimal(
+            data.get("fees"), quantum=_TRANSACTION_MONEY_STORAGE_QUANTUM
+        ),
         type=_required_text(data, "type"),
         subtype=_opt_str(data.get("subtype")),
         currency=str(data.get("iso_currency_code") or "USD"),
@@ -287,6 +348,104 @@ def _opt_decimal(value: object) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def normalize_provider_decimal(value: object, *, quantum: Decimal) -> Decimal:
+    """Preserve provider precision, removing only binary-float transport noise.
+
+    Provider SDKs deserialize JSON numbers as ``float``. Values that are
+    mathematically on our declared storage grid can therefore arrive a few
+    ULPs away from that grid. Only float inputs within two ULPs are rounded;
+    strings and Decimal values retain every supplied digit so genuine excess
+    precision still fails closed in the storage validator.
+    """
+    normalized = Decimal(str(value))
+    if not isinstance(value, float) or not math.isfinite(value):
+        return normalized
+    try:
+        storage_value = normalized.quantize(quantum, rounding=ROUND_HALF_EVEN)
+    except InvalidOperation:
+        return normalized
+    tolerance = Decimal.from_float(math.ulp(value)) * 2
+    return storage_value if abs(normalized - storage_value) <= tolerance else normalized
+
+
+def optional_provider_decimal(value: object, *, quantum: Decimal) -> Decimal | None:
+    if value is None:
+        return None
+    return normalize_provider_decimal(value, quantum=quantum)
+
+
+def _plaid_account_money(value: object, *, account_id: str, field: str) -> Decimal | None:
+    """Normalize only representational float noise to the DB's exact grid."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id, field=field, reason_code="invalid_numeric_type"
+        )
+    try:
+        normalized = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id, field=field, reason_code="invalid_decimal"
+        ) from None
+    if not normalized.is_finite():
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id, field=field, reason_code="non_finite"
+        )
+    try:
+        storage_value = normalized.quantize(
+            _ACCOUNT_BALANCE_STORAGE_QUANTUM, rounding=ROUND_HALF_EVEN
+        )
+    except InvalidOperation:
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id, field=field, reason_code="outside_storage_capacity"
+        ) from None
+    if abs(storage_value) >= _ACCOUNT_BALANCE_MAX_ABSOLUTE:
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id, field=field, reason_code="outside_storage_capacity"
+        )
+    if normalized == storage_value:
+        return normalized
+    if isinstance(value, float) and math.isfinite(value):
+        # Plaid's generated AccountBalance fields are floats. Accept rounding
+        # only when the discrepancy is indistinguishable from binary transport
+        # noise around an exact six-decimal value. This does not truncate a
+        # genuine seventh decimal supplied as a string or Decimal.
+        tolerance = Decimal.from_float(math.ulp(value)) * 2
+        if abs(normalized - storage_value) <= tolerance:
+            return storage_value
+    raise PlaidAccountFieldNormalizationError(
+        account_id=account_id, field=field, reason_code="precision_exceeds_storage"
+    )
+
+
+def _plaid_balance_currency(balances: dict[str, object], *, account_id: str) -> str | None:
+    raw = balances.get("iso_currency_code")
+    if raw is None:
+        return None
+    currency = str(raw).upper()
+    if len(currency) != 3 or not currency.isalpha():
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id,
+            field="balances.iso_currency_code",
+            reason_code="invalid_iso_currency",
+        )
+    return currency
+
+
+def _plaid_balance_datetime(value: object, *, account_id: str, field: str) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = _opt_datetime(value)
+    except ValueError:
+        raise PlaidAccountFieldNormalizationError(
+            account_id=account_id, field=field, reason_code="invalid_datetime"
+        ) from None
+    assert parsed is not None
+    return parsed
 
 
 def _required_text(payload: dict[str, object], field: str) -> str:
@@ -322,10 +481,14 @@ def _opt_datetime(value: object) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("provider datetime field must include timezone")
+        return value.astimezone(UTC)
     if isinstance(value, str):
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("provider datetime field must include timezone")
+        return parsed.astimezone(UTC)
     raise ValueError("provider datetime field has invalid type")
 
 
@@ -346,6 +509,8 @@ def get_holdings(access_token: str) -> HoldingsResponse:
             item_id=str(item_dict["item_id"]),
             institution_id=_opt_str(item_dict.get("institution_id")),
         )
+    except PlaidAccountFieldNormalizationError:
+        raise
     except Exception:
         raise ProviderPayloadError("Plaid holdings payload failed validation") from None
 

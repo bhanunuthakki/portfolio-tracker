@@ -24,6 +24,7 @@ def _response() -> HoldingsResponse:
                 name="Brokerage",
                 type="investment",
                 currency="USD",
+                provider_balance_currency="USD",
                 provider_total_value=Decimal("1234.56"),
                 provider_available_cash=Decimal("34.56"),
                 provider_balance_as_of=datetime(2026, 9, 3, 20, tzinfo=UTC),
@@ -33,6 +34,7 @@ def _response() -> HoldingsResponse:
                 name="Empty IRA",
                 type="investment",
                 currency="USD",
+                provider_balance_currency="USD",
                 provider_total_value=Decimal("0"),
                 provider_available_cash=Decimal("0"),
                 provider_balance_as_of=datetime(2026, 9, 3, 20, tzinfo=UTC),
@@ -42,6 +44,7 @@ def _response() -> HoldingsResponse:
                 name="Missing Total",
                 type="investment",
                 currency="USD",
+                provider_balance_currency="USD",
                 provider_total_value=None,
             ),
         ],
@@ -140,3 +143,32 @@ def test_plaid_total_without_provider_as_of_is_non_certifying(session, monkeypat
     assert valuation.is_empty is False
     assert valuation.as_of_at is None
     assert "cached_as_fetched_no_provider_as_of" in valuation.source_reference
+
+
+def test_plaid_total_without_provider_iso_currency_is_not_certified(session, monkeypatch) -> None:
+    response = _response()
+    response.accounts[0] = response.accounts[0].model_copy(
+        update={"provider_balance_currency": None}
+    )
+    item = Item(
+        source="plaid",
+        plaid_item_id="plaid-item-1",
+        plaid_access_token_encrypted="encrypted-test-token",
+    )
+    session.add(item)
+    session.flush()
+    monkeypatch.setattr(snapshot, "decrypt_token", lambda _encrypted: "test-token")
+    monkeypatch.setattr(plaid_client, "get_holdings", lambda _token: response)
+
+    snapshot._snapshot_item(session, item, date(2026, 9, 3))
+
+    account = session.scalar(select(Account).where(Account.plaid_account_id == "brokerage-1"))
+    assert account is not None
+    assert (
+        session.scalar(
+            select(AccountValuationObservation).where(
+                AccountValuationObservation.account_id == account.account_id
+            )
+        )
+        is None
+    )

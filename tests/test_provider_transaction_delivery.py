@@ -82,6 +82,35 @@ def test_plaid_transactions_paginate_and_emit_complete_delivery_metadata(monkeyp
     assert response.delivery.unique_record_count == 3
     assert len(response.delivery.record_set_sha256) == 64
     assert response.delivery.is_complete is True
+    assert response.delivery.parser_version == "plaid_investment_tx.v2"
+
+
+def test_plaid_transaction_normalizes_only_binary_float_noise() -> None:
+    raw = _plaid_transaction("tx-float-noise")
+    raw._payload.update(
+        {
+            "amount": 29999.999999999996,
+            "quantity": 1.0000000000000002,
+            "price": 99.99999999999999,
+            "fees": 1.0000000000000002,
+        }
+    )
+
+    transaction = plaid_client._investment_tx_from_plaid(raw)
+
+    assert transaction.amount == Decimal("30000.000000")
+    assert transaction.quantity == Decimal("1.0000000000")
+    assert transaction.price == Decimal("100.000000")
+    assert transaction.fees == Decimal("1.000000")
+
+
+def test_plaid_transaction_preserves_genuine_excess_precision() -> None:
+    raw = _plaid_transaction("tx-exact-extra-precision")
+    raw._payload["amount"] = "1.0000001"
+
+    transaction = plaid_client._investment_tx_from_plaid(raw)
+
+    assert transaction.amount == Decimal("1.0000001")
 
 
 def test_plaid_transactions_fail_when_provider_stops_before_reported_total(monkeypatch):
@@ -197,6 +226,26 @@ def test_snaptrade_activities_paginate_and_emit_complete_delivery_metadata(monke
     assert response.delivery.fetched_count == 2
     assert response.delivery.unique_record_count == 2
     assert response.delivery.is_complete is True
+    assert response.delivery.parser_version == "snaptrade_account_activity.v2"
+
+
+def test_snaptrade_activity_normalizes_only_binary_float_noise() -> None:
+    activity = _snaptrade_activity("activity-float-noise")
+    activity.update(
+        {
+            "amount": 29999.999999999996,
+            "units": 1.0000000000000002,
+            "price": 99.99999999999999,
+            "fee": 1.0000000000000002,
+        }
+    )
+
+    transaction = snaptrade_client._transaction_from_snaptrade(activity, "account-1", None)
+
+    assert transaction.amount == Decimal("30000.000000")
+    assert transaction.quantity == Decimal("1.0000000000")
+    assert transaction.price == Decimal("100.000000")
+    assert transaction.fees == Decimal("1.000000")
 
 
 def test_snaptrade_activities_fail_when_pagination_metadata_is_missing(monkeypatch):
@@ -341,6 +390,10 @@ def test_provider_request_failure_does_not_expose_snaptrade_secret(monkeypatch):
 
 def test_provider_parser_allowlist_is_fail_closed():
     assert_supported_provider_parser("plaid_investment_transactions_api", "plaid_investment_tx.v1")
+    assert_supported_provider_parser("plaid_investment_transactions_api", "plaid_investment_tx.v2")
+    assert_supported_provider_parser(
+        "snaptrade_account_activities_api", "snaptrade_account_activity.v2"
+    )
 
     with pytest.raises(UnsupportedProviderParserError):
         assert_supported_provider_parser("unrecognized_provider_export", "unrecognized.v1")
