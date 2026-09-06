@@ -6,6 +6,15 @@ Layers on the runtime's global safety, authority, and procedure contract. Only r
 
 Self-hosted, **single-user** personal investment tracker. Pulls holdings + transactions from Plaid and SnapTrade, snapshots daily, computes Modified-Dietz returns and risk metrics vs benchmarks, journals trades, and runs a deterministic CIO coaching panel. Runs entirely on localhost — no multi-tenant auth, no cloud except the aggregators + yfinance/Gmail. This profile rules out unrequested commercial scaffolding; hardening maturity still follows the durability and exposure of the actual state and operations.
 
+## Purpose and improvement latitude
+
+Be the trustworthy portfolio data and operations foundation. Improve account coverage, transaction
+reconciliation, repair visibility, matched-return explanations, recovery, and downstream reliability.
+Reduce the effort needed to understand or fix a bad ingest. This repository retains calculation and
+data authority; `docs/UI_CONTRACT.md` assigns the consolidated analysis experience to Earnings Summary.
+Improve local diagnostics and repair workflows within scope; a second consolidated analytical
+dashboard requires a product-authority decision.
+
 ## Layout & run
 
 - Backend: FastAPI + SQLAlchemy 2.0 + SQLite, source under `src/portfolio_tracker/` (`api/routes/`, `jobs/`, `services/`, `models.py`). Migrations in `alembic/`.
@@ -13,7 +22,9 @@ Self-hosted, **single-user** personal investment tracker. Pulls holdings + trans
 - Backend dev: `uvicorn portfolio_tracker.api.main:app --reload --port 8000` (ASGI app = `portfolio_tracker.api.main:app`).
 - Frontend dev: `cd frontend && npm run dev` → http://localhost:5173.
 - Daily ingest CLIs: `python -m portfolio_tracker.jobs.<name>` (`daily_refresh`, `snapshot`, `backfill`, `prices`, `benchmarks`, `backup`, …).
-- DB init / migrate: `alembic upgrade head`.
+- DB init / migrate: `alembic upgrade head`. This mutates the configured database: use explicit
+  disposable state for tests. Live migration/backfill/relink/correction follows the backup, target
+  preview and owner-authorization boundary below; a request to edit code does not authorize a run.
 
 ## Mac/Windows listener ownership
 
