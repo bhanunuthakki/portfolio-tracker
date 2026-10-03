@@ -163,6 +163,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
                 account_id=account_id,
                 security_id=security_id,
                 quantity=holding.quantity,
+                quantity_unit=holding.quantity_unit,
                 institution_price=holding.institution_price,
                 institution_value=institution_value,
                 cost_basis=holding.cost_basis,

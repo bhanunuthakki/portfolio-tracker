@@ -247,6 +247,7 @@ class Security(Base):
     type: Mapped[str | None] = mapped_column(String, nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="USD", nullable=False)
     is_cash_equivalent: Mapped[bool] = mapped_column(default=False, nullable=False)
+    option_contract_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class HoldingSnapshot(Base):
@@ -271,6 +272,9 @@ class HoldingSnapshot(Base):
         ForeignKey("securities.security_id", ondelete="RESTRICT"), primary_key=True
     )
     quantity: Mapped[Decimal] = mapped_column(Numeric(28, 10), nullable=False)
+    quantity_unit: Mapped[str] = mapped_column(
+        String(32), default="unknown", server_default="unknown", nullable=False
+    )
     institution_price: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     institution_value: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     cost_basis: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)

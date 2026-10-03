@@ -103,6 +103,8 @@ def upsert_security(session: Session, plaid_security: PlaidSecurity) -> Security
         existing.type = plaid_security.type
         existing.currency = plaid_security.currency
         existing.is_cash_equivalent = _is_cash_equivalent(plaid_security)
+        if plaid_security.option_contract is not None:
+            existing.option_contract_json = plaid_security.option_contract.model_dump_json()
         return existing
     security = Security(
         plaid_security_id=plaid_security.plaid_security_id,
@@ -113,6 +115,9 @@ def upsert_security(session: Session, plaid_security: PlaidSecurity) -> Security
         type=plaid_security.type,
         currency=plaid_security.currency,
         is_cash_equivalent=_is_cash_equivalent(plaid_security),
+        option_contract_json=plaid_security.option_contract.model_dump_json()
+        if plaid_security.option_contract is not None
+        else None,
     )
     session.add(security)
     session.flush()

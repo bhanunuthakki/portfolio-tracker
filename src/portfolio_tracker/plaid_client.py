@@ -34,6 +34,11 @@ from portfolio_tracker.provider_delivery import (
     ProviderPayloadError,
     build_provider_delivery_metadata,
 )
+from portfolio_tracker.services.option_contracts import (
+    OptionContract,
+    QuantityUnit,
+    option_from_occ,
+)
 
 if TYPE_CHECKING:
     # Type-only: `from __future__ import annotations` keeps every annotation
@@ -79,12 +84,14 @@ class PlaidSecurity(BaseModel):
     is_cash_equivalent: bool = False
     close_price: Decimal | None = None
     close_price_as_of: date | None = None
+    option_contract: OptionContract | None = None
 
 
 class PlaidHolding(BaseModel):
     plaid_account_id: str
     plaid_security_id: str
     quantity: Decimal
+    quantity_unit: QuantityUnit = "shares"
     institution_price: Decimal | None = None
     institution_value: Decimal | None = None
     cost_basis: Decimal | None = None
@@ -277,7 +284,20 @@ def _account_from_plaid(raw: object) -> PlaidAccount:
 
 def _security_from_plaid(raw: object) -> PlaidSecurity:
     data = _to_plaid_dict(raw)
+    raw_option = data.get("option_contract")
+    option = None
+    if isinstance(raw_option, dict):
+        option = OptionContract.model_validate(
+            {
+                "underlying_ticker": raw_option["underlying_security_ticker"],
+                "contract_type": raw_option["contract_type"],
+                "expiration_date": raw_option["expiration_date"],
+                "strike_price": raw_option["strike_price"],
+                "metadata_source": "plaid.option_contract",
+            }
+        )
     return PlaidSecurity(
+        option_contract=option,
         plaid_security_id=_required_text(data, "security_id"),
         ticker=_opt_str(data.get("ticker_symbol")),
         cusip=_opt_str(data.get("cusip")),
@@ -487,10 +507,25 @@ def get_holdings(access_token: str) -> HoldingsResponse:
         raise ProviderDeliveryError("Plaid holdings request failed") from None
     try:
         item_dict = _to_plaid_dict(response.item)
+        securities = [_security_from_plaid(s) for s in response.securities]
+        options = {
+            security.plaid_security_id
+            for security in securities
+            if security.option_contract is not None
+            or security.type == "option"
+            or option_from_occ(security.ticker) is not None
+        }
+        holdings = [_holding_from_plaid(h) for h in response.holdings]
+        holdings = [
+            holding.model_copy(update={"quantity_unit": "underlying_units"})
+            if holding.plaid_security_id in options
+            else holding
+            for holding in holdings
+        ]
         return HoldingsResponse(
             accounts=[_account_from_plaid(a) for a in response.accounts],
-            securities=[_security_from_plaid(s) for s in response.securities],
-            holdings=[_holding_from_plaid(h) for h in response.holdings],
+            securities=securities,
+            holdings=holdings,
             item_id=str(item_dict["item_id"]),
             institution_id=_opt_str(item_dict.get("institution_id")),
         )

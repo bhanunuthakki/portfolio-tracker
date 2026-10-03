@@ -32,6 +32,7 @@ from decimal import Decimal
 from pydantic import BaseModel
 
 from portfolio_tracker.schemas import ConsolidatedHoldingOut
+from portfolio_tracker.services.option_contracts import OptionContract, QuantityUnit, contracts
 
 # Detailed tax-treatment values, in display order. The SC-1 five-way enum used
 # by every `/api/v1` resource; consumers (wealthplan `TaxBucket`, the
@@ -166,6 +167,8 @@ class PositionLotV1(BaseModel):
     account_id: int
     account_name: str
     quantity: Decimal
+    quantity_unit: QuantityUnit = "shares"
+    contract_quantity: Decimal | None = None
     market_value: Decimal | None
     cost_basis: Decimal | None
     cost_basis_source: str | None
@@ -179,10 +182,14 @@ class PositionV1(BaseModel):
     ticker: str | None
     name: str | None
     quantity: Decimal
+    quantity_unit: QuantityUnit = "shares"
+    contract_quantity: Decimal | None = None
     market_value: Decimal | None
     cost_basis: Decimal | None
     unrealized_pnl: Decimal | None
-    # Share of the total book by market value, in PERCENT (0–100). None when the
+    option_contract: OptionContract | None = None
+    # Signed share of the net book in percent; liabilities can be negative
+    # and assets can exceed 100 percent. None when the
     # position has no market value, or the book total is 0.
     percent_of_portfolio: Decimal | None
     accounts: list[PositionLotV1]
@@ -234,6 +241,8 @@ def build_positions_result(
                     account_id=a.account_id,
                     account_name=a.account_name,
                     quantity=a.quantity,
+                    quantity_unit=a.quantity_unit,
+                    contract_quantity=contracts(a.quantity, a.quantity_unit, c.option_contract),
                     market_value=a.institution_value,
                     cost_basis=a.cost_basis,
                     cost_basis_source=a.cost_basis_source,
@@ -245,12 +254,23 @@ def build_positions_result(
             if c.total_value is not None and total > 0
             else None
         )
+        units = {lot.quantity_unit for lot in lots}
+        unit: QuantityUnit = (
+            "shares"
+            if units == {"shares"}
+            else "underlying_units"
+            if units == {"underlying_units"}
+            else "unknown"
+        )
         positions.append(
             PositionV1(
                 security_id=c.security_id,
                 ticker=c.ticker,
                 name=c.name,
                 quantity=c.total_quantity,
+                quantity_unit=unit,
+                contract_quantity=contracts(c.total_quantity, unit, c.option_contract),
+                option_contract=c.option_contract,
                 market_value=c.total_value,
                 cost_basis=c.total_cost_basis,
                 unrealized_pnl=c.unrealized_pnl,

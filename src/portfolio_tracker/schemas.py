@@ -12,6 +12,8 @@ from typing import Literal, TypeAlias
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from portfolio_tracker.services.option_contracts import OptionContract, QuantityUnit
+
 CashFlowTransactionOrigin: TypeAlias = Literal[
     "aggregator_transaction", "statement_supplement", "derived_share_transfer"
 ]
@@ -99,6 +101,7 @@ class HoldingByAccountOut(BaseModel):
     account_id: int
     account_name: str
     quantity: Decimal
+    quantity_unit: QuantityUnit = "shares"
     institution_value: Decimal | None
     cost_basis: Decimal | None
     # Where the cost basis came from:
@@ -133,6 +136,7 @@ class ConsolidatedHoldingOut(BaseModel):
     ticker: str | None
     name: str | None
     total_quantity: Decimal
+    option_contract: OptionContract | None = None
     total_value: Decimal | None
     total_cost_basis: Decimal | None
     weighted_avg_cost_per_share: Decimal | None

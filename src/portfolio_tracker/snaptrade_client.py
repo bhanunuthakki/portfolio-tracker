@@ -47,6 +47,11 @@ from portfolio_tracker.provider_delivery import (
     ProviderPayloadError,
     build_provider_delivery_metadata,
 )
+from portfolio_tracker.services.option_contracts import (
+    OptionContract,
+    occ_has_adjusted_root,
+    option_from_occ,
+)
 
 if TYPE_CHECKING:
     # Type-only: `from __future__ import annotations` keeps every annotation
@@ -346,6 +351,18 @@ def get_holdings(
         sec = _security_from_snaptrade(pos.get("symbol", {}))
         securities[sec.plaid_security_id] = sec
         holdings.append(_holding_from_snaptrade(pos, plaid_account_id, sec.plaid_security_id))
+    raw_options = body.get("option_positions")
+    if raw_options is None:
+        raw_options = []
+    if not isinstance(raw_options, list):
+        raise ProviderPayloadError("SnapTrade option positions are not an array")
+    for raw_position in cast("list[object]", raw_options):
+        if not isinstance(raw_position, dict):
+            raise ProviderPayloadError("SnapTrade option position is not an object")
+        pos = cast("dict[str, Any]", raw_position)
+        sec = _option_security_from_snaptrade(pos.get("symbol", {}))
+        securities[sec.plaid_security_id] = sec
+        holdings.append(_option_holding_from_snaptrade(pos, plaid_account_id, sec))
     return SnapTradeHoldingsResponse(
         accounts=accounts,
         securities=list(securities.values()),
@@ -507,6 +524,85 @@ def _security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
         is_cash_equivalent=False,
         close_price=None,
         close_price_as_of=None,
+    )
+
+
+def _option_security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
+    option = raw.get("option_symbol", raw)
+    raw_underlying = option.get("underlying_symbol")
+    if not isinstance(raw_underlying, dict):
+        raise ProviderPayloadError("SnapTrade option underlying is unavailable")
+    underlying = cast("dict[str, Any]", raw_underlying)
+    mini = option.get("is_mini_option")
+    multiplier = Decimal(10 if mini else 100) if isinstance(mini, bool) else None
+    ticker = _opt_str(option.get("ticker"))
+    encoded = option_from_occ(ticker)
+    if occ_has_adjusted_root(ticker) or (
+        encoded is not None and encoded.underlying_ticker != underlying.get("symbol")
+    ):
+        # The standard/mini flag does not establish adjusted deliverables or
+        # resolve conflicting contract identity. Preserve unknown; ingestion
+        # rejects this rather than fabricating a financial value.
+        multiplier = None
+    descriptor = OptionContract.model_validate(
+        {
+            "underlying_ticker": underlying.get("symbol"),
+            "contract_type": str(option.get("option_type", "")).lower(),
+            "expiration_date": option.get("expiration_date"),
+            "strike_price": option.get("strike_price"),
+            "multiplier": multiplier,
+            "metadata_source": "snaptrade.option_symbol",
+            "multiplier_source": "snaptrade.is_mini_option" if multiplier is not None else None,
+        }
+    )
+    symbol_id = option.get("id")
+    if not isinstance(symbol_id, str) or not symbol_id:
+        raise ProviderPayloadError("SnapTrade option is missing its universal symbol id")
+    return PlaidSecurity(
+        plaid_security_id=f"snaptrade:{symbol_id}",
+        ticker=option.get("ticker"),
+        name=raw.get("description"),
+        type="option",
+        currency=str(_dig(underlying, ["currency", "code"]) or "USD"),
+        option_contract=descriptor,
+    )
+
+
+def _option_holding_from_snaptrade(
+    raw: dict[str, Any], account_id: str, security: PlaidSecurity
+) -> PlaidHolding:
+    option = security.option_contract
+    if option is None or option.multiplier is None:
+        raise ProviderPayloadError("SnapTrade option contract multiplier is unavailable")
+    contract_quantity = optional_provider_decimal(
+        raw.get("units"), quantum=_QUANTITY_STORAGE_QUANTUM
+    )
+    if contract_quantity is None:
+        raise ProviderPayloadError("SnapTrade option contract quantity is unavailable")
+    quantity = normalize_provider_decimal(
+        contract_quantity * option.multiplier, quantum=_QUANTITY_STORAGE_QUANTUM
+    )
+    price = optional_provider_decimal(raw.get("price"), quantum=_MONEY_STORAGE_QUANTUM)
+    average_cost = optional_provider_decimal(
+        raw.get("average_purchase_price"), quantum=_MONEY_STORAGE_QUANTUM
+    )
+    return PlaidHolding(
+        plaid_account_id=account_id,
+        plaid_security_id=security.plaid_security_id,
+        quantity=quantity,
+        quantity_unit="underlying_units",
+        institution_price=price,
+        institution_value=normalize_provider_decimal(
+            quantity * price, quantum=_MONEY_STORAGE_QUANTUM
+        )
+        if price is not None
+        else None,
+        cost_basis=normalize_provider_decimal(
+            contract_quantity * average_cost, quantum=_MONEY_STORAGE_QUANTUM
+        )
+        if average_cost is not None
+        else None,
+        currency=security.currency,
     )
 
 

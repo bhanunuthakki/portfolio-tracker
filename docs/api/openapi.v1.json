@@ -2080,6 +2080,75 @@
         "title": "HealthV1",
         "type": "object"
       },
+      "OptionContract": {
+        "additionalProperties": false,
+        "properties": {
+          "contract_type": {
+            "enum": [
+              "call",
+              "put"
+            ],
+            "title": "Contract Type",
+            "type": "string"
+          },
+          "expiration_date": {
+            "format": "date",
+            "title": "Expiration Date",
+            "type": "string"
+          },
+          "metadata_source": {
+            "enum": [
+              "plaid.option_contract",
+              "snaptrade.option_symbol",
+              "occ_symbol"
+            ],
+            "title": "Metadata Source",
+            "type": "string"
+          },
+          "multiplier": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Multiplier"
+          },
+          "multiplier_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Multiplier Source"
+          },
+          "strike_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Strike Price",
+            "type": "string"
+          },
+          "underlying_ticker": {
+            "minLength": 1,
+            "title": "Underlying Ticker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "underlying_ticker",
+          "contract_type",
+          "expiration_date",
+          "strike_price",
+          "metadata_source"
+        ],
+        "title": "OptionContract",
+        "type": "object"
+      },
       "PerformanceBenchmarkEquation": {
         "description": "One cash-flow-matched counterfactual under the shared Dietz basis.",
         "properties": {
@@ -3414,6 +3483,18 @@
             "title": "Account Name",
             "type": "string"
           },
+          "contract_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Quantity"
+          },
           "cost_basis": {
             "anyOf": [
               {
@@ -3452,6 +3533,16 @@
           "quantity": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
+            "type": "string"
+          },
+          "quantity_unit": {
+            "default": "shares",
+            "enum": [
+              "shares",
+              "underlying_units",
+              "unknown"
+            ],
+            "title": "Quantity Unit",
             "type": "string"
           },
           "tax_treatment": {
@@ -3728,6 +3819,18 @@
             "title": "Accounts",
             "type": "array"
           },
+          "contract_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Quantity"
+          },
           "cost_basis": {
             "anyOf": [
               {
@@ -3763,6 +3866,16 @@
             ],
             "title": "Name"
           },
+          "option_contract": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OptionContract"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "percent_of_portfolio": {
             "anyOf": [
               {
@@ -3778,6 +3891,16 @@
           "quantity": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
+            "type": "string"
+          },
+          "quantity_unit": {
+            "default": "shares",
+            "enum": [
+              "shares",
+              "underlying_units",
+              "unknown"
+            ],
+            "title": "Quantity Unit",
             "type": "string"
           },
           "security_id": {
@@ -4181,6 +4304,16 @@
               }
             ],
             "title": "Name"
+          },
+          "option_contract": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OptionContract"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "region": {
             "anyOf": [
