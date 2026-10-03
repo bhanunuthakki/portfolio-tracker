@@ -60,12 +60,9 @@ def _fake_accounts(_creds: object, _auth_id: object) -> list[tuple[str, PlaidAcc
                 name="Fidelity Brokerage",
                 type="investment",
                 provider_total_value=Decimal("1234.56"),
-                provider_holdings_last_successful_sync=datetime(
-                    date.today().year,
-                    date.today().month,
-                    date.today().day,
-                    12,
-                    tzinfo=UTC,
+                # Preserve the fixture date without a future noon timestamp.
+                provider_holdings_last_successful_sync=datetime.combine(
+                    date.today(), datetime.min.time(), tzinfo=UTC
                 ),
             ),
         )
