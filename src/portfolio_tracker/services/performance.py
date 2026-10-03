@@ -2066,7 +2066,9 @@ def _has_option_reconstruction_evidence(
     """Reject option history without proved activity units and option price basis.
 
     Current positions alone are insufficient: a closed option can still occur
-    in the transaction interval. Broker-marked observations need no such walk.
+    in the transaction interval. Legacy provider derivatives may lack option
+    descriptors, so their units and price basis are also unproved.
+    Broker-marked observations need no such walk.
     """
     holdings = select(HoldingSnapshot.security_id).where(
         HoldingSnapshot.account_id.in_(account_ids),
@@ -2083,7 +2085,7 @@ def _has_option_reconstruction_evidence(
         select(Security).where(Security.security_id.in_(holdings.union(transactions)))
     ).scalars()
     if any(
-        security.type == "option"
+        security.type in ("option", "derivative")
         or security.option_contract_json is not None
         or option_from_occ(security.ticker) is not None
         or occ_has_adjusted_root(security.ticker)

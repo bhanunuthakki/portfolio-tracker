@@ -2071,6 +2071,21 @@ def test_option_reconstruction_rejects_unproven_activity_units_even_with_price_a
     assert account.account_id in assessment.valuation_account_ids
 
 
+@pytest.mark.parametrize("exited", [False, True])
+def test_unidentified_legacy_derivative_cannot_reconstruct_option_history(session, exited):
+    start, end, _account, option, _cash = _option_history_book(session, exited=exited)
+    option.type = "derivative"
+    option.ticker = None
+    option.option_contract_json = None
+    session.commit()
+
+    assert _backfill_values_from_transactions(session, start, start) == {}
+    assessment = performance_service._daily_portfolio_value_assessment(session, start, end)
+    assert start not in assessment.values
+    assert "option_history_reconstruction_unsupported" in assessment.calculation_reason_codes
+    assert end in assessment.values
+
+
 def test_complete_option_account_nav_remains_computable_without_reconstruction(session):
     from portfolio_tracker.models import AccountValuationSourceKind
     from portfolio_tracker.services.account_valuations import (
