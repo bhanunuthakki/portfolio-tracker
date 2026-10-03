@@ -32,7 +32,7 @@ change repairs the current adapter; it does not migrate to a new endpoint.
 
 ## Performance
 
-Opening a call increases cash and creates an option liability. The premium alone
+Writing a call increases cash and creates an option liability. The premium alone
 is not immediate investment profit. Portfolio performance uses complete account
 values and external contributions or withdrawals. Option purchases, sales,
 closing trades, expiration, and assignment are internal investment activity.

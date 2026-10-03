@@ -305,3 +305,35 @@ def test_snaptrade_standard_flag_cannot_prove_adjusted_or_conflicting_deliverabl
         snaptrade_client._option_holding_from_snaptrade(
             {"units": -1, "price": 3}, "account", security
         )
+
+
+def test_snaptrade_mini_occ_suffix_seven_uses_provider_ten_share_multiplier():
+    symbol = _symbol(mini=True)
+    symbol["option_symbol"]["ticker"] = "AAPL7 261218C00120000"
+    symbol["option_symbol"]["underlying_symbol"]["symbol"] = "AAPL"
+    security = snaptrade_client._option_security_from_snaptrade(symbol)
+    assert security.option_contract.multiplier == Decimal(10)
+    holding = snaptrade_client._option_holding_from_snaptrade(
+        {"units": -2, "price": 3, "average_purchase_price": 30}, "account", security
+    )
+    assert holding.quantity == Decimal(-20)
+    assert holding.institution_value == Decimal(-60)
+    assert holding.cost_basis == Decimal(-60)
+
+
+@pytest.mark.parametrize(
+    ("mini", "underlying", "ticker"),
+    [
+        (False, "AAPL", "AAPL7 261218C00120000"),
+        (True, "AAPL", "AAPL1 261218C00120000"),
+        (True, "MSFT", "AAPL7 261218C00120000"),
+    ],
+)
+def test_mini_suffix_does_not_override_missing_or_contradictory_provider_evidence(
+    mini, underlying, ticker
+):
+    symbol = _symbol(mini=mini)
+    symbol["option_symbol"]["ticker"] = ticker
+    symbol["option_symbol"]["underlying_symbol"]["symbol"] = underlying
+    security = snaptrade_client._option_security_from_snaptrade(symbol)
+    assert security.option_contract.multiplier is None

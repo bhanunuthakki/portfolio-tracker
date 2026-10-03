@@ -49,9 +49,18 @@ def option_from_occ(ticker: str | None) -> OptionContract | None:
     )
 
 
-def occ_has_adjusted_root(ticker: str | None) -> bool:
+def occ_has_adjusted_root(
+    ticker: str | None, *, sourced_mini_underlying: str | None = None
+) -> bool:
     match = _OCC_PATTERN.fullmatch(ticker.strip()) if ticker else None
-    return match is not None and any(char.isdigit() for char in match.group(1))
+    if match is None:
+        return False
+    root = match.group(1)
+    # Mini options use the underlying root plus 7. Accept that root only
+    # with matching provider evidence; the symbol alone proves no multiplier.
+    if sourced_mini_underlying is not None and root == f"{sourced_mini_underlying}7":
+        return False
+    return any(char.isdigit() for char in root)
 
 
 def stored_option(payload: str | None, ticker: str | None) -> OptionContract | None:

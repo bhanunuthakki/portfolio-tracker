@@ -537,9 +537,10 @@ def _option_security_from_snaptrade(raw: dict[str, Any]) -> PlaidSecurity:
     multiplier = Decimal(10 if mini else 100) if isinstance(mini, bool) else None
     ticker = _opt_str(option.get("ticker"))
     encoded = option_from_occ(ticker)
-    if occ_has_adjusted_root(ticker) or (
-        encoded is not None and encoded.underlying_ticker != underlying.get("symbol")
-    ):
+    underlying_ticker = _opt_str(underlying.get("symbol"))
+    if occ_has_adjusted_root(
+        ticker, sourced_mini_underlying=underlying_ticker if mini is True else None
+    ) or (encoded is not None and encoded.underlying_ticker != underlying.get("symbol")):
         # The standard/mini flag does not establish adjusted deliverables or
         # resolve conflicting contract identity. Preserve unknown; ingestion
         # rejects this rather than fabricating a financial value.
