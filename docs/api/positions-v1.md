@@ -79,7 +79,7 @@ keeps full precision.
 
 ### `percent_of_portfolio`
 
-`market_value / total_market_value × 100`, in **percent** (0–100), matching the
+`market_value / total_market_value × 100`, in signed **percent**, matching the
 codebase's `weight_pct` convention. A position with no market value is omitted
 from the book total and reports `null`. When the book total is 0 (no priced
 positions), every position reports `null`.
@@ -140,3 +140,36 @@ complexity with no benefit here:
 If this ever grows into a multi-user or hosted service, both belong on the
 roadmap (and on the additive `/api/v1` surface, which is versioned precisely so
 they can be added without breaking existing consumers).
+
+## Signed option holdings (additive contract)
+
+`percent_of_portfolio` uses signed market value divided by the net book. A
+written option is a negative liability. An asset weight can exceed 100 percent.
+Do not convert these values to absolute values or remove option rows.
+
+Each position now includes nullable `option_contract`, `contract_quantity`, and
+`quantity_unit`. Every account lot includes `quantity_unit` and nullable
+`contract_quantity`. Securities-master rows include the same `option_contract`.
+Portfolio snapshots reuse these exact position models.
+
+`option_contract` contains `underlying_ticker`, `contract_type` (`call` or `put`),
+`expiration_date`, `strike_price`, nullable `multiplier`, `metadata_source`, and
+nullable `multiplier_source`. Money and quantities remain Decimal strings.
+`metadata_source` is `plaid.option_contract`, `snaptrade.option_symbol`, or
+`occ_symbol`. Only complete OCC symbols are decoded; adjusted roots remain
+unresolved. OCC symbols do not establish a multiplier.
+
+`quantity_unit` is `shares`, `underlying_units`, or `unknown`. New Plaid option
+holdings retain their provider-reported underlying units. New SnapTrade option
+holdings normalize signed contracts to underlying units using its explicit
+`is_mini_option` field (10 or 100). SnapTrade prices are per underlying unit;
+its average purchase price is per contract. Each monetary field is multiplied
+on its correct basis once. Missing multiplier evidence fails ingestion closed.
+
+Migration `0032` retains existing quantities and values and marks their units
+unknown. Existing option holdings cannot establish coverage until an authorized
+provider refresh supplies unit evidence. New descriptors persist with the
+security; units persist with each holding snapshot. Contract quantities remain
+null when unit or multiplier evidence is missing. Non-option holdings retain
+their existing share meaning. The adapters provide no holding delta, so this
+contract does not invent one. See [covered-call reporting](../covered_call_reporting.md).

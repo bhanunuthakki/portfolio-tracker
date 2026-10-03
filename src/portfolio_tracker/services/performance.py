@@ -77,6 +77,7 @@ from portfolio_tracker.services.cashflow_source_coverage import (
     assess_cashflow_source_coverage,
     source_coverage_out,
 )
+from portfolio_tracker.services.option_contracts import occ_has_adjusted_root, option_from_occ
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -101,6 +102,7 @@ _ACCOUNT_VALUATION_INTEGRITY_INVALID = "account_valuation_integrity_invalid"
 _MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE = "modeled_opening_account_coverage_incomplete"
 _MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE = "modeled_opening_valuation_coverage_incomplete"
 _UNPRICEABLE_HOLDING_SNAPSHOT = "unpriceable_holding_snapshot"
+_OPTION_HISTORY_RECONSTRUCTION_UNSUPPORTED = "option_history_reconstruction_unsupported"
 _ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE = "portfolio_account_universe_coverage_incomplete"
 _ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED = "account_valuation_index_exclusion_unsupported"
 _PROVIDER_VALUATION_AS_OF_UNASSERTED = "provider_valuation_as_of_unasserted"
@@ -2058,6 +2060,55 @@ def _has_invalid_account_valuation_on_date(
     return False
 
 
+def _has_option_reconstruction_evidence(
+    session: Session, start_date: date, end_date: date, account_ids: frozenset[int]
+) -> bool:
+    """Reject option history without proved activity units and option price basis.
+
+    Current positions alone are insufficient: a closed option can still occur
+    in the transaction interval. Legacy provider derivatives may lack option
+    descriptors, so their units and price basis are also unproved.
+    Broker-marked observations need no such walk.
+    """
+    holdings = select(HoldingSnapshot.security_id).where(
+        HoldingSnapshot.account_id.in_(account_ids),
+        HoldingSnapshot.snapshot_date >= start_date,
+        HoldingSnapshot.snapshot_date <= end_date,
+    )
+    transactions = select(InvestmentTransaction.security_id).where(
+        InvestmentTransaction.account_id.in_(account_ids),
+        InvestmentTransaction.date >= start_date,
+        InvestmentTransaction.date <= end_date,
+        InvestmentTransaction.security_id.is_not(None),
+    )
+    securities = session.execute(
+        select(Security).where(Security.security_id.in_(holdings.union(transactions)))
+    ).scalars()
+    if any(
+        security.type in ("option", "derivative")
+        or security.option_contract_json is not None
+        or option_from_occ(security.ticker) is not None
+        or occ_has_adjusted_root(security.ticker)
+        for security in securities
+    ):
+        return True
+    # Preserve typed option lifecycle evidence even if provider symbol mapping
+    # failed. An unmapped option must not make reconstruction appear supported.
+    return (
+        session.execute(
+            select(InvestmentTransaction.plaid_investment_transaction_id)
+            .where(
+                InvestmentTransaction.account_id.in_(account_ids),
+                InvestmentTransaction.date >= start_date,
+                InvestmentTransaction.date <= end_date,
+                InvestmentTransaction.subtype.in_(("optionassignment", "optionexpiration")),
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+
 def _daily_portfolio_value_assessment(
     session: Session,
     start_date: date,
@@ -2067,9 +2118,9 @@ def _daily_portfolio_value_assessment(
     """Return daily values with boundary lineage and fail-closed coverage.
 
     Observed values exist only when every valued account reported on that
-    date. Modeled cache rows retain modeled lineage and are accepted only when
-    the current dataset still has a complete full-book reconstruction anchor.
-    A partial observed boundary is never papered over with a cache row.
+    date. Unversioned modeled cache rows are excluded. Transaction walk-back
+    requires a complete anchor and supports no option history. A partial
+    observed boundary is never papered over with a cache row.
     """
     valuation_accounts = performance_account_ids(session, start_date, end_date)
     complete_account_valuations = _complete_account_valuations_by_date(
@@ -2153,9 +2204,16 @@ def _daily_portfolio_value_assessment(
         backfill_end = (
             earliest_known - timedelta(days=1) if earliest_known is not None else end_date
         )
-        backfill = _backfill_values_from_transactions(
-            session, start_date, backfill_end, account_ids=valuation_accounts
-        )
+        anchor_date = _reconstruction_anchor_date(session, account_ids=valuation_accounts)
+        if _has_option_reconstruction_evidence(
+            session, start_date, anchor_date or end_date, valuation_accounts
+        ):
+            reasons.add(_OPTION_HISTORY_RECONSTRUCTION_UNSUPPORTED)
+            backfill: dict[date, Decimal] = {}
+        else:
+            backfill = _backfill_values_from_transactions(
+                session, start_date, backfill_end, account_ids=valuation_accounts
+            )
         if (
             start_date
             < (_reconstruction_anchor_date(session, account_ids=valuation_accounts) or start_date)
@@ -2399,6 +2457,8 @@ def _backfill_values_from_transactions(
     if anchor_date is None:
         return {}
 
+    if _has_option_reconstruction_evidence(session, start_date, anchor_date, accts):
+        return {}
     positions = _anchor_positions(session, anchor_date, account_ids=accts)
     cash_equivalent_security_ids = frozenset(
         session.execute(select(Security.security_id).where(Security.is_cash_equivalent.is_(True)))
@@ -2679,15 +2739,9 @@ def _value_quantities_with_prices(
       1. **Cash equivalents** (USD positions, money market funds) → qty × $1.00.
          These don't have yfinance-pulled price histories but their NAV is
          essentially fixed at $1, so face value is the right answer.
-      2. **Derivatives** (options, futures) — `type == "derivative"`. Almost
-         always missing from yfinance feeds. We deliberately skip the
-         `snapshot_price` fallback for them: at expiration they're worth
-         $0 (so today's snapshot price is $0 too), and using $0 as the
-         intra-life value avoids the "step-up at trade date" artifact that
-         a constant non-zero fallback would create. The premium paid /
-         received is fully captured by the cash adjustment, so the
-         portfolio total stays right at the boundary even if mid-life MTM
-         is approximated as zero.
+      2. **Options** cannot enter whole-portfolio transaction reconstruction:
+         activity quantity units and historical price basis are unproven. Use
+         complete broker account values or marked holding snapshots instead.
       3. **Securities with yfinance/stooq price history** → forward-fill the
          most recent close on or before `current_date`.
       4. **No eligible historical price on/before the valuation date** → the

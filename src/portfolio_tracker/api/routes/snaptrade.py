@@ -281,6 +281,7 @@ def sync_with_transaction_correction_approvals(
                     account_id=account.account_id,
                     security_id=stored_security.security_id,
                     quantity=h.quantity,
+                    quantity_unit=h.quantity_unit,
                     institution_price=h.institution_price,
                     institution_value=h.institution_value,
                     cost_basis=h.cost_basis,

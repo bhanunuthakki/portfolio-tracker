@@ -46,6 +46,7 @@ from portfolio_tracker.services.external_flow_ledger import (
     effective_transaction_classifications,
     load_transaction_overrides,
 )
+from portfolio_tracker.services.option_contracts import OptionContract, stored_option
 from portfolio_tracker.services.performance import performance_account_ids
 from portfolio_tracker.services.positioning import classify_asset_type
 from portfolio_tracker.services.v1_accounts import build_accounts_result
@@ -575,6 +576,7 @@ class SecurityV1(BaseModel):
     region: str | None
     classification_source: str | None  # 'auto' | 'manual' | None
     classification_updated_at: datetime | None
+    option_contract: OptionContract | None = None
 
 
 class SecuritiesV1Result(BaseModel):
@@ -612,6 +614,7 @@ def build_securities_result(
         out.append(
             SecurityV1(
                 security_id=sec.security_id,
+                option_contract=stored_option(sec.option_contract_json, sec.ticker),
                 ticker=sec.ticker,
                 name=sec.name,
                 cusip=sec.cusip,

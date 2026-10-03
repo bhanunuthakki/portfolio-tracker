@@ -22,7 +22,7 @@ def test_provider_transaction_correction_receipt_migration_round_trip(
     engine = create_engine(f"sqlite:///{database_path.as_posix()}")
     assert inspect(engine).has_table("provider_transaction_correction_receipts")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0031"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0032"
     engine.dispose()
 
     command.downgrade(config, "0029")
@@ -55,7 +55,7 @@ def test_head_repairs_policy_tables_missing_from_a_stamped_0023_database(
     assert inspector.has_table("policy_state")
     assert inspector.has_table("policy_write_receipts")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0031"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0032"
         state = connection.execute(
             text("SELECT revision, source, benchmark_status FROM policy_state")
         ).one()

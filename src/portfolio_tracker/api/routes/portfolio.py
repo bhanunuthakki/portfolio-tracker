@@ -46,6 +46,7 @@ from portfolio_tracker.services.external_flow_ledger import (
     effective_transaction_classifications,
     load_transaction_overrides,
 )
+from portfolio_tracker.services.option_contracts import stored_option
 
 router = APIRouter(prefix="/api/portfolio", tags=["portfolio"])
 
@@ -187,6 +188,7 @@ def _consolidate_holdings(
     out: list[ConsolidatedHoldingOut] = []
     for security_id, group in grouped.items():
         first_security = group[0][2]
+        option = stored_option(first_security.option_contract_json, first_security.ticker)
         total_quantity = sum((h.quantity for h, _, _ in group), Decimal(0))
         per_account: list[HoldingByAccountOut] = []
         any_value: bool = False
@@ -218,6 +220,13 @@ def _consolidate_holdings(
                     account_id=a.account_id,
                     account_name=a.name,
                     quantity=h.quantity,
+                    quantity_unit=(
+                        "underlying_units"
+                        if h.quantity_unit == "underlying_units"
+                        else "unknown"
+                        if option is not None or first_security.type in ("option", "derivative")
+                        else "shares"
+                    ),
                     institution_value=h.institution_value,
                     cost_basis=effective_cost,
                     cost_basis_source=cost_basis_source,
@@ -240,6 +249,7 @@ def _consolidate_holdings(
                 ticker=first_security.ticker,
                 name=first_security.name,
                 total_quantity=total_quantity,
+                option_contract=option,
                 total_value=total_value if any_value else None,
                 total_cost_basis=total_cost if any_cost else None,
                 weighted_avg_cost_per_share=weighted_avg,

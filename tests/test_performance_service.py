@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from portfolio_tracker.models import (
     Account,
     AccountValuationObservation,
@@ -1982,3 +1984,170 @@ def test_transfer_shaped_fee_is_cash_neutral():
         _tx("fee", amount=Decimal(134957), name="fee - TRANSFER IN VTI"),
         frozenset(),
     ) == Decimal(0)
+
+
+def _option_history_book(session, *, exited=False):
+    start, end = date(2025, 1, 2), date(2025, 1, 3)
+    item = Item(
+        source="snaptrade",
+        snaptrade_authorization_id="synthetic-option-history",
+        is_data_active=True,
+    )
+    account = Account(
+        item=item, plaid_account_id="synthetic-option-history", name="Synthetic", type="investment"
+    )
+    option = Security(
+        plaid_security_id="synthetic-option-history",
+        ticker="XYZ251218C00120000",
+        type="option",
+        is_cash_equivalent=False,
+    )
+    cash = Security(
+        plaid_security_id="synthetic-option-cash",
+        ticker="USD",
+        type="cash",
+        is_cash_equivalent=True,
+    )
+    session.add_all([account, option, cash])
+    session.flush()
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                quantity=Decimal(10300),
+                institution_value=Decimal(10300),
+            ),
+            Price(
+                security_id=option.security_id,
+                date=start,
+                close=Decimal(3),
+                source=PriceSource.YFINANCE.value,
+                adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="synthetic-option-sell",
+                account_id=account.account_id,
+                security_id=option.security_id,
+                date=end,
+                type="sell",
+                quantity=Decimal(1),
+                amount=Decimal(300),
+            ),
+        ]
+    )
+    if not exited:
+        session.add(
+            HoldingSnapshot(
+                snapshot_date=end,
+                account_id=account.account_id,
+                security_id=option.security_id,
+                quantity=Decimal(-100),
+                quantity_unit="underlying_units",
+                institution_value=Decimal(-300),
+            )
+        )
+    session.commit()
+    return start, end, account, option, cash
+
+
+@pytest.mark.parametrize("exited", [False, True])
+def test_option_reconstruction_rejects_unproven_activity_units_even_with_price_and_cache(
+    session, exited
+):
+    start, end, account, _option, _cash = _option_history_book(session, exited=exited)
+    session.add(
+        PortfolioValueDaily(
+            date=start, total_value=Decimal(10000), total_cost_basis=None, source="backfill"
+        )
+    )
+    session.commit()
+    assert _backfill_values_from_transactions(session, start, start) == {}
+    assessment = performance_service._daily_portfolio_value_assessment(session, start, end)
+    assert start not in assessment.values
+    assert "option_history_reconstruction_unsupported" in assessment.calculation_reason_codes
+    assert end in assessment.values
+    assert account.account_id in assessment.valuation_account_ids
+
+
+@pytest.mark.parametrize("exited", [False, True])
+def test_unidentified_legacy_derivative_cannot_reconstruct_option_history(session, exited):
+    start, end, _account, option, _cash = _option_history_book(session, exited=exited)
+    option.type = "derivative"
+    option.ticker = None
+    option.option_contract_json = None
+    session.commit()
+
+    assert _backfill_values_from_transactions(session, start, start) == {}
+    assessment = performance_service._daily_portfolio_value_assessment(session, start, end)
+    assert start not in assessment.values
+    assert "option_history_reconstruction_unsupported" in assessment.calculation_reason_codes
+    assert end in assessment.values
+
+
+def test_complete_option_account_nav_remains_computable_without_reconstruction(session):
+    from portfolio_tracker.models import AccountValuationSourceKind
+    from portfolio_tracker.services.account_valuations import (
+        NewAccountValuationObservation,
+        record_account_valuation_observation,
+    )
+
+    start, end, account, _option, _cash = _option_history_book(session)
+    for on_date in (start, end):
+        record_account_valuation_observation(
+            session,
+            NewAccountValuationObservation(
+                account_id=account.account_id,
+                as_of_date=on_date,
+                as_of_at=datetime.combine(on_date, datetime.min.time(), tzinfo=UTC),
+                total_value=Decimal(10000),
+                cash_value=None,
+                currency="USD",
+                source_kind=AccountValuationSourceKind.PROVIDER_API,
+                source_provider="snaptrade",
+                source_reference="synthetic.total",
+                source_record_id=f"synthetic-{on_date}",
+                fetched_at=datetime.combine(on_date, datetime.min.time(), tzinfo=UTC),
+                is_complete=True,
+                is_empty=False,
+            ),
+        )
+        for symbol in ("SPY", "QQQ"):
+            session.add(Benchmark(symbol=symbol, date=on_date, close=Decimal(100)))
+    _approve_source_coverage(session, account, start, end)
+    session.commit()
+    result = compute_performance_series(session, start, end)
+    assert result.calculation_status == "available"
+    assert result.opening_value_provenance == "observed_account_valuation"
+    assert result.ending_value_provenance == "observed_account_valuation"
+    assert result.points[-1].portfolio_return_pct == Decimal(0)
+    assert "option_history_reconstruction_unsupported" not in result.calculation_reason_codes
+
+
+def test_complete_marked_option_snapshots_do_not_need_activity_unit_reconstruction(session):
+    start, end, account, option, cash = _option_history_book(session)
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=option.security_id,
+                quantity=Decimal(-100),
+                quantity_unit="underlying_units",
+                institution_value=Decimal(-300),
+            ),
+            HoldingSnapshot(
+                snapshot_date=start,
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                quantity=Decimal(10300),
+                institution_value=Decimal(10300),
+            ),
+        ]
+    )
+    session.commit()
+    assessment = performance_service._daily_portfolio_value_assessment(session, start, end)
+    assert assessment.values[start] == Decimal(10000)
+    assert assessment.values[end] == Decimal(10000)
+    assert "option_history_reconstruction_unsupported" not in assessment.calculation_reason_codes
