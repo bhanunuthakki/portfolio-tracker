@@ -1,10 +1,12 @@
 # Portfolio Tracker — Project Rulebook
 
-Layers on the runtime's global safety, authority, and procedure contract. Only repo-specific facts live here.
-
 ## What this is
 
-Self-hosted, **single-user** personal investment tracker. Pulls holdings + transactions from Plaid and SnapTrade, snapshots daily, computes Modified-Dietz returns and risk metrics vs benchmarks, journals trades, and runs a deterministic CIO coaching panel. Runs entirely on localhost — no multi-tenant auth, no cloud except the aggregators + yfinance/Gmail. This profile rules out unrequested commercial scaffolding; hardening maturity still follows the durability and exposure of the actual state and operations.
+Self-hosted, **single-user** personal investment tracker. Pulls holdings and transactions
+from Plaid and SnapTrade, snapshots daily, computes Modified-Dietz returns and benchmark
+risk metrics, journals trades, and runs a deterministic CIO coaching panel. The application
+runs on localhost; external services are the aggregators, yfinance, and Gmail. No
+multi-tenant authentication. Hardening follows actual state durability and exposure.
 
 ## Purpose and improvement latitude
 
