@@ -4,9 +4,11 @@ This is the script you point Task Scheduler / cron / launchd at. It:
 
   1. Snapshots every linked Plaid Item (writes today's holdings rows and
      refreshes today's `portfolio_values_daily` cache row inline).
-  2. Syncs every configured SnapTrade profile (primary + spouse), pulling
+  2. Captures Plaid investment activity and its source attestations. The
+     snapshot stores balances only, so returns need this capture.
+  3. Syncs every configured SnapTrade profile (primary + spouse), pulling
      today's holdings and recent transactions into the same tables.
-  3. Re-runs the daily-values cache update so today's row reflects whatever
+  4. Re-runs the daily-values cache update so today's row reflects whatever
      SnapTrade pulled (snapshot.run already did this for the Plaid leg, but
      SnapTrade lands afterwards so we redo it).
 
@@ -29,7 +31,10 @@ from datetime import date, timedelta
 from fastapi import HTTPException
 
 from portfolio_tracker.db import SessionLocal
-from portfolio_tracker.jobs import daily_values, snapshot
+from portfolio_tracker.jobs import backfill, daily_values, snapshot
+from portfolio_tracker.services.provider_transaction_provenance import (
+    ProviderTransactionConflictError,
+)
 
 
 def run() -> int:
@@ -48,6 +53,30 @@ def run() -> int:
     except Exception:
         failures += 1
         print("[daily_refresh]   plaid snapshot: FAILED")
+        traceback.print_exc()
+
+    # 1b. Plaid investment activity. The snapshot above stores balances only.
+    #     Without this capture, flow evidence for every Plaid account stops at
+    #     the last manual backfill and every later return window is unavailable.
+    #     SnapTrade already refreshes the same evidence in its sync below.
+    try:
+        capture = backfill.run_with_delivery_receipts(end_date=today)
+        print(
+            f"[daily_refresh]   plaid transactions: {capture.rows_written} rows written "
+            f"across {len(capture.item_receipts)} item(s)"
+        )
+    except ProviderTransactionConflictError as exc:
+        # The rollback keeps the prior evidence. The plan is private.
+        plan = exc.correction_plan
+        failures += 1
+        print(
+            "[daily_refresh]   plaid transactions: FAILED (provider conflict on "
+            f"{len(plan.corrections) if plan is not None else 'unknown'} transaction(s); "
+            "inspect the private correction preview)"
+        )
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   plaid transactions: FAILED")
         traceback.print_exc()
 
     # 2. SnapTrade sync — once per configured profile. Imported lazily so

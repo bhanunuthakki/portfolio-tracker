@@ -88,7 +88,7 @@ portfolio.
   Each finding has a recommended fix.
 
 **Operations**
-- One-shot `daily_refresh` orchestrates Plaid snapshot → SnapTrade sync →
+- One-shot `daily_refresh` orchestrates Plaid snapshot → Plaid activity capture → SnapTrade sync →
   cache rebuild → benchmarks pull → earnings refresh.
 - `dedupe_securities` merges duplicate `securities` rows that arose from
   Plaid + SnapTrade ingesting the same ticker under different opaque IDs.

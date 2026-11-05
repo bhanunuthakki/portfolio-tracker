@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, cast
 from pydantic import BaseModel
 
 from portfolio_tracker.config import get_settings
+from portfolio_tracker.models import AccountType, is_non_investment_subtype
 from portfolio_tracker.plaid_client import (
     PlaidAccount,
     PlaidHolding,
@@ -479,14 +480,19 @@ def _account_from_snaptrade(raw: dict[str, Any]) -> PlaidAccount:
     first_transaction_date = _opt_date(
         _dig(raw, ["sync_status", "transactions", "first_transaction_date"])
     )
+    subtype = _opt_str(
+        raw.get("meta", {}).get("type") if isinstance(raw.get("meta"), dict) else None
+    )
     return PlaidAccount(
         plaid_account_id=snaptrade_account_id,
         name=str(raw.get("name") or raw.get("number") or snaptrade_account_id),
         official_name=_opt_str(raw.get("name")),
-        type="investment",
-        subtype=_opt_str(
-            raw.get("meta", {}).get("type") if isinstance(raw.get("meta"), dict) else None
+        type=(
+            AccountType.DEPOSITORY.value
+            if is_non_investment_subtype(subtype)
+            else AccountType.INVESTMENT.value
         ),
+        subtype=subtype,
         mask=_opt_str(raw.get("number")),
         currency=str(_dig(raw, ["balance", "total", "currency"]) or "USD"),
         provider_balance_currency=str(_dig(raw, ["balance", "total", "currency"]) or "USD").upper(),

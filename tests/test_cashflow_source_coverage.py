@@ -710,3 +710,53 @@ def test_performance_fails_closed_until_source_window_is_attested(session):
     assert available.calculation_reason_codes == []
     assert available.source_coverage.is_complete is True
     assert available.net_external_cashflow_in == 0
+
+
+def test_stale_bank_account_row_does_not_make_an_attested_window_unavailable(session):
+    account = _valued_account(session, "with-bank")
+    security_id = session.query(Security.security_id).filter_by(ticker="Twith-bank").scalar()
+    bank = Account(
+        item=account.item,
+        plaid_account_id="stale-bank-account",
+        name="Bank",
+        type="investment",
+        subtype="CHECKING",
+    )
+    start = date(2026, 1, 1)
+    end = date(2026, 1, 31)
+    session.add(bank)
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=boundary,
+                account_id=account.account_id,
+                security_id=security_id,
+                quantity=Decimal(1),
+                institution_value=value,
+            )
+            for boundary, value in ((start, Decimal(100)), (end, Decimal(110)))
+        ]
+        + [
+            Benchmark(symbol=symbol, date=day, close=close)
+            for symbol in ("SPY", "QQQ")
+            for day, close in (
+                (date(2025, 12, 31), Decimal(100)),
+                (start, Decimal(100)),
+                (date(2026, 1, 30), Decimal(110)),
+                (end, Decimal(110)),
+            )
+        ]
+    )
+    _attestation(
+        session,
+        account,
+        key="with-bank-attestation",
+        start=start + timedelta(days=1),
+        end=end,
+    )
+    session.commit()
+
+    result = compute_performance_series(session, start, end)
+
+    assert result.calculation_status == "available"
+    assert [row.account_id for row in result.source_coverage.accounts] == [account.account_id]

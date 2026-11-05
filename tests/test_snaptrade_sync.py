@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
 from portfolio_tracker import snaptrade_client
@@ -224,6 +225,26 @@ def test_sync_deletes_fully_exited_position_on_same_day_resync(session, monkeypa
     assert valuation.is_complete is True
     assert valuation.is_empty is False
     assert len(valuation.source_payload_sha256 or "") == 64
+
+
+@pytest.mark.parametrize(
+    ("provider_type", "expected_type"),
+    [
+        ("CHECKING", "depository"),
+        ("savings", "depository"),
+        ("INDIVIDUAL", "investment"),
+        (None, "investment"),
+    ],
+)
+def test_account_type_follows_the_provider_declared_subtype(
+    provider_type: str | None, expected_type: str
+) -> None:
+    account = snaptrade_client._account_from_snaptrade(  # pyright: ignore[reportPrivateUsage]
+        {"id": "account-id", "name": "Account", "meta": {"type": provider_type}}
+    )
+
+    assert account.type == expected_type
+    assert account.subtype == provider_type
 
 
 def test_holding_from_snaptrade_cost_basis_is_total_not_per_share():
