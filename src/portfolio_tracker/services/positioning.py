@@ -6,7 +6,7 @@ Answers "how is the book actually positioned?" along five axes:
                      from the broker `type` code + the cash-equivalent flag.
   * **Sector**       GICS-style sector, with funds bucketed as `ETF/Fund`
                      (they have no single sector) — from `security_classifications`.
-  * **Region**       US / International / Unknown, from the classified country.
+  * **Region**       US / International / Global / Unknown, from the classification.
   * **Account type** taxable vs retirement / tax-advantaged, from the account
                      subtype (with a name fallback for feeds that omit it).
   * **Concentration** top-N weight, position count, HHI + effective holdings.
