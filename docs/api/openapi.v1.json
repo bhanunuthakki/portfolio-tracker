@@ -2910,6 +2910,43 @@
         "title": "PortfolioSnapshotV1",
         "type": "object"
       },
+      "PositionAlphaExclusion": {
+        "description": "A position left out of the whole calculation, with its footnote.",
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "reason_code": {
+            "const": "option_price_unavailable",
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "ticker": {
+            "title": "Ticker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "name",
+          "reason_code",
+          "note"
+        ],
+        "title": "PositionAlphaExclusion",
+        "type": "object"
+      },
       "PositionAlphaResult": {
         "properties": {
           "calculation_reason_codes": {
@@ -2931,6 +2968,14 @@
             "format": "date",
             "title": "End Date",
             "type": "string"
+          },
+          "excluded_positions": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PositionAlphaExclusion"
+            },
+            "title": "Excluded Positions",
+            "type": "array"
           },
           "has_policy": {
             "default": false,

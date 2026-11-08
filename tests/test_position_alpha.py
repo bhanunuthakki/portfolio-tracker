@@ -1757,3 +1757,106 @@ def test_position_metric_keeps_split_adjusted_price_basis_under_broker_mark_drif
     assert by_date[mid].portfolio_value == Decimal("1000.00")
     # Every benchmark sleeve anchors to the same V_start.
     assert by_date[start].spy_counterfactual_value == Decimal("1000.00")
+
+
+def _held_window(session, account, security, start, end, quantity) -> None:
+    for snapshot_date in (start, end):
+        session.add(
+            HoldingSnapshot(
+                snapshot_date=snapshot_date,
+                account_id=account.account_id,
+                security_id=security.security_id,
+                quantity=Decimal(quantity),
+            )
+        )
+
+
+@pytest.mark.parametrize("option_closes", [[], [date(2025, 5, 1), date(2025, 6, 1)]])
+def test_thin_option_is_excluded_from_both_legs_with_a_footnote(session, option_closes):
+    start = date(2025, 5, 1)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs")
+    option = Security(plaid_security_id="s-opt", ticker="VEEV280121C00360000", type="derivative")
+    session.add_all([aapl, option])
+    session.flush()
+    _held_window(session, account, aapl, start, end, 10)
+    _held_window(session, account, option, start, end, 1)
+    session.add_all(
+        [
+            _split_adjusted_price(aapl.security_id, start, 100),
+            *_position_price_bridge(aapl.security_id, start, end, 100),
+            _split_adjusted_price(aapl.security_id, end, 120),
+            # Closes at both endpoints only: the interior gap exceeds 14 days.
+            *(_split_adjusted_price(option.security_id, day, 5) for day in option_closes),
+            Benchmark(symbol="SPY", date=start, close=Decimal(400)),
+            *_benchmark_bridge("SPY", start, end, 400),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    assert result.calculation_status == "available"
+    assert result.calculation_reason_codes == []
+    assert [row.ticker for row in result.rows] == ["AAPL"]
+    assert result.total_actual_pl == Decimal(200)
+    assert result.total_spy_pl == Decimal(100)
+    assert result.v_start == Decimal(1000)
+    assert [(item.ticker, item.reason_code) for item in result.excluded_positions] == [
+        ("VEEV280121C00360000", "option_price_unavailable")
+    ]
+    assert "14 days" in result.excluded_positions[0].note
+
+
+def test_priced_option_stays_in_the_calculation(session):
+    start = date(2025, 5, 1)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    option = Security(plaid_security_id="s-opt", ticker="VEEV280121C00360000", type="derivative")
+    session.add(option)
+    session.flush()
+    _held_window(session, account, option, start, end, 1)
+    session.add_all(
+        [
+            _split_adjusted_price(option.security_id, start, 5),
+            *_position_price_bridge(option.security_id, start, end, 5),
+            _split_adjusted_price(option.security_id, end, 6),
+            Benchmark(symbol="SPY", date=start, close=Decimal(400)),
+            *_benchmark_bridge("SPY", start, end, 400),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    assert result.excluded_positions == []
+    assert [row.ticker for row in result.rows] == ["VEEV280121C00360000"]
+
+
+def test_unpriced_stock_still_fails_closed(session):
+    start = date(2025, 5, 1)
+    end = date(2025, 6, 1)
+    account = _active_account(session)
+    stock = Security(plaid_security_id="s-thin", ticker="THIN", type="cs")
+    session.add(stock)
+    session.flush()
+    _held_window(session, account, stock, start, end, 10)
+    session.add_all(
+        [
+            _split_adjusted_price(stock.security_id, start, 5),
+            _split_adjusted_price(stock.security_id, end, 6),
+            Benchmark(symbol="SPY", date=start, close=Decimal(400)),
+            *_benchmark_bridge("SPY", start, end, 400),
+            Benchmark(symbol="SPY", date=end, close=Decimal(440)),
+        ]
+    )
+    session.commit()
+
+    result = compute_position_alpha(session, start, end)
+
+    assert result.calculation_status == "unavailable"
+    assert "position_price_unavailable" in result.calculation_reason_codes
+    assert result.excluded_positions == []
