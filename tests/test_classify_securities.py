@@ -105,6 +105,31 @@ class TestClassifySecuritiesRun:
         assert counts["classified"] == 3
         assert counts["skipped_manual"] == 1
 
+    def test_manual_fund_region_survives_a_full_rerun(self, session):
+        ids = self._seed(session)
+        session.add(
+            SecurityClassification(
+                security_id=ids["VOO"],
+                sector="ETF/Fund",
+                region="Global",
+                source="manual",
+                notes="fund document",
+            )
+        )
+        session.commit()
+
+        counts = classify_securities(session, fetch_info=_fake_fetch({}))
+        session.commit()
+
+        row = session.get(SecurityClassification, ids["VOO"])
+        assert (row.sector, row.region, row.source, row.notes) == (
+            "ETF/Fund",
+            "Global",
+            "manual",
+            "fund document",
+        )
+        assert counts["skipped_manual"] == 2
+
     def test_only_missing_skips_existing_auto_rows(self, session):
         ids = self._seed(session)
         session.add(

@@ -1405,11 +1405,13 @@ class SecurityClassification(Base):
     """Sector + coarse region for a security — backs the Holdings positioning view.
 
     Two cuts the broker feeds don't supply: a GICS-style `sector` and a
-    coarse `region` (`US` / `International`). `jobs.classify_securities`
+    coarse `region` (`US` / `International` / `Global`). `jobs.classify_securities`
     fills these from yfinance `.info` for individual equities and writes
     `source='auto'`. Funds/ETFs have no single sector, so the job stamps
-    `sector='ETF/Fund'` and leaves `region` NULL (the user can override a
-    broad-international fund like VXUS). Crypto gets `sector='Crypto'`.
+    `sector='ETF/Fund'` and leaves `region` NULL. A fund's region comes only
+    from a `manual` row backed by its stated mandate (see DEFINITIONS.md);
+    `Global` marks a mandate that spans the US and other markets. Crypto gets
+    `sector='Crypto'`.
 
     `source` mirrors `CostBasisOverride`'s convention so a later enrichment
     run never clobbers a human edit:

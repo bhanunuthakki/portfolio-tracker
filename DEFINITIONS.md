@@ -25,8 +25,14 @@ standardized.
   Funds have no single sector and are bucketed as **`ETF/Fund`**; crypto as
   `Crypto`; cash as `Cash`; an unclassified equity as `Unclassified`.
 
-- **Region** — coarse domicile cut. Canonical values: `US`, `International`,
-  `Unknown`. Derived from the classified country (`United States` ⇒ `US`).
+- **Region** — coarse geographic cut. Canonical values: `US`, `International`,
+  `Global`, `Unknown`. For a stock, it is derived from the classified country
+  (`United States` ⇒ `US`). For a fund, it is the geography of the fund's stated
+  mandate or benchmark, not the fund's domicile: `US` when the mandate is limited
+  to the United States, `International` when it excludes the United States, and
+  `Global` when it spans both. A fund has no automatic Region; only a `manual`
+  Classification backed by the fund's own documents sets it, and `Unknown`
+  remains when that evidence does not settle the geography.
 
 - **Tax treatment** — an account's tax location. Canonical values: `Taxable`,
   `Retirement / tax-advantaged` (IRA / 401(k) / Roth / HSA / 529 / …),
