@@ -360,7 +360,8 @@ pyright --pythonpath /path/to/.venv/bin/python           # macOS / Linux
   minutes to ingest historical transactions for a freshly linked Item.
   Wait, re-run `jobs.backfill`.
 - **yfinance can't find a ticker**: set a `ticker_override`, re-run
-  `jobs.prices`. The job has a Stooq fallback.
+  `jobs.prices` for a window in which the security was held or traded. The
+  job has a Stooq fallback.
 - **Vite shows ERR_CONNECTION_REFUSED**: IPv4/IPv6 binding mismatch.
   `vite.config.ts` binds `host: true` and proxies `127.0.0.1:8000`.
 - **Phantom V steps in the historical chart**: usually a duplicate

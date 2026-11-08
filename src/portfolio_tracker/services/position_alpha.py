@@ -44,6 +44,7 @@ from portfolio_tracker.models import (
     Security,
 )
 from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.option_contracts import option_from_occ
 from portfolio_tracker.services.performance import (
     modified_dietz_denominators_are_positive,
     modified_dietz_series,
@@ -71,6 +72,11 @@ _NO_INVESTED_POSITION_CAPITAL = "no_invested_position_capital"
 _NONPOSITIVE_DIETZ_DENOMINATOR = "nonpositive_dietz_denominator"
 _PRIMARY_BENCHMARK_PRICE_UNAVAILABLE = "primary_benchmark_price_unavailable"
 _POSITION_PRICE_UNAVAILABLE = "position_price_unavailable"
+_OPTION_PRICE_UNAVAILABLE = "option_price_unavailable"
+_OPTION_PRICE_UNAVAILABLE_NOTE = (
+    "Excluded from both the actual and benchmark legs: this option has no eligible "
+    "close within 14 days on at least one day it was held in the window."
+)
 _SHARE_MOVEMENT_MISSING_SECURITY = "share_movement_missing_security"
 _SHARE_MOVEMENT_MISSING_TICKER = "share_movement_missing_ticker"
 _SHARE_MOVEMENT_UNMATCHED = "share_movement_unmatched"
@@ -209,6 +215,15 @@ class PositionMatchedReturns(BaseModel):
     alpha_vs_policy_pct: Decimal | None = None
 
 
+class PositionAlphaExclusion(BaseModel):
+    """A position left out of the whole calculation, with its footnote."""
+
+    ticker: str
+    name: str | None
+    reason_code: Literal["option_price_unavailable"]
+    note: str
+
+
 class PositionAlphaResult(BaseModel):
     methodology: Literal["position_alpha.split_normalized_price_trade_modified_dietz"]
     methodology_version: Literal["3"]
@@ -229,6 +244,9 @@ class PositionAlphaResult(BaseModel):
     v_end: Decimal = Decimal(0)
     has_policy: bool = False
     matched_returns: PositionMatchedReturns = Field(default_factory=PositionMatchedReturns)
+    # Thinly traded options without a fresh eligible close are excluded from
+    # both legs rather than blocking the whole result. Each one is listed here.
+    excluded_positions: list[PositionAlphaExclusion] = []
 
 
 class _TickerAgg(TypedDict):
@@ -339,16 +357,24 @@ def compute_position_alpha(
             name, sid = security_info.get(t_up, (None, None))
             by_ticker[t_up] = {"name": name, "buys": [], "sells": [], "sid": sid}
 
+    excluded_positions = _exclude_unpriced_options(
+        session, by_ticker, qty_at_start, qty_at_end, ledger.events, start_date, end_date
+    )
+
     # 3. Price-at-start and price-at-end per ticker
     all_tickers = list(by_ticker.keys())
     if not all_tickers:
         return PositionAlphaResult(
             methodology="position_alpha.split_normalized_price_trade_modified_dietz",
             methodology_version="3",
+            excluded_positions=excluded_positions,
             start_date=start_date,
             end_date=end_date,
             calculation_status="unavailable",
-            calculation_reason_codes=[_NO_INVESTED_POSITION_CAPITAL],
+            # Ledger defects still govern when every position was excluded.
+            calculation_reason_codes=(
+                sorted(set(ledger.calculation_reason_codes)) or [_NO_INVESTED_POSITION_CAPITAL]
+            ),
             rows=[],
             total_actual_pl=None,
             total_spy_pl=None,
@@ -422,6 +448,7 @@ def compute_position_alpha(
         return PositionAlphaResult(
             methodology="position_alpha.split_normalized_price_trade_modified_dietz",
             methodology_version="3",
+            excluded_positions=excluded_positions,
             start_date=start_date,
             end_date=end_date,
             calculation_status="unavailable",
@@ -638,6 +665,7 @@ def compute_position_alpha(
     return PositionAlphaResult(
         methodology="position_alpha.split_normalized_price_trade_modified_dietz",
         methodology_version="3",
+        excluded_positions=excluded_positions,
         start_date=start_date,
         end_date=end_date,
         calculation_status="available" if calculation_available else "unavailable",
@@ -1713,6 +1741,91 @@ def _last_known_price(closes: dict[date, Decimal], target: date) -> Decimal | No
     if not candidates:
         return None
     return closes[max(candidates)]
+
+
+def _is_option_security(security_type: str | None, contract_json: str | None, ticker: str) -> bool:
+    return (
+        security_type in ("option", "derivative")
+        or contract_json is not None
+        or option_from_occ(ticker) is not None
+    )
+
+
+def _exclude_unpriced_options(
+    session: Session,
+    by_ticker: dict[str, _TickerAgg],
+    qty_at_start: dict[str, Decimal],
+    qty_at_end: dict[str, Decimal],
+    events: tuple[_PositionEvent, ...],
+    start_date: date,
+    end_date: date,
+) -> list[PositionAlphaExclusion]:
+    """Remove options that lack a fresh eligible close on any held day.
+
+    The checks mirror the table endpoints and the daily series: the start and
+    end quantities, then each interior day after that day's events. Removing a
+    ticker from `by_ticker` drops it from both legs and from the series. Other
+    securities without prices still fail closed.
+    """
+    security_rows = session.execute(
+        select(
+            Security.security_id,
+            Security.ticker,
+            Security.type,
+            Security.option_contract_json,
+        ).where(func.upper(Security.ticker).in_(list(by_ticker)))
+    ).all()
+    sids_by_ticker: defaultdict[str, list[int]] = defaultdict(list)
+    for sid, ticker, security_type, contract_json in security_rows:
+        if ticker is not None and _is_option_security(security_type, contract_json, ticker):
+            sids_by_ticker[ticker.upper()].append(sid)
+    if not sids_by_ticker:
+        return []
+    sid_to_ticker = {sid: ticker for ticker, sids in sids_by_ticker.items() for sid in sids}
+    closes: defaultdict[str, dict[date, Decimal]] = defaultdict(dict)
+    for sid, price_date, close in session.execute(
+        select(Price.security_id, Price.date, Price.close)
+        .where(Price.security_id.in_(list(sid_to_ticker)))
+        .where(Price.position_price_trade_eligibility_clause())
+        .where(Price.date >= start_date - timedelta(days=_MAX_ASOF_PRICE_AGE_DAYS))
+        .where(Price.date <= end_date)
+    ).all():
+        closes[sid_to_ticker[sid]][price_date] = Decimal(close)
+    deltas: defaultdict[tuple[str, date], Decimal] = defaultdict(Decimal)
+    for event in events:
+        deltas[(event.ticker, event.date)] += event.quantity_delta
+
+    exclusions: list[PositionAlphaExclusion] = []
+    for ticker in sorted(sids_by_ticker):
+        series = closes.get(ticker, {})
+        unpriced = (
+            qty_at_start.get(ticker, Decimal(0)) != 0
+            and _last_known_fresh_positive_price(series, start_date) is None
+        ) or (
+            qty_at_end.get(ticker, Decimal(0)) != 0
+            and _last_known_fresh_positive_price(series, end_date) is None
+        )
+        quantity = qty_at_start.get(ticker, Decimal(0))
+        current = start_date
+        while not unpriced and current <= end_date:
+            quantity += deltas.get((ticker, current), Decimal(0))
+            unpriced = (
+                start_date < current < end_date
+                and quantity != 0
+                and _last_known_fresh_positive_price(series, current) is None
+            )
+            current += timedelta(days=1)
+        if unpriced:
+            exclusions.append(
+                PositionAlphaExclusion(
+                    ticker=ticker,
+                    name=by_ticker[ticker]["name"],
+                    reason_code=_OPTION_PRICE_UNAVAILABLE,
+                    note=_OPTION_PRICE_UNAVAILABLE_NOTE,
+                )
+            )
+            del by_ticker[ticker]
+    return exclusions
 
 
 def _last_known_fresh_positive_price(closes: dict[date, Decimal], target: date) -> Decimal | None:

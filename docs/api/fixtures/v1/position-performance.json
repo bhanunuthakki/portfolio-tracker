@@ -33,6 +33,7 @@
     "calculation_reason_codes": [],
     "calculation_status": "available",
     "end_date": "2026-07-22",
+    "excluded_positions": [],
     "has_policy": false,
     "matched_returns": {
       "alpha_vs_policy_pct": null,
