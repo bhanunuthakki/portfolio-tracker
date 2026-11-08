@@ -112,6 +112,27 @@ on the live database and ships with the Phase 3 migration batch (backup +
 preview + owner approval). Until then, sync recency comes from `health` and
 each account's `last_successful_sync_at`.
 
+### Weekly portfolio value history
+
+`GET /api/v1/weekly-values` accepts optional inclusive `start_date` and
+`end_date` parameters. It exposes value levels independently of the
+performance calculation. Each point gives the start of its ISO week, the
+actual observation date, the value, and its basis. Each basis keeps its latest
+available point within the week. Weeks can be absent and the endpoint does
+not carry values forward or add balances observed on different dates.
+
+- `whole_account` uses verified account totals for the same date across the
+  requested account universe. Its observation keys resolve to source details.
+- `marked_positions` sums retained USD position marks for covered accounts.
+  The position basis includes only cash represented in holdings and does not
+  establish net account value. An account with an unmarked nonzero position,
+  non-USD holding, or manual snapshot is omitted from that day's subtotal.
+  Compare each point's `covered_account_ids` with `expected_account_ids`.
+- `legacy_cached_snapshot` and `legacy_cached_model` expose the cache's
+  original snapshot and transaction-walk labels. The cache did not record its
+  account universe or providers, so account coverage is null and providers
+  are unknown. These values are historical display evidence.
+
 ### Choosing a risk resource
 
 `risk` returns beta and drawdown together in one call. The two halves have

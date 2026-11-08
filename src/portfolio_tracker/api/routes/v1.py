@@ -12,6 +12,7 @@ Resources:
   * ``GET /api/v1/transactions``         — cursor-paginated normalized transactions
   * ``GET /api/v1/cash-flows``           — return-classified external/internal flows
   * ``GET /api/v1/position-snapshots``   — historical observed holdings
+  * ``GET /api/v1/weekly-values``        — retained historical value levels by basis
   * ``GET /api/v1/securities``           — security master + Classification
   * ``GET /api/v1/data-quality``         — machine-readable data-quality findings
   * ``GET /api/v1/valuation-observations/{key}`` — sanitized valuation provenance
@@ -90,6 +91,7 @@ from portfolio_tracker.services.v1_snapshot import (
     build_portfolio_snapshot,
     build_positioning_v1,
 )
+from portfolio_tracker.services.weekly_values import WeeklyValueHistory, build_weekly_value_history
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
 
@@ -346,6 +348,19 @@ def valuation_observation_provenance(
         is_complete=observation.is_complete,
         is_empty=observation.is_empty,
     )
+
+
+@router.get("/weekly-values", response_model=WeeklyValueHistory)
+def weekly_values(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date = Query(default=date.min),
+    end_date: date | None = Query(default=None),
+) -> WeeklyValueHistory:
+    """Latest retained value in each ISO week, separately by valuation basis."""
+    resolved_end = end_date or date.today()
+    if start_date > resolved_end:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "start_date is after end_date")
+    return build_weekly_value_history(session, start_date, resolved_end)
 
 
 @router.get("/analytics/performance", response_model=PerformanceV1Result)
