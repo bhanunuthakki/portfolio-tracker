@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from portfolio_tracker.api.routes import snaptrade as snaptrade_routes
-from portfolio_tracker.jobs import benchmarks, classify_securities, daily_refresh, prices
+from portfolio_tracker.jobs import backfill, benchmarks, classify_securities, daily_refresh, prices
 from portfolio_tracker.models import HoldingSnapshot, InvestmentTransaction, Price, Security
 
 START = date(2026, 10, 8)
@@ -210,6 +210,11 @@ def test_daily_refresh_reaches_classification_and_done_inside_the_limit(
     monkeypatch.setattr(prices, "_yfinance_history", _history)
     monkeypatch.setattr(prices.httpx, "get", _timeout)
     monkeypatch.setattr(daily_refresh.snapshot, "run", lambda: 0)
+    monkeypatch.setattr(
+        backfill,
+        "run_with_delivery_receipts",
+        lambda **_kwargs: backfill.BackfillRunResult(rows_written=0, item_receipts=()),
+    )
     monkeypatch.setattr(daily_refresh.daily_values, "run", lambda **_kwargs: 0)
     monkeypatch.setattr(
         snaptrade_routes,
