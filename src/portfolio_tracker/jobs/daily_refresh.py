@@ -140,12 +140,16 @@ def run() -> int:
     try:
         from portfolio_tracker.jobs import prices
 
-        price_rows, by_source = prices.run(today - timedelta(days=30), today)
+        price_rows, by_source = prices.run(
+            today - timedelta(days=30), today, prices.DAILY_TIME_BUDGET_SECONDS
+        )
+        deferred = by_source.get("deferred", 0)
         print(
-            f"[daily_refresh]   prices: {price_rows} rows written "
+            f"[daily_refresh]   prices: {'PARTIAL ' if deferred else ''}"
+            f"{price_rows} rows written "
             f"(yfinance={by_source.get('yfinance', 0)} "
             f"stooq={by_source.get('stooq', 0)} "
-            f"none={by_source.get('none', 0)})"
+            f"none={by_source.get('none', 0)} deferred={deferred})"
         )
     except Exception:
         failures += 1
