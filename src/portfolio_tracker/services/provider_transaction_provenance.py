@@ -486,7 +486,7 @@ def _owner_resolution_payload_matches_provider_event(
     decision: CashFlowReconciliationDecision,
     event: _EventSpec,
 ) -> bool:
-    """Verify the immutable payload emitted by manifest schema v4."""
+    """Verify a schema-v4 resolution or an approved internal sweep repair."""
     if (
         decision.approved_at is None
         or decision.decision_authority != CashFlowDecisionAuthority.OWNER_APPROVED
@@ -494,9 +494,20 @@ def _owner_resolution_payload_matches_provider_event(
         or decision.resolution_kind == CashFlowResolutionKind.UNRESOLVED
         or decision.effective_date_basis != CashFlowEffectiveDateBasis.OWNER_RESOLVED
         or decision.target_transaction_id != event.transaction.plaid_investment_transaction_id
-        or decision.assumption_code != _CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION
+        or decision.assumption_code
+        not in {
+            _CORROBORATING_PROVIDER_RESOLUTION_ASSUMPTION,
+            "owner_approved_internal_sweep",
+        }
         or decision.methodology_version != "2"
         or decision.decision_payload_sha256 != canonical_decision_payload_sha256(decision)
+    ):
+        return False
+    if decision.assumption_code == "owner_approved_internal_sweep" and (
+        decision.resolution_kind != CashFlowResolutionKind.INTERNAL
+        or decision.classification != "internal"
+        or decision.signed_external_amount != Decimal(0)
+        or decision.effective_date != event.transaction.date
     ):
         return False
     expected_key = _digest(

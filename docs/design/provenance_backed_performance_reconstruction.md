@@ -64,6 +64,18 @@ replacement, and records both decisions in the atomic reconciliation-run
 receipt. It cannot replace a resolved provider decision or reinterpret a
 different provider transaction.
 
+An explicit owner-approved internal sweep repair may instead supersede a resolved
+provider inflow through a native maintenance plan. The plan must bind the exact
+transaction set, saved evidence and prior decisions, a verified backup, and the
+expected recorded-flow change. The replacement uses
+`owner_approved_internal_sweep`, `owner_approved` authority, `owner_resolved` date
+basis, `internal` classification, and zero external amount. Exact provider
+recapture preserves that linked, digest-valid replacement through the shared
+provider attestation service used by scheduled refresh and manual sync. The
+approved decision lives in the database and requires no scheduled repair job.
+New sweeps require their own reconciliation evidence. The historical repair
+does not change source facts, claim additional history coverage, or resolve other gaps.
+
 ### Account-mapping evidence
 
 The private evidence inventory must explicitly provide
