@@ -660,3 +660,76 @@ def test_autoflush_false_materializes_transaction_before_provenance(engine):
         session.flush()
 
         assert session.execute(text("PRAGMA foreign_key_check")).all() == []
+
+
+@pytest.mark.parametrize("drift", [None, "classification", "date", "authority", "digest", "link"])
+def test_provider_recapture_preserves_only_valid_approved_internal_sweep(session: Session, drift):
+    account = _account(session, "approved-internal-sweep")
+    transaction = _source_transaction(account, subtype="contribution", amount=Decimal("100"))
+    _store_transaction(session, account, transaction)
+    persist_provider_account_attestation(session, _capture(account, (transaction,)))
+    session.flush()
+    original = session.scalar(select(CashFlowReconciliationDecision))
+    assert original is not None and original.classification == "external_in"
+    approved = _CAPTURED + timedelta(hours=1)
+    replacement = CashFlowReconciliationDecision(
+        decision_key="0" * 64,
+        source_event_id=original.source_event_id,
+        target_transaction_id=transaction.plaid_investment_transaction_id,
+        resolution_kind="internal",
+        classification="internal",
+        signed_external_amount=Decimal(0),
+        effective_date=transaction.date,
+        effective_date_basis="owner_resolved",
+        effective_timezone="America/New_York",
+        decision_authority="owner_approved",
+        confidence="exact",
+        assumption_code="owner_approved_internal_sweep",
+        methodology_version="2",
+        decision_payload_sha256="0" * 64,
+        approved_at=approved,
+    )
+    if drift == "classification":
+        replacement.resolution_kind = "provider_exact"
+        replacement.classification = "external_in"
+        replacement.signed_external_amount = Decimal("100")
+    elif drift == "date":
+        replacement.effective_date = transaction.date + timedelta(days=1)
+    elif drift == "authority":
+        replacement.decision_authority = "provider"
+    replacement.decision_payload_sha256 = canonical_decision_payload_sha256(replacement)
+    if drift == "digest":
+        replacement.decision_payload_sha256 = "f" * 64
+    replacement.decision_key = _digest(
+        {
+            "identity_version": "cashflow_reconciliation_decision.v1",
+            "source_event_id": replacement.source_event_id,
+            "decision_payload_sha256": replacement.decision_payload_sha256,
+        }
+    )
+    original.superseded_at = approved + timedelta(seconds=1 if drift == "link" else 0)
+    original.superseded_by_decision_key = replacement.decision_key
+    session.add(replacement)
+    session.flush()
+    retry = _capture(account, (transaction,), captured_at=_CAPTURED + timedelta(hours=2))
+    if drift:
+        with pytest.raises(ProviderTransactionConflictError):
+            persist_provider_account_attestation(session, retry)
+        return
+    assert persist_provider_account_attestation(session, retry).created is False
+    overlapping = _capture(
+        account,
+        (transaction,),
+        captured_at=_CAPTURED + timedelta(hours=3),
+        coverage_start=date(2025, 1, 5),
+        coverage_end=date(2025, 2, 5),
+    )
+    assert persist_provider_account_attestation(session, overlapping).created is True
+    session.flush()
+    ledger = build_external_flow_ledger(
+        session, _START, _END, account_ids=frozenset({account.account_id})
+    )
+    assert not ledger.issues
+    assert ledger.net_external_cashflow_in == Decimal(0)
+    assert len(tuple(session.scalars(select(CashFlowReconciliationDecision)))) == 2
+    assert original.classification == "external_in"
