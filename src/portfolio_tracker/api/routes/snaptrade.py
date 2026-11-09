@@ -55,6 +55,7 @@ from portfolio_tracker.services.provider_transaction_corrections import (
 from portfolio_tracker.services.provider_transaction_provenance import (
     ProviderAccountTransactionCapture,
     ProviderHistoryGap,
+    ProviderTransactionConflictError,
     persist_provider_account_attestation_with_correction_approvals,
 )
 from portfolio_tracker.snaptrade_client import (
@@ -86,6 +87,7 @@ class SyncResultOut(BaseModel):
     accounts_synced: int
     holdings_written: int
     transactions_written: int
+    descriptions_preserved: int = 0
 
 
 @router.get("/status")
@@ -123,11 +125,32 @@ def sync(
         ),
     ] = 730,
 ) -> SyncResultOut:
-    return sync_with_transaction_correction_approvals(
-        session,
-        profile,
-        lookback_days,
-    )
+    try:
+        return sync_with_transaction_correction_approvals(session, profile, lookback_days)
+    except ProviderTransactionConflictError as exc:
+        session.rollback()
+        plan = exc.correction_plan
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "PROVIDER_TRANSACTION_CONFLICT",
+                "message": "Transaction evidence changed. The sync was rolled back.",
+                "account_id": plan.account_id if plan is not None else None,
+                "conflicting_transaction_count": len(plan.corrections)
+                if plan is not None
+                else None,
+                "changed_fields": sorted(
+                    {
+                        change.field
+                        for correction in plan.corrections
+                        for change in correction.changed_fields
+                    }
+                )
+                if plan is not None
+                else [],
+                "recovery": "Inspect the private correction preview before approving historical changes.",
+            },
+        ) from None
 
 
 def sync_with_transaction_correction_approvals(
@@ -155,6 +178,7 @@ def sync_with_transaction_correction_approvals(
     accounts_synced = 0
     holdings_written = 0
     transactions_written = 0
+    descriptions_preserved = 0
     today = date.today()
     backfill_start = today - timedelta(days=lookback_days)
 
@@ -163,15 +187,19 @@ def sync_with_transaction_correction_approvals(
         items_synced += 1
 
         accounts = snaptrade_client.list_user_accounts(creds, auth.authorization_id)
+        item_has_investment_accounts = False
+        item_holdings_available = True
         for snaptrade_account_id, plaid_shaped_account in accounts:
             if plaid_shaped_account.type not in INVESTMENT_ACCOUNT_TYPES:
                 continue
+            item_has_investment_accounts = True
             account = upsert_account(session, item.item_id, plaid_shaped_account)
             accounts_synced += 1
 
             holdings_resp = snaptrade_client.get_holdings(creds, snaptrade_account_id)
             fetched_at = datetime.now(UTC)
             holdings_available = _holdings_are_available(auth, plaid_shaped_account)
+            item_holdings_available = item_holdings_available and holdings_available
             holdings_account = next(
                 (
                     provider_account
@@ -331,7 +359,7 @@ def sync_with_transaction_correction_approvals(
                     )
                 )
                 transactions_written += 1
-            persist_provider_account_attestation_with_correction_approvals(
+            attestation_result = persist_provider_account_attestation_with_correction_approvals(
                 session,
                 ProviderAccountTransactionCapture(
                     account_id=account.account_id,
@@ -351,6 +379,10 @@ def sync_with_transaction_correction_approvals(
                 ),
                 transaction_correction_approvals,
             )
+            descriptions_preserved += attestation_result.preserved_description_count
+
+        if item_has_investment_accounts and item_holdings_available:
+            item.last_refreshed_at = datetime.now(UTC)
 
     session.commit()
 
@@ -369,6 +401,7 @@ def sync_with_transaction_correction_approvals(
         accounts_synced=accounts_synced,
         holdings_written=holdings_written,
         transactions_written=transactions_written,
+        descriptions_preserved=descriptions_preserved,
     )
 
 

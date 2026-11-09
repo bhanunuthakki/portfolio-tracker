@@ -24,6 +24,7 @@ def _patch_steps_after_plaid_capture(monkeypatch, calls: list[str]) -> None:
             accounts_synced=0,
             holdings_written=0,
             transactions_written=0,
+            descriptions_preserved=0,
         )
 
     monkeypatch.setattr(snaptrade_routes, "sync", sync)
@@ -100,6 +101,7 @@ def test_daily_refresh_reports_partial_benchmark_endpoint_coverage(
             accounts_synced=0,
             holdings_written=0,
             transactions_written=0,
+            descriptions_preserved=0,
         ),
     )
     endpoint = benchmarks.BenchmarkEndpointMark(

@@ -19,6 +19,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from portfolio_tracker import snaptrade_client
@@ -28,10 +29,16 @@ from portfolio_tracker.models import (
     CashFlowSourceGap,
     CashFlowSourceGapReason,
     HoldingSnapshot,
+    InvestmentTransaction,
     Item,
     Security,
 )
-from portfolio_tracker.plaid_client import PlaidAccount, PlaidHolding, PlaidSecurity
+from portfolio_tracker.plaid_client import (
+    PlaidAccount,
+    PlaidHolding,
+    PlaidInvestmentTransaction,
+    PlaidSecurity,
+)
 from portfolio_tracker.provider_delivery import build_provider_delivery_metadata
 from portfolio_tracker.snaptrade_client import (
     SnapTradeBrokerageAuthorization,
@@ -247,6 +254,128 @@ def test_account_type_follows_the_provider_declared_subtype(
     assert account.subtype == provider_type
 
 
+def _activities_with_transaction(tx, start, end):
+    return SnapTradeTransactionsResponse(
+        accounts=[],
+        securities=[],
+        transactions=[tx],
+        total_transactions=1,
+        delivery=build_provider_delivery_metadata(
+            provider="snaptrade",
+            source_format="snaptrade_account_activities_api",
+            parser_version="snaptrade_account_activity.v3",
+            requested_start_date=start,
+            requested_end_date=end,
+            page_count=1,
+            provider_reported_total=1,
+            record_ids=[tx.plaid_investment_transaction_id],
+            normalized_records=[tx.model_dump(mode="json")],
+        ),
+    )
+
+
+def test_sync_accepts_description_variant_and_records_refresh_time(session, monkeypatch):
+    account, _ = _seed_account_with_stale_position(session, date.today())
+    route_mod = _patch_snaptrade(monkeypatch)
+    tx = PlaidInvestmentTransaction(
+        plaid_investment_transaction_id="snaptrade:description-test",
+        plaid_account_id=_ST_ACCOUNT_ID,
+        date=date.today(),
+        name="contribution",
+        quantity=Decimal(0),
+        amount=Decimal(100),
+        type="transfer",
+        subtype="transfer",
+        currency="USD",
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id=tx.plaid_investment_transaction_id,
+            account_id=account.account_id,
+            date=tx.date,
+            name=tx.name,
+            quantity=tx.quantity,
+            amount=tx.amount,
+            type=tx.type,
+            subtype=tx.subtype,
+            currency="USD",
+        )
+    )
+    session.commit()
+    delivered = tx.model_copy(update={"name": "contribution - Index Fund"})
+    monkeypatch.setattr(
+        snaptrade_client,
+        "get_account_activities",
+        lambda _c, _a, start, end: _activities_with_transaction(delivered, start, end),
+    )
+
+    result = route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+    retry = route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+
+    assert result.descriptions_preserved == 1
+    assert retry.transactions_written == 0
+    assert retry.descriptions_preserved == 1
+    assert (
+        session.get(InvestmentTransaction, tx.plaid_investment_transaction_id).name
+        == "contribution"
+    )
+    item = session.get(Item, account.item_id)
+    assert item.last_refreshed_at is not None
+
+
+def test_sync_conflict_rolls_back_and_reports_safe_actionable_error(session, monkeypatch):
+    account, old_security = _seed_account_with_stale_position(session, date.today())
+    route_mod = _patch_snaptrade(monkeypatch)
+    tx = PlaidInvestmentTransaction(
+        plaid_investment_transaction_id="snaptrade:conflict-test",
+        plaid_account_id=_ST_ACCOUNT_ID,
+        date=date.today(),
+        name="contribution",
+        quantity=Decimal(0),
+        amount=Decimal(100),
+        type="cash",
+        subtype="deposit",
+        currency="USD",
+    )
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id=tx.plaid_investment_transaction_id,
+            account_id=account.account_id,
+            date=tx.date,
+            name=tx.name,
+            quantity=tx.quantity,
+            amount=tx.amount,
+            type=tx.type,
+            subtype=tx.subtype,
+            currency="USD",
+        )
+    )
+    session.commit()
+    delivered = tx.model_copy(update={"amount": Decimal(101)})
+    monkeypatch.setattr(
+        snaptrade_client,
+        "get_account_activities",
+        lambda _c, _a, start, end: _activities_with_transaction(delivered, start, end),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        route_mod.sync(session, route_mod.SnapTradeProfile.PRIMARY)
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "PROVIDER_TRANSACTION_CONFLICT"
+    assert exc.value.detail["changed_fields"] == ["amount"]
+    assert "conflict-test" not in str(exc.value.detail)
+    assert session.get(InvestmentTransaction, tx.plaid_investment_transaction_id).amount == Decimal(
+        100
+    )
+    assert (
+        session.get(HoldingSnapshot, (date.today(), account.account_id, old_security.security_id))
+        is not None
+    )
+    assert session.scalar(select(AccountValuationObservation)) is None
+    assert session.get(Item, account.item_id).last_refreshed_at is None
+
+
 def test_holding_from_snaptrade_cost_basis_is_total_not_per_share():
     # SnapTrade gives average_purchase_price PER SHARE; cost_basis must be
     # stored as TOTAL dollars (Plaid convention) = avg × units, else
@@ -359,3 +488,4 @@ def test_disabled_authorization_never_writes_complete_current_holdings(session, 
     gap = session.execute(select(CashFlowSourceGap)).scalar_one()
     assert gap.reason_code == CashFlowSourceGapReason.PROVIDER_HISTORY_UNAVAILABLE
     assert result.holdings_written == 0
+    assert session.scalar(select(Item)).last_refreshed_at is None

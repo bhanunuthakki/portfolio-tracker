@@ -47,7 +47,10 @@ from portfolio_tracker.provider_delivery import (
 from portfolio_tracker.services.cashflow_source_coverage import (
     canonical_decision_payload_sha256,
 )
-from portfolio_tracker.services.external_flow_ledger import classify_by_name
+from portfolio_tracker.services.external_flow_ledger import (
+    classify_by_name,
+    transaction_name_semantics,
+)
 
 if TYPE_CHECKING:
     from portfolio_tracker.services.provider_transaction_corrections import (
@@ -131,6 +134,7 @@ class ProviderAttestationWriteResult:
     cashflow_candidate_count: int
     unresolved_event_count: int
     provider_history_gap_count: int
+    preserved_description_count: int = 0
 
     @property
     def provider_response_has_no_known_gaps(self) -> bool:
@@ -373,6 +377,26 @@ def _stored_transaction_matches(
         and stored.currency == source.currency
         and stored.name == source.name
     )
+
+
+def _accounting_transaction(
+    stored: InvestmentTransaction,
+    delivered: PlaidInvestmentTransaction,
+) -> PlaidInvestmentTransaction:
+    """Keep the existing accounting description for equivalent provider wording.
+
+    The caller still verifies every other normalized field. Exact delivered
+    descriptions remain bound by the capture's source and delivery hashes;
+    immutable accounting events keep their original row hashes and decisions.
+    """
+    if stored.name == delivered.name:
+        return delivered
+    canonical = delivered.model_copy(update={"name": stored.name})
+    if transaction_name_semantics(stored.name) == transaction_name_semantics(
+        delivered.name
+    ) and _classify_candidate(canonical) == _classify_candidate(delivered):
+        return canonical
+    return delivered
 
 
 def _event_specs(
@@ -720,20 +744,27 @@ def persist_provider_account_attestation(
     # Source events and decisions.
     session.flush()
     conflicting_transaction_found = False
+    accounting_transactions: list[PlaidInvestmentTransaction] = []
+    preserved_description_count = 0
     for transaction in capture.transactions:
         stored = session.get(
             InvestmentTransaction,
             transaction.plaid_investment_transaction_id,
         )
         expected_security_id = _expected_security_id(capture, transaction)
+        accounting_transaction = (
+            _accounting_transaction(stored, transaction) if stored is not None else transaction
+        )
         if stored is None or not _stored_transaction_matches(
             stored,
-            transaction,
+            accounting_transaction,
             account_id=capture.account_id,
             security_id=expected_security_id,
         ):
             conflicting_transaction_found = True
             break
+        accounting_transactions.append(accounting_transaction)
+        preserved_description_count += accounting_transaction.name != transaction.name
     if conflicting_transaction_found:
         from portfolio_tracker.services.provider_transaction_corrections import (
             apply_provider_transaction_corrections,
@@ -752,6 +783,8 @@ def persist_provider_account_attestation(
             correction_plan,
             transaction_correction_approval,
         )
+        accounting_transactions = list(capture.transactions)
+        preserved_description_count = 0
 
     captured_at = _normalize_captured_at(capture.captured_at)
     normalized_rows = [transaction.model_dump(mode="json") for transaction in capture.transactions]
@@ -780,7 +813,7 @@ def persist_provider_account_attestation(
     events = _event_specs(
         capture.delivery.provider,
         account_identity_sha256,
-        capture.transactions,
+        tuple(accounting_transactions),
     )
     unresolved_gap_dates = tuple(
         sorted(
@@ -858,6 +891,7 @@ def persist_provider_account_attestation(
             len(events),
             len(unresolved_gap_dates),
             len(history_gaps),
+            preserved_description_count,
         )
 
     attestation = CashFlowSourceAttestation(
@@ -872,6 +906,11 @@ def persist_provider_account_attestation(
                 "broker_archive_coverage=provider_explicit_full_range"
                 if capture.broker_archive_coverage_basis is not None
                 else "broker_archive_coverage=unasserted"
+            )
+            + (
+                ";description_policy=preserve_accounting_name_when_semantics_equal"
+                if preserved_description_count
+                else ""
             )
         ),
         broker_archive_coverage=broker_archive_coverage,
@@ -986,6 +1025,7 @@ def persist_provider_account_attestation(
         len(events),
         len(unresolved_gap_dates),
         len(history_gaps),
+        preserved_description_count,
     )
 
 

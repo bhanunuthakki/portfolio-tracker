@@ -207,6 +207,15 @@ before/after payloads and hashes, approval time, and backup/preview hashes.
 This is a narrow correction authority, not permission for provider sync to
 edit historical rows silently.
 
+Description-only provider variants are admitted without a historical rewrite
+when all other normalized fields and every description-derived accounting rule
+remain equal. The original accounting description, source-event row hash, and
+decision lineage remain unchanged. The capture's source hash still fingerprints
+the exact delivered descriptions. Its event-set hash fingerprints the unchanged
+canonical accounting events, and `source_reference` names the description policy.
+This keeps delivery evidence distinct from accounting identity. Changed economics
+or changed description-derived meaning still require the correction workflow.
+
 An `ACATI` statement row with `Amount="--"`, an instrument, and a nonzero
 quantity is an in-kind transfer, not a zero-dollar cash flow. Source coverage
 continues to describe the full statement. Manifest schema v3 separately binds

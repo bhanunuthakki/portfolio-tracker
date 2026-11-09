@@ -107,6 +107,21 @@ verifying a restorable SQLite backup; it writes an append-only correction
 receipt. There is deliberately no public HTTP endpoint that can silently
 authorize this historical rewrite.
 
+A provider description may change without changing accounting. Ordinary sync
+retains the stored description only when every other normalized field and all
+description-derived accounting rules still match, including decision lineage,
+reinvestment handling, and transfer-shaped fees. It does not rewrite the stored
+transaction, source event, or owner decision. The new attestation fingerprints
+the exact delivered records; its event set references the unchanged accounting
+records. `source_reference` records this normalization policy. SnapTrade reports
+the count as `descriptions_preserved`, including on an idempotent retry.
+
+SnapTrade records `last_successful_sync_at` only after all investment accounts
+on the connection have available holdings and the full sync commits. Transaction
+conflicts roll back the sync and return HTTP 409 with a stable
+`PROVIDER_TRANSACTION_CONFLICT` code, affected account, count, and changed field
+names. Response details omit transaction identifiers, descriptions, and values.
+
 **Deferred:** `GET/POST /api/v1/sync-runs` requires a run-log schema migration
 on the live database and ships with the Phase 3 migration batch (backup +
 preview + owner approval). Until then, sync recency comes from `health` and
