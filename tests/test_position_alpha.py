@@ -1860,3 +1860,74 @@ def test_unpriced_stock_still_fails_closed(session):
     assert result.calculation_status == "unavailable"
     assert "position_price_unavailable" in result.calculation_reason_codes
     assert result.excluded_positions == []
+
+
+@pytest.mark.parametrize("cash_flag", ["is_cash_equivalent", "cash_ticker"])
+def test_quantity_bearing_cash_rows_do_not_block_the_position_ledger(session, cash_flag):
+    start = date(2026, 10, 6)
+    end = date(2026, 11, 2)
+    account = _active_account(session)
+    cash = Security(
+        plaid_security_id="s-cash",
+        ticker="CUR:USD" if cash_flag == "cash_ticker" else "SWEEP",
+        type="cash",
+        is_cash_equivalent=cash_flag == "is_cash_equivalent",
+    )
+    session.add(cash)
+    session.flush()
+    for index, (tx_type, subtype, quantity) in enumerate(
+        [
+            ("cash", "dividend", Decimal(-3)),
+            ("fee", "interest", Decimal(-1)),
+            ("fee", "margin expense", Decimal(2)),
+            ("cash", "withdrawal", Decimal(50)),
+        ]
+    ):
+        session.add(
+            InvestmentTransaction(
+                plaid_investment_transaction_id=f"tx-cash-{index}",
+                account_id=account.account_id,
+                security_id=cash.security_id,
+                date=start + timedelta(days=index + 1),
+                type=tx_type,
+                subtype=subtype,
+                quantity=quantity,
+                amount=quantity,
+            )
+        )
+    session.commit()
+
+    ledger = _load_position_event_ledger(
+        session, start, end, active_account_ids(session), exclude_broad_index=False
+    )
+
+    assert ledger.calculation_reason_codes == ()
+    assert ledger.events == ()
+
+
+def test_quantity_bearing_share_row_without_direction_still_fails_closed(session):
+    start = date(2026, 10, 6)
+    end = date(2026, 11, 2)
+    account = _active_account(session)
+    stock = Security(plaid_security_id="s-stock", ticker="AAPL", type="cs")
+    session.add(stock)
+    session.flush()
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="tx-stock-dividend-shares",
+            account_id=account.account_id,
+            security_id=stock.security_id,
+            date=start + timedelta(days=1),
+            type="cash",
+            subtype="dividend",
+            quantity=Decimal(-3),
+            amount=Decimal(-3),
+        )
+    )
+    session.commit()
+
+    ledger = _load_position_event_ledger(
+        session, start, end, active_account_ids(session), exclude_broad_index=False
+    )
+
+    assert ledger.calculation_reason_codes == ("share_movement_unclassified",)
