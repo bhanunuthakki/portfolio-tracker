@@ -62,6 +62,14 @@ INVESTMENT_ACCOUNT_TYPES: frozenset[str] = frozenset(
     {AccountType.INVESTMENT.value, AccountType.BROKERAGE.value}
 )
 
+# Provider-declared bank accounts can arrive under a brokerage login. An
+# aggregator may still label them `investment`, so the subtype decides.
+NON_INVESTMENT_ACCOUNT_SUBTYPES: frozenset[str] = frozenset({"checking", "savings"})
+
+
+def is_non_investment_subtype(subtype: str | None) -> bool:
+    return (subtype or "").strip().lower() in NON_INVESTMENT_ACCOUNT_SUBTYPES
+
 
 class InvestmentTransactionType(StrEnum):
     """Plaid's `investment_transaction.type` enum."""

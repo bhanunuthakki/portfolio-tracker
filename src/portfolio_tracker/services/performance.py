@@ -58,6 +58,7 @@ from portfolio_tracker.models import (
     InvestmentTransactionType,
     Price,
     Security,
+    is_non_investment_subtype,
 )
 from portfolio_tracker.schemas import (
     PerformanceBenchmarkEquation,
@@ -107,6 +108,7 @@ _ACCOUNT_UNIVERSE_COVERAGE_INCOMPLETE = "portfolio_account_universe_coverage_inc
 _ACCOUNT_VALUATION_INDEX_EXCLUSION_UNSUPPORTED = "account_valuation_index_exclusion_unsupported"
 _PROVIDER_VALUATION_AS_OF_UNASSERTED = "provider_valuation_as_of_unasserted"
 _PERFORMANCE_WINDOW_TOO_SHORT = "performance_window_too_short"
+_FLOW_COVERAGE_TAIL_DAYS = 7
 
 _ValueProvenance = Literal[
     "observed_complete_snapshot",
@@ -148,8 +150,8 @@ class _PortfolioValueAssessment:
     )
 
 
-def latest_complete_portfolio_observation_date(session: Session) -> date | None:
-    """Latest date with a structurally complete whole-portfolio observation.
+def _complete_portfolio_observation_dates(session: Session) -> set[date]:
+    """Dates with a structurally complete whole-portfolio observation.
 
     A provider API total observed on its capture date can qualify even when
     the provider omitted an effective timestamp. Downstream certification
@@ -165,8 +167,35 @@ def latest_complete_portfolio_observation_date(session: Session) -> date | None:
     snapshot_dates = _complete_snapshot_dates(
         session, snapshot_candidates, account_ids=valuation_universe
     )
-    candidates = set(snapshot_dates) | set(account_valuations)
-    return max(candidates) if candidates else None
+    return set(snapshot_dates) | set(account_valuations)
+
+
+def _latest_flow_covered_observation_date(session: Session) -> date | None:
+    """Latest complete observation with attested flows through that date.
+
+    A provider can report a value before it finishes the same day's activity
+    sync, so the newest observation can sit a day or two past flow evidence.
+    Only that short tail moves the default end. An older shortfall keeps the
+    latest observation, so the unavailable result and its reason stay visible.
+    """
+    observations = _complete_portfolio_observation_dates(session)
+    if not observations:
+        return None
+    latest = max(observations)
+    floor = latest - timedelta(days=_FLOW_COVERAGE_TAIL_DAYS)
+    coverage = assess_cashflow_source_coverage(
+        session,
+        floor,
+        latest,
+        account_ids=performance_account_ids(session, date.min, date.max),
+    )
+    first_uncovered = min(
+        (start for account in coverage.accounts for start, _ in account.uncovered_ranges),
+        default=None,
+    )
+    if first_uncovered is None:
+        return latest
+    return max((day for day in observations if floor < day < first_uncovered), default=latest)
 
 
 def resolve_performance_window(
@@ -178,13 +207,12 @@ def resolve_performance_window(
 ) -> tuple[date, date]:
     """Resolve omitted performance boundaries without changing explicit ones.
 
-    An omitted end uses the latest complete broker observation when available,
-    preventing a stale-but-valid portfolio from being compared with a future
-    ``date.today()`` boundary that has no valuation. ``date.today()`` remains
-    only the empty-dataset fallback.
+    An omitted end uses the latest complete broker observation with attested
+    flows through it, preventing a stale-but-valid portfolio from being
+    compared with a future ``date.today()`` boundary that has no valuation.
+    ``date.today()`` remains only the empty-dataset fallback.
     """
-    latest_observation = latest_complete_portfolio_observation_date(session)
-    resolved_end = end_date or latest_observation or date.today()
+    resolved_end = end_date or _latest_flow_covered_observation_date(session) or date.today()
     account_ids = performance_account_ids(session, date.min, resolved_end)
     snapshot_candidates = _snapshot_dates(session, date.min, resolved_end, account_ids=account_ids)
     complete_snapshots = _complete_snapshot_dates(
@@ -1938,19 +1966,21 @@ def performance_account_ids(session: Session, start_date: date, end_date: date) 
     Coverage is intentionally defined from the linked account inventory, not
     from whichever value rows happened to arrive. Otherwise an unsynchronized
     account and all of its cash flows disappear from both sides of the return
-    equation and the reduced book can be mislabeled complete.
+    equation and the reduced book can be mislabeled complete. A provider-declared
+    bank account is outside the investment inventory unless it has in-window
+    transactions.
     """
     active = active_account_ids(session)
     if not active:
         return frozenset()
     investment_accounts = frozenset(
-        session.execute(
-            select(Account.account_id).where(
+        account_id
+        for account_id, subtype in session.execute(
+            select(Account.account_id, Account.subtype).where(
                 Account.account_id.in_(active), Account.type.in_(INVESTMENT_ACCOUNT_TYPES)
             )
-        )
-        .scalars()
-        .all()
+        ).all()
+        if not is_non_investment_subtype(subtype)
     )
     transaction_accounts = frozenset(
         session.execute(

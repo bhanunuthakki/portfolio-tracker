@@ -153,6 +153,10 @@ provider-delivered evidence. Arithmetic may remain available on complete
 provider delivery, but its certification is `source_provisional` with
 `broker_archive_coverage_not_complete` until archival coverage closes.
 
+The daily refresh captures Plaid investment activity in the same way that the
+SnapTrade sync captures its activity. Without that capture, flow coverage for
+every Plaid account ends at the last manual backfill.
+
 Provider source-event identity is based on provider, stable account identity,
 and provider record ID—not on the requested sliding window. Overlapping daily
 captures link to the same immutable event and current decision, keeping the
@@ -210,9 +214,12 @@ encode the cash-versus-in-kind distinction.
 ## Reconstruction
 
 The calculation universe contains every active investment account plus any
-account with activity in the requested window. A missing boundary or source
-coverage for any included account makes the result unavailable; the calculator
-does not silently narrow the book to the accounts that happened to have data.
+account with activity in the requested window. An account whose provider
+declares it `checking` or `savings` is a bank account, not an investment account,
+even when an aggregator reports it under a brokerage login. It joins the universe
+only when it has activity in the window. A missing boundary or source coverage
+for any included account makes the result unavailable; the calculator does not
+silently narrow the book to the accounts that happened to have data.
 
 Boundary values use one matched basis for both ends:
 
@@ -229,10 +236,13 @@ latest capture is authoritative; a later incomplete capture cannot be hidden
 by an older complete one.
 
 When the caller omits an ending date, the window is anchored to the latest
-complete broker observation—not the wall-clock date. Lookbacks such as 3m, 6m,
-1y, and 2y must be calculated backward from that resolved ending observation.
-An explicitly supplied date remains exact and fails closed if the corresponding
-valuation boundary is absent.
+complete broker observation with attested external flows through that date—not
+the wall-clock date. A provider can report a value before it finishes that day's
+activity sync, so the anchor may step back up to seven days. An older flow
+shortfall keeps the latest observation, and the result stays unavailable with its
+reason. Lookbacks such as 3m, 6m, 1y, and 2y must be calculated backward from that
+resolved ending observation. An explicitly supplied date remains exact and fails
+closed if the corresponding valuation boundary is absent.
 
 For each account/security, modeled quantities are reconstructed on a common
 split-adjusted basis:

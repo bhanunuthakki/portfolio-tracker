@@ -32,6 +32,7 @@ from portfolio_tracker.services.performance import (
     _complete_account_valuations_by_date,
     _daily_portfolio_value_assessment,
     benchmark_source_date,
+    performance_account_ids,
     resolve_performance_window,
 )
 
@@ -137,6 +138,141 @@ def test_omitted_end_uses_latest_complete_portfolio_observation(session) -> None
 
     assert end == complete_date
     assert start == complete_date
+
+
+def _seed_valuation(session, account: Account, *, as_of_date: date) -> None:
+    session.add(
+        _valuation_row(
+            account_id=account.account_id,
+            as_of_date=as_of_date,
+            total_value=Decimal(100),
+            source_provider="plaid",
+            source_reference="investments/holdings/get.accounts[].balances",
+            source_record_id=f"record-{account.account_id}-{as_of_date}",
+            fetched_at=datetime(2026, 10, 20, tzinfo=UTC),
+        )
+    )
+
+
+def _seed_flow_attestation(session, account: Account, *, end: date) -> None:
+    session.add(
+        CashFlowSourceAttestation(
+            attestation_key=f"attestation-{account.account_id}",
+            account_id=account.account_id,
+            coverage_start=date(2026, 1, 1),
+            coverage_end=end,
+            source_type="brokerage_statement",
+            source_reference="synthetic:coverage",
+            source_sha256="a" * 64,
+            captured_at=datetime(2026, 10, 20, tzinfo=UTC),
+            approved_at=datetime(2026, 10, 20, tzinfo=UTC),
+            methodology_version="1",
+            account_identity_sha256="a" * 64,
+            account_mapping_basis="owner_confirmed",
+            account_mapping_confidence="exact",
+            source_format="synthetic",
+            parser_version="test-v1",
+            source_timezone="UTC",
+            source_row_count=0,
+            cashflow_candidate_count=0,
+            source_event_set_sha256=canonical_source_event_set_sha256(()),
+            manifest_sha256="f" * 64,
+        )
+    )
+
+
+def _seed_bank_account(session, *, subtype: str = "CHECKING") -> Account:
+    account = _seed_snapshot_account(session, account_key=f"bank-{subtype}")
+    account.subtype = subtype
+    return account
+
+
+def test_bank_account_without_activity_does_not_block_a_complete_observation(session) -> None:
+    observed = date(2026, 10, 6)
+    broker = _seed_snapshot_account(session, account_key="broker")
+    bank = _seed_bank_account(session)
+    _seed_valuation(session, broker, as_of_date=observed)
+    session.commit()
+
+    assert bank.account_id not in performance_account_ids(session, date.min, date.max)
+    assert resolve_performance_window(session, None, None, include_backfill=False) == (
+        observed,
+        observed,
+    )
+
+
+def test_bank_account_with_in_window_activity_stays_in_the_universe(session) -> None:
+    bank = _seed_bank_account(session)
+    session.add(
+        InvestmentTransaction(
+            plaid_investment_transaction_id="bank-activity",
+            account_id=bank.account_id,
+            date=date(2026, 10, 6),
+            name="Activity",
+            quantity=Decimal(0),
+            amount=Decimal(10),
+            price=Decimal(0),
+            type="cash",
+            subtype="deposit",
+            currency="USD",
+        )
+    )
+    session.commit()
+
+    assert bank.account_id in performance_account_ids(
+        session, date(2026, 10, 1), date(2026, 10, 31)
+    )
+    assert bank.account_id not in performance_account_ids(
+        session, date(2026, 11, 1), date(2026, 11, 30)
+    )
+
+
+def test_investment_account_without_a_subtype_still_blocks_completeness(session) -> None:
+    observed = date(2026, 10, 6)
+    reported = _seed_snapshot_account(session, account_key="reported")
+    silent = _seed_snapshot_account(session, account_key="silent")
+    _seed_valuation(session, reported, as_of_date=observed)
+    session.commit()
+
+    assert silent.account_id in performance_account_ids(session, date.min, date.max)
+    assert not _complete_account_valuations_by_date(session, observed, observed)
+
+
+def test_omitted_end_steps_back_to_the_last_flow_covered_observation(session) -> None:
+    account = _seed_snapshot_account(session, account_key="lagging-flows")
+    days = [date(2026, 10, 6), date(2026, 11, 1), date(2026, 11, 2), date(2026, 11, 3)]
+    for day in days:
+        _seed_valuation(session, account, as_of_date=day)
+    _seed_flow_attestation(session, account, end=date(2026, 11, 2))
+    session.commit()
+
+    assert resolve_performance_window(session, None, None, include_backfill=False) == (
+        date(2026, 10, 6),
+        date(2026, 11, 2),
+    )
+
+
+def test_explicit_end_is_not_moved_by_flow_coverage(session) -> None:
+    account = _seed_snapshot_account(session, account_key="explicit-end")
+    for day in (date(2026, 10, 6), date(2026, 11, 3)):
+        _seed_valuation(session, account, as_of_date=day)
+    _seed_flow_attestation(session, account, end=date(2026, 11, 2))
+    session.commit()
+
+    assert resolve_performance_window(
+        session, date(2026, 10, 6), date(2026, 11, 3), include_backfill=False
+    ) == (date(2026, 10, 6), date(2026, 11, 3))
+
+
+def test_old_flow_shortfall_keeps_the_latest_observation_visible(session) -> None:
+    account = _seed_snapshot_account(session, account_key="old-shortfall")
+    latest = date(2026, 11, 3)
+    for day in (date(2026, 10, 6), latest - timedelta(days=1), latest):
+        _seed_valuation(session, account, as_of_date=day)
+    _seed_flow_attestation(session, account, end=date(2026, 9, 3))
+    session.commit()
+
+    assert resolve_performance_window(session, None, None, include_backfill=False)[1] == latest
 
 
 def test_single_observation_returns_unavailable_instead_of_crashing(client, session) -> None:
