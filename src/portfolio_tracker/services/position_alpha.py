@@ -855,15 +855,8 @@ def _load_position_event_ledger(
             InvestmentTransactionType.BUY.value,
             InvestmentTransactionType.SELL.value,
         }
-        if not is_trade and delta is None:
-            if Decimal(tx.quantity or 0) == 0:
-                continue
-            # A provider introduced a quantity-bearing event whose direction
-            # semantics are not in our canonical transaction convention. Keep
-            # the raw signed quantity in the ledger for diagnostic replay, but
-            # never publish derived returns until the event is classified.
-            reasons.add(_SHARE_MOVEMENT_UNCLASSIFIED)
-            delta = Decimal(tx.quantity)
+        if not is_trade and delta is None and Decimal(tx.quantity or 0) == 0:
+            continue
 
         if tx.security_id is None:
             reasons.add(_TRADE_SECURITY_MISSING if is_trade else _SHARE_MOVEMENT_MISSING_SECURITY)
@@ -881,6 +874,14 @@ def _load_position_event_ledger(
             continue
         if exclude_broad_index and ticker_norm in _BROAD_INDEX_TICKERS:
             continue
+        if not is_trade and delta is None:
+            # A provider introduced a quantity-bearing event whose direction
+            # semantics are not in our canonical transaction convention. Keep
+            # the raw signed quantity in the ledger for diagnostic replay, but
+            # never publish derived returns until the event is classified.
+            # Cash rows were skipped above: their units are dollars, not shares.
+            reasons.add(_SHARE_MOVEMENT_UNCLASSIFIED)
+            delta = Decimal(tx.quantity)
 
         quantity_delta = Decimal(delta or 0) * split_factors.factor_after(tx.security_id, tx.date)
         if is_trade:
