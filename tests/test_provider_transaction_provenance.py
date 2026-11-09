@@ -21,7 +21,10 @@ from portfolio_tracker.models import (
     Item,
 )
 from portfolio_tracker.plaid_client import PlaidInvestmentTransaction
-from portfolio_tracker.provider_delivery import build_provider_delivery_metadata
+from portfolio_tracker.provider_delivery import (
+    build_provider_delivery_metadata,
+    canonical_normalized_record_set_sha256,
+)
 from portfolio_tracker.services.cashflow_source_coverage import (
     assess_cashflow_source_coverage,
     canonical_decision_payload_sha256,
@@ -422,6 +425,136 @@ def test_provider_attestation_retry_is_idempotent(session: Session):
     assert len(tuple(session.scalars(select(CashFlowSourceAttestation)))) == 1
     assert len(tuple(session.scalars(select(CashFlowSourceEvent)))) == 1
     assert len(tuple(session.scalars(select(CashFlowReconciliationDecision)))) == 1
+
+
+def test_description_enrichment_preserves_history_and_exact_delivery(session: Session):
+    account = _account(session, "description-enrichment")
+    transaction = _source_transaction(
+        account, tx_type="transfer", subtype="transfer", name="contribution"
+    )
+    _store_transaction(session, account, transaction)
+    first = persist_provider_account_attestation(session, _capture(account, (transaction,)))
+    event = session.scalar(select(CashFlowSourceEvent))
+    assert event is not None
+    original_event_hash = event.source_row_sha256
+    enriched = transaction.model_copy(update={"name": "contribution - Index Fund"})
+    capture = _capture(account, (enriched,), captured_at=_CAPTURED + timedelta(hours=1))
+
+    result = persist_provider_account_attestation(session, capture)
+    retry = persist_provider_account_attestation(session, capture)
+
+    stored = session.get(InvestmentTransaction, transaction.plaid_investment_transaction_id)
+    assert stored is not None and stored.name == "contribution"
+    assert result.preserved_description_count == 1
+    assert result.attestation_key != first.attestation_key
+    assert retry.created is False
+    assert retry.preserved_description_count == 1
+    assert len(tuple(session.scalars(select(CashFlowSourceEvent)))) == 1
+    assert event.source_row_sha256 == original_event_hash
+    assert len(tuple(session.scalars(select(CashFlowReconciliationDecision)))) == 1
+    attestation = session.scalar(
+        select(CashFlowSourceAttestation).where(
+            CashFlowSourceAttestation.attestation_key == result.attestation_key
+        )
+    )
+    assert attestation is not None
+    assert attestation.source_sha256 == canonical_normalized_record_set_sha256(
+        [enriched.model_dump(mode="json")]
+    )
+    assert "description_policy=" in attestation.source_reference
+
+
+def test_description_variant_preserves_owner_resolution_across_capture_windows(session: Session):
+    account = _account(session, "owner-description-variant")
+    transaction = _source_transaction(
+        account, tx_id="owner-description-tx", subtype="provider_specific_cash", name="contribution"
+    )
+    _store_transaction(session, account, transaction)
+    persist_provider_account_attestation(session, _capture(account, (transaction,)))
+    event = session.scalar(select(CashFlowSourceEvent))
+    original = session.scalar(select(CashFlowReconciliationDecision))
+    assert event is not None and original is not None
+    replacement = _supersede_provider_unresolved_with_owner_resolution(
+        session, event, original, transaction
+    )
+    original_hash = event.source_row_sha256
+    enriched = transaction.model_copy(update={"name": "contribution - Index Fund"})
+
+    result = persist_provider_account_attestation(
+        session,
+        _capture(
+            account,
+            (enriched,),
+            captured_at=_CAPTURED + timedelta(hours=2),
+            coverage_start=date(2025, 1, 5),
+        ),
+    )
+
+    assert result.preserved_description_count == 1
+    assert event.source_row_sha256 == original_hash
+    assert replacement.superseded_at is None
+    assert len(tuple(session.scalars(select(CashFlowReconciliationDecision)))) == 2
+    assert len(tuple(session.scalars(select(CashFlowSourceEvent)))) == 1
+    coverage = assess_cashflow_source_coverage(
+        session, date(2025, 1, 5), _END, account_ids=frozenset({account.account_id})
+    )
+    assert coverage.is_complete
+
+
+def test_fee_description_variant_keeps_the_stored_transaction(session: Session):
+    account = _account(session, "fee-description")
+    transaction = _source_transaction(account, tx_type="fee", subtype="fee", name="fees")
+    _store_transaction(session, account, transaction)
+    delivered = transaction.model_copy(update={"name": "fees - Index Fund"})
+
+    result = persist_provider_account_attestation(session, _capture(account, (delivered,)))
+
+    assert result.preserved_description_count == 1
+    assert result.cashflow_candidate_count == 0
+    stored = session.get(InvestmentTransaction, transaction.plaid_investment_transaction_id)
+    assert stored is not None and stored.name == "fees"
+
+
+@pytest.mark.parametrize(
+    ("tx_type", "subtype", "before", "after"),
+    [
+        ("cash", "withdrawal", "Provider activity", "Cash dividend payment"),
+        ("fee", "fee", "fees", "transfer out"),
+        ("transfer", "transfer", "Provider activity", "drip"),
+        ("transfer", "transfer", "Cash dividend payment", "reinvestment"),
+    ],
+)
+def test_description_changes_with_accounting_meaning_still_conflict(
+    session, tx_type, subtype, before, after
+):
+    account = _account(session)
+    transaction = _source_transaction(account, tx_type=tx_type, subtype=subtype, name=before)
+    _store_transaction(session, account, transaction)
+    changed = transaction.model_copy(update={"name": after})
+
+    with pytest.raises(ProviderTransactionConflictError):
+        persist_provider_account_attestation(session, _capture(account, (changed,)))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount", Decimal("101")),
+        ("quantity", Decimal("1")),
+        ("price", Decimal("1")),
+        ("fees", Decimal("1")),
+        ("date", date(2025, 1, 11)),
+        ("currency", "EUR"),
+    ],
+)
+def test_description_enrichment_does_not_hide_economic_changes(session, field, value):
+    account = _account(session)
+    transaction = _source_transaction(account, name="contribution")
+    _store_transaction(session, account, transaction)
+    changed = transaction.model_copy(update={"name": "contribution - Index Fund", field: value})
+
+    with pytest.raises(ProviderTransactionConflictError):
+        persist_provider_account_attestation(session, _capture(account, (changed,)))
 
 
 def test_exact_provider_recapture_preserves_schema_v4_owner_resolution(session: Session):

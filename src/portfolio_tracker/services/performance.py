@@ -2664,10 +2664,7 @@ def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
 
 def _is_transfer_shaped_fee(name: str | None) -> bool:
     """Whether a fee row is actually a broker-mislabeled share transfer."""
-    if not name:
-        return False
-    normalized = name.lower()
-    return "transfer in" in normalized or "transfer out" in normalized
+    return external_flow_ledger.is_transfer_shaped_fee(name)
 
 
 def _reverse_transaction_cash_delta(

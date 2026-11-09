@@ -4873,6 +4873,103 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WeeklyValueHistory": {
+        "properties": {
+          "currency": {
+            "const": "USD",
+            "default": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "expected_account_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Expected Account Ids",
+            "type": "array"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/WeeklyValuePoint"
+            },
+            "title": "Points",
+            "type": "array"
+          }
+        },
+        "required": [
+          "expected_account_ids",
+          "points"
+        ],
+        "title": "WeeklyValueHistory",
+        "type": "object"
+      },
+      "WeeklyValuePoint": {
+        "properties": {
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "basis": {
+            "enum": [
+              "whole_account",
+              "marked_positions",
+              "legacy_cached_snapshot",
+              "legacy_cached_model"
+            ],
+            "title": "Basis",
+            "type": "string"
+          },
+          "covered_account_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Covered Account Ids"
+          },
+          "source_providers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Source Providers",
+            "type": "array"
+          },
+          "valuation_observation_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Valuation Observation Keys",
+            "type": "array"
+          },
+          "value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value",
+            "type": "string"
+          },
+          "week_start": {
+            "format": "date",
+            "title": "Week Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "week_start",
+          "as_of",
+          "basis",
+          "value",
+          "covered_account_ids",
+          "source_providers"
+        ],
+        "title": "WeeklyValuePoint",
+        "type": "object"
       }
     }
   },
@@ -5985,6 +6082,68 @@
           }
         },
         "summary": "Valuation Observation Provenance",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/weekly-values": {
+      "get": {
+        "description": "Latest retained value in each ISO week, separately by valuation basis.",
+        "operationId": "weekly_values_api_v1_weekly_values_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "default": "0001-01-01",
+              "format": "date",
+              "title": "Start Date",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WeeklyValueHistory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Weekly Values",
         "tags": [
           "v1"
         ]

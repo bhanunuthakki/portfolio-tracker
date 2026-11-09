@@ -202,7 +202,7 @@ def _name_classification(name: str | None) -> tuple[FlowClassification, str] | N
     if not name:
         return None
     normalized = name.lower()
-    if "reinvestment" in normalized or "drip" in normalized:
+    if is_internal_share_description(name):
         return "internal", "name.reinvestment"
     # Owner-approved rule: promotional consideration arrived from outside the
     # book and must not be credited as investment performance. Keep this ahead
@@ -228,6 +228,28 @@ def classify_by_name(name: str | None) -> str | None:
     """Return only the classification selected by a transaction-name rule."""
     decision = _name_classification(name)
     return decision[0] if decision is not None else None
+
+
+def is_internal_share_description(name: str | None) -> bool:
+    normalized = (name or "").lower()
+    return "reinvestment" in normalized or "drip" in normalized
+
+
+def is_transfer_shaped_fee(name: str | None) -> bool:
+    """Whether a fee row is actually a broker-mislabeled share transfer."""
+    normalized = (name or "").lower()
+    return "transfer in" in normalized or "transfer out" in normalized
+
+
+def transaction_name_semantics(
+    name: str | None,
+) -> tuple[tuple[FlowClassification, str] | None, bool, bool]:
+    """All description-derived accounting rules, including their lineage."""
+    return (
+        _name_classification(name),
+        is_internal_share_description(name),
+        is_transfer_shaped_fee(name),
+    )
 
 
 def _is_cashflow_eligible_type(tx_type: str) -> bool:

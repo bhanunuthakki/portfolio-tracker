@@ -43,6 +43,7 @@ from portfolio_tracker.models import (
     Price,
     Security,
 )
+from portfolio_tracker.services import external_flow_ledger
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.option_contracts import option_from_occ
 from portfolio_tracker.services.performance import (
@@ -908,8 +909,7 @@ def _load_position_event_ledger(
             )
             continue
         subtype = (tx.subtype or "").strip().lower()
-        name = (tx.name or "").strip().lower()
-        has_internal_share_name = "reinvestment" in name or "drip" in name
+        has_internal_share_name = external_flow_ledger.is_internal_share_description(tx.name)
         is_transfer_family = (
             tx.type == InvestmentTransactionType.TRANSFER.value
             and subtype not in _NON_TRANSFER_SHARE_SUBTYPES

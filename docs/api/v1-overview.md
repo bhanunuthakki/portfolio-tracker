@@ -107,10 +107,46 @@ verifying a restorable SQLite backup; it writes an append-only correction
 receipt. There is deliberately no public HTTP endpoint that can silently
 authorize this historical rewrite.
 
+A provider description may change without changing accounting. Ordinary sync
+retains the stored description only when every other normalized field and all
+description-derived accounting rules still match, including decision lineage,
+reinvestment handling, and transfer-shaped fees. It does not rewrite the stored
+transaction, source event, or owner decision. The new attestation fingerprints
+the exact delivered records; its event set references the unchanged accounting
+records. `source_reference` records this normalization policy. SnapTrade reports
+the count as `descriptions_preserved`, including on an idempotent retry.
+
+SnapTrade records `last_successful_sync_at` only after all investment accounts
+on the connection have available holdings and the full sync commits. Transaction
+conflicts roll back the sync and return HTTP 409 with a stable
+`PROVIDER_TRANSACTION_CONFLICT` code, affected account, count, and changed field
+names. Response details omit transaction identifiers, descriptions, and values.
+
 **Deferred:** `GET/POST /api/v1/sync-runs` requires a run-log schema migration
 on the live database and ships with the Phase 3 migration batch (backup +
 preview + owner approval). Until then, sync recency comes from `health` and
 each account's `last_successful_sync_at`.
+
+### Weekly portfolio value history
+
+`GET /api/v1/weekly-values` accepts optional inclusive `start_date` and
+`end_date` parameters. It exposes value levels independently of the
+performance calculation. Each point gives the start of its ISO week, the
+actual observation date, the value, and its basis. Each basis keeps its latest
+available point within the week. Weeks can be absent and the endpoint does
+not carry values forward or add balances observed on different dates.
+
+- `whole_account` uses verified account totals for the same date across the
+  requested account universe. Its observation keys resolve to source details.
+- `marked_positions` sums retained USD position marks for covered accounts.
+  The position basis includes only cash represented in holdings and does not
+  establish net account value. An account with an unmarked nonzero position,
+  non-USD holding, or manual snapshot is omitted from that day's subtotal.
+  Compare each point's `covered_account_ids` with `expected_account_ids`.
+- `legacy_cached_snapshot` and `legacy_cached_model` expose the cache's
+  original snapshot and transaction-walk labels. The cache did not record its
+  account universe or providers, so account coverage is null and providers
+  are unknown. These values are historical display evidence.
 
 ### Choosing a risk resource
 

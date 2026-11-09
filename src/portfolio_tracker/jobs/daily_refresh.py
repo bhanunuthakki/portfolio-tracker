@@ -98,7 +98,8 @@ def run() -> int:
                     f"items={result.items_synced} "
                     f"accounts={result.accounts_synced} "
                     f"holdings={result.holdings_written} "
-                    f"txs={result.transactions_written}"
+                    f"txs={result.transactions_written} "
+                    f"descriptions_preserved={result.descriptions_preserved}"
                 )
             except HTTPException as exc:
                 # 404 = no SnapTrade user for this profile yet; that's fine.
