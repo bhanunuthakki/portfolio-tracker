@@ -33,6 +33,11 @@ from portfolio_tracker.services.account_valuations import (
     canonical_account_balance_source_sha256,
     record_account_valuation_observation,
 )
+from portfolio_tracker.services.plaid_short_calls import (
+    active_short_call_keys,
+    correct_short_call,
+    load_short_call_overrides,
+)
 
 
 def run() -> int:
@@ -65,6 +70,7 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
     access_token = decrypt_token(item.plaid_access_token_encrypted)
     response = plaid_client.get_holdings(access_token)
     fetched_at = datetime.now(UTC)
+    short_calls = active_short_call_keys(load_short_call_overrides(), snapshot_date)
 
     plaid_account_to_id: dict[str, int] = {}
     for plaid_account in response.accounts:
@@ -133,9 +139,11 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         )
 
     plaid_security_to_id: dict[str, int] = {}
+    plaid_security_to_ticker: dict[str, str | None] = {}
     for plaid_security in response.securities:
         security = upsert_security(session, plaid_security)
         plaid_security_to_id[plaid_security.plaid_security_id] = security.security_id
+        plaid_security_to_ticker[plaid_security.plaid_security_id] = plaid_security.ticker
 
     account_ids = list(plaid_account_to_id.values())
     if account_ids:
@@ -151,6 +159,9 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         security_id = plaid_security_to_id.get(holding.plaid_security_id)
         if account_id is None or security_id is None:
             continue
+        holding = correct_short_call(
+            holding, plaid_security_to_ticker[holding.plaid_security_id], short_calls
+        )
         institution_value = holding.institution_value
         if institution_value is None and holding.institution_price is not None:
             institution_value = plaid_client.normalize_provider_decimal(

@@ -30,6 +30,28 @@ and [SnapTrade account holdings](https://docs.snaptrade.com/reference/Account%20
 The existing SnapTrade holdings endpoint is deprecated for new customers. This
 change repairs the current adapter; it does not migrate to a new endpoint.
 
+## Confirmed short calls reported as long
+
+If a SoFi feed reports a confirmed short call with positive quantity or
+market value, first verify the position and confirm that the affected holding
+is present in the tracker's Plaid connection. Keep each confirmed exception
+in the local, gitignored `data/plaid_short_calls.json` file. The file is a JSON
+array of records with a `plaid_account_id`, full `occ_symbol`, `confirmed_on`
+date (YYYY-MM-DD), and `evidence` explaining how the short position was verified.
+Register verified contracts with `python -m portfolio_tracker.jobs.register_plaid_short_calls`
+using `--account-mask`, a `--symbol` for each contract, `--confirmed-on`,
+and `--evidence`. The command checks the latest broker snapshot of the
+matching active Plaid account and preserves existing rules.
+
+Every Plaid snapshot applies matching rules from the confirmation date
+through contract expiry. The snapshot stores negative quantity, value, and
+cost basis where available and keeps the per-unit price and broker account
+total as reported. Rerun the Plaid snapshot to correct today's rows and
+refresh today's cached value. Preserve the local file when updating the
+checkout. Remove a rule when its confirmed short position closes, especially
+before opening a long position in the same contract. Earlier snapshots are
+outside the scope of a fresh import.
+
 ## Performance
 
 Writing a call increases cash and creates an option liability. The premium alone
