@@ -16,6 +16,7 @@ from portfolio_tracker.services.provider_transaction_provenance import (
 def _patch_steps_after_plaid_capture(monkeypatch, calls: list[str]) -> None:
     monkeypatch.setattr(daily_refresh.snapshot, "run", lambda: calls.append("snapshot") or 0)
     monkeypatch.setattr(daily_refresh.daily_values, "run", lambda **_kwargs: 0)
+    monkeypatch.setattr(daily_refresh.reconcile_option_direction, "run", lambda *_a: 0)
 
     def sync(*_args: object) -> SimpleNamespace:
         calls.append("snaptrade")
@@ -93,6 +94,7 @@ def test_daily_refresh_reports_partial_benchmark_endpoint_coverage(
         lambda **_kwargs: backfill.BackfillRunResult(rows_written=0, item_receipts=()),
     )
     monkeypatch.setattr(daily_refresh.daily_values, "run", lambda **_kwargs: 0)
+    monkeypatch.setattr(daily_refresh.reconcile_option_direction, "run", lambda *_a: 0)
     monkeypatch.setattr(
         snaptrade_routes,
         "sync",
