@@ -33,6 +33,7 @@ from portfolio_tracker.services.account_valuations import (
     canonical_account_balance_source_sha256,
     record_account_valuation_observation,
 )
+from portfolio_tracker.services.option_direction import apply_inferred_short_signs
 from portfolio_tracker.services.plaid_short_calls import (
     active_short_call_keys,
     correct_short_call,
@@ -183,6 +184,8 @@ def _snapshot_item(session: Session, item: Item, snapshot_date: date) -> int:
         )
         rows_written += 1
 
+    session.flush()
+    apply_inferred_short_signs(session, snapshot_date, plaid_account_to_id.values())
     item.last_refreshed_at = fetched_at
     return rows_written
 

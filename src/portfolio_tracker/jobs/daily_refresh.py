@@ -31,7 +31,12 @@ from datetime import date, timedelta
 from fastapi import HTTPException
 
 from portfolio_tracker.db import SessionLocal
-from portfolio_tracker.jobs import backfill, daily_values, snapshot
+from portfolio_tracker.jobs import (
+    backfill,
+    daily_values,
+    reconcile_option_direction,
+    snapshot,
+)
 from portfolio_tracker.services.provider_transaction_provenance import (
     ProviderTransactionConflictError,
 )
@@ -77,6 +82,16 @@ def run() -> int:
     except Exception:
         failures += 1
         print("[daily_refresh]   plaid transactions: FAILED")
+        traceback.print_exc()
+
+    # 1c. Option direction. Plaid omits long/short for SoFi options, so the
+    #     sign comes from broker fills; re-check now that today's are captured.
+    try:
+        corrected = reconcile_option_direction.run(today)
+        print(f"[daily_refresh]   option direction: {corrected} row(s) corrected")
+    except Exception:
+        failures += 1
+        print("[daily_refresh]   option direction: FAILED")
         traceback.print_exc()
 
     # 2. SnapTrade sync — once per configured profile. Imported lazily so

@@ -30,6 +30,39 @@ and [SnapTrade account holdings](https://docs.snaptrade.com/reference/Account%20
 The existing SnapTrade holdings endpoint is deprecated for new customers. This
 change repairs the current adapter; it does not migrate to a new endpoint.
 
+## Option direction from broker fills (SoFi)
+
+Plaid holdings have no side field. SoFi reports a short option with a positive
+quantity and value (verified against the live feed: no side, open/close, or
+signed-quantity field on holdings, and trades carry only `sell` or `buy`).
+Robinhood via Plaid sends signed quantities and is trusted as delivered.
+
+For Plaid items whose institution is listed in
+`DIRECTION_OMITTING_INSTITUTIONS` (`services/option_direction.py`), every
+positive option row is checked against that account's fills for the exact
+contract, after the snapshot and again after the daily transaction capture
+(`jobs.reconcile_option_direction`):
+
+- Buys and sells are replayed in underlying units, proved from
+  `amount = quantity x price`. Re-ingested copies of one fill in contracts and
+  in units count once. Expiry, assignment and exercise rows reduce the net.
+- Net equals the held size and is short: the sign of quantity, value and
+  cost basis is flipped. Net equals the held size and is long: nothing changes.
+- Anything else leaves the row as delivered and raises a data-quality
+  finding (`option_direction`): no fills, a net that does not match the held
+  size (for example a position opened before the history starts), an
+  unsupported row, a size that cannot be tied to quantity x price, or a
+  quantity sign that contradicts the trade type. A stored sign that
+  contradicts the fills is an error.
+
+A sell alone is not proof of a short: it can close a position that predates
+the history, which is why the net must reconcile to the held size. This
+inference is limited to what the fills show; an opening position carried in by
+transfer or one with no fills in the retained window needs the override below.
+The private overrides remain the fallback and take precedence. To reconcile
+more rows automatically the feed would need an open/close or side field, or
+complete fills from the position's opening.
+
 ## Confirmed short calls reported as long
 
 If a SoFi feed reports a confirmed short call with positive quantity or

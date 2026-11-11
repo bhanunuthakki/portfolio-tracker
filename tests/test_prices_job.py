@@ -216,6 +216,7 @@ def test_daily_refresh_reaches_classification_and_done_inside_the_limit(
         lambda **_kwargs: backfill.BackfillRunResult(rows_written=0, item_receipts=()),
     )
     monkeypatch.setattr(daily_refresh.daily_values, "run", lambda **_kwargs: 0)
+    monkeypatch.setattr(daily_refresh.reconcile_option_direction, "run", lambda *_a: 0)
     monkeypatch.setattr(
         snaptrade_routes,
         "sync",

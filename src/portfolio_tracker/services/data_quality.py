@@ -30,6 +30,7 @@ from portfolio_tracker.models import (
 )
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
 from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.option_direction import Verdict, examine_option_rows
 from portfolio_tracker.services.performance import (
     _ABNORMAL_DAILY_RETURN,  # pyright: ignore[reportPrivateUsage]
     _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
@@ -53,6 +54,7 @@ SPARSE_FORWARD_SNAPSHOTS = "sparse_forward_snapshots"
 OVERLAPPING_BROKER_CONNECTIONS = "overlapping_broker_connections"
 MISSING_POLICY_BENCHMARK = "missing_policy_benchmark"
 OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
+OPTION_DIRECTION = "option_direction"
 
 # Tolerance for "broker disagrees with override" comparisons. Brokers
 # round and may differ by rounding noise from the user's stated total —
@@ -93,6 +95,7 @@ def build_report(session: Session, today: date | None = None) -> DataQualityRepo
     findings.extend(_find_overlapping_broker_connections(session))
     findings.extend(_find_missing_policy_benchmarks(session))
     findings.extend(_find_overrides_disagreeing_with_broker(session))
+    findings.extend(_find_unconfirmed_option_direction(session))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -692,4 +695,87 @@ def _find_overrides_disagreeing_with_broker(
                 },
             )
         )
+    return findings
+
+
+def _find_unconfirmed_option_direction(session: Session) -> list[DataQualityFindingOut]:
+    """Option rows from a feed that omits long/short, graded by trade evidence.
+
+    A positive quantity is only trusted as long when broker fills reconcile to a
+    long of the same size. Anything unproven is reported, never guessed.
+    """
+    accts = active_account_ids(session)
+    latest = (
+        session.execute(
+            select(func.max(HoldingSnapshot.snapshot_date)).where(
+                HoldingSnapshot.account_id.in_(accts)
+            )
+        ).scalar_one_or_none()
+        if accts
+        else None
+    )
+    if latest is None:
+        return []
+    masks = {
+        account_id: mask
+        for account_id, mask in session.execute(
+            select(Account.account_id, Account.mask).where(Account.account_id.in_(accts))
+        )
+    }
+    findings: list[DataQualityFindingOut] = []
+    for item in examine_option_rows(session, latest, accts):
+        short_held = item.row.quantity < 0
+        verdict = item.result.verdict
+        ctx = {
+            "account_mask": str(masks.get(item.account_id) or ""),
+            "contract": item.symbol,
+            "verdict": verdict.value,
+            "evidence": item.result.detail,
+        }
+        if short_held and verdict is Verdict.SHORT_CONFIRMED:
+            findings.append(
+                DataQualityFindingOut(
+                    category=OPTION_DIRECTION,
+                    severity=INFO,
+                    title=f"Short {item.symbol} inferred from broker fills",
+                    detail="The feed reported this option without a side. Account fills "
+                    "net to the held size as a short, so the sign was corrected.",
+                    context=ctx,
+                )
+            )
+        elif short_held and verdict is Verdict.LONG_CONFIRMED:
+            findings.append(
+                DataQualityFindingOut(
+                    category=OPTION_DIRECTION,
+                    severity=ERROR,
+                    title=f"{item.symbol} is stored short but fills show a long",
+                    detail="A stored short sign contradicts the broker fills.",
+                    recommended_action="Remove the short-call override or verify with the broker.",
+                    context=ctx,
+                )
+            )
+        elif not short_held and verdict is Verdict.SHORT_CONFIRMED:
+            findings.append(
+                DataQualityFindingOut(
+                    category=OPTION_DIRECTION,
+                    severity=ERROR,
+                    title=f"{item.symbol} is stored long but fills show a short",
+                    detail="Re-run the option direction job to apply the proven sign.",
+                    recommended_action="python -m portfolio_tracker.jobs.reconcile_option_direction",
+                    context=ctx,
+                )
+            )
+        elif not short_held and verdict is not Verdict.LONG_CONFIRMED:
+            findings.append(
+                DataQualityFindingOut(
+                    category=OPTION_DIRECTION,
+                    severity=WARNING,
+                    title=f"Direction of {item.symbol} is unconfirmed",
+                    detail="The feed gives no long/short side and broker fills cannot "
+                    f"establish it ({item.result.detail}). The position is shown as long.",
+                    recommended_action="Verify the side with the broker. If it is short, "
+                    "register it with jobs.register_plaid_short_calls.",
+                    context=ctx,
+                )
+            )
     return findings
