@@ -148,3 +148,21 @@ position-level alpha, or an unversioned verbal calculation. If the endpoint
 returns `calculation_status=unavailable`, consumers preserve that result and
 its reason codes rather than substituting another number as the Canonical
 portfolio return. A separately disclosed estimate remains an estimate.
+
+## Benchmark Comparison Estimate
+
+**Definition.** A separately labeled, banded comparison of the portfolio with any
+stored benchmark over a lookback window, produced by
+`benchmark_comparison.estimate` methodology version `1`. It uses the retained
+value history (the `weekly-values` bases at daily resolution), the canonical
+Effective external flow ledger, and stored benchmark total-return closes. It
+treats a derived share transfer as internal when an equal opposite leg exists in
+another valued account. Its band is the minimum and maximum over named
+scenarios: each available opening and ending basis and, for a modeled opening, a
+proportional error per 180 days before the earliest observed full book. The band
+is not a statistical confidence interval.
+**Lives in.** `services/benchmark_estimate.py` and
+`GET /api/v1/analytics/benchmark-estimate`.
+**Not to be confused with.** The Canonical portfolio return. Each window reports
+the canonical calculation status next to the estimate; a consumer presents the
+estimate as an estimate even when its central value agrees.

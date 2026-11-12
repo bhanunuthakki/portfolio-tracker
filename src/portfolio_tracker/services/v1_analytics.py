@@ -18,9 +18,12 @@ from datetime import date, datetime
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from portfolio_tracker.schemas import PerformanceSeries
+from portfolio_tracker.schemas import PerformanceSeries, PolicyOut
 from portfolio_tracker.services.active_items import valued_account_ids
+from portfolio_tracker.services.after_tax import AfterTaxResult
+from portfolio_tracker.services.benchmark_estimate import BenchmarkEstimateResult
 from portfolio_tracker.services.beta import BetaResult
+from portfolio_tracker.services.brinson import BrinsonResult
 from portfolio_tracker.services.drawdown import DrawdownResult
 from portfolio_tracker.services.exit_quality import ExitQualityResult
 from portfolio_tracker.services.position_alpha import PositionAlphaResult
@@ -91,6 +94,34 @@ class PerformanceV1Result(BaseModel):
 
     meta: V1Meta
     series: PerformanceSeries
+
+
+class BenchmarkEstimateV1Result(BaseModel):
+    """Lookback returns vs requested benchmarks: canonical status plus a banded estimate."""
+
+    meta: V1Meta
+    result: BenchmarkEstimateResult
+
+
+class AfterTaxV1Result(BaseModel):
+    """Realized gain from imported 1099-B lots after flat owner-supplied rates."""
+
+    meta: V1Meta
+    after_tax: AfterTaxResult
+
+
+class AttributionV1Result(BaseModel):
+    """Brinson-Fachler sector attribution of the equity sleeve vs SPY."""
+
+    meta: V1Meta
+    attribution: BrinsonResult
+
+
+class BenchmarkPolicyV1Result(BaseModel):
+    """Read-only benchmark policy used by the policy counterfactual calculation."""
+
+    meta: V1Meta
+    policy: PolicyOut
 
 
 class PositionPerformanceV1Result(BaseModel):
@@ -180,6 +211,28 @@ def performance_meta(
     )
 
 
+def benchmark_estimate_meta(
+    session: Session,
+    *,
+    as_of: date | None,
+    today: date | None = None,
+    generated_at: datetime | None = None,
+) -> V1Meta:
+    return _analytics_meta(
+        session,
+        methodology="benchmark_comparison.estimate",
+        methodology_version="1",
+        links={
+            "performance": "/api/v1/analytics/performance",
+            "weekly_values": "/api/v1/weekly-values",
+            "cash_flows": "/api/v1/cash-flows",
+        },
+        as_of_override=as_of,
+        today=today,
+        generated_at=generated_at,
+    )
+
+
 def position_performance_meta(
     session: Session, *, today: date | None = None, generated_at: datetime | None = None
 ) -> V1Meta:
@@ -204,6 +257,45 @@ def risk_meta(
             "performance": "/api/v1/analytics/performance",
             "positioning": "/api/v1/analytics/positioning",
         },
+        today=today,
+        generated_at=generated_at,
+    )
+
+
+def after_tax_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
+    return _analytics_meta(
+        session,
+        methodology="after_tax.realized_1099b",
+        links={"transactions": "/api/v1/transactions"},
+        today=today,
+        generated_at=generated_at,
+    )
+
+
+def attribution_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
+    return _analytics_meta(
+        session,
+        methodology="attribution.brinson_fachler_sector",
+        links={
+            "position_performance": "/api/v1/analytics/position-performance",
+            "securities": "/api/v1/securities",
+        },
+        today=today,
+        generated_at=generated_at,
+    )
+
+
+def benchmark_policy_meta(
+    session: Session, *, today: date | None = None, generated_at: datetime | None = None
+) -> V1Meta:
+    return _analytics_meta(
+        session,
+        methodology="benchmark_policy.weights",
+        links={"performance": "/api/v1/analytics/performance"},
         today=today,
         generated_at=generated_at,
     )

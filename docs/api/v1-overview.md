@@ -41,12 +41,16 @@ balances), the latest snapshot date, and staleness.
 | `GET /api/v1/data-quality` | Machine-readable findings (category, severity, recommended action) under the envelope |
 | `GET /api/v1/valuation-observations/{observation_key}` | Resolve a performance receipt key to sanitized valuation-source metadata; raw provider account locators and balance values are intentionally omitted |
 | `GET /api/v1/analytics/positioning` | Positioning cuts (asset type / sector / region / account type, concentration, correlations) + equity fraction |
+| `GET /api/v1/analytics/benchmark-estimate` | Benchmark comparison estimate (`benchmark_comparison.estimate` v1): for each `lookback_days` (default 180, 365, 730) and each `benchmarks` ticker (default VOO, QQQ), the portfolio and matched-flow benchmark returns, percentage-point gap and dollar gap as `{central, low, high}` bands, with opening/ending value bases, matched internal share transfers, unresolved flow-issue count, and the Canonical portfolio return status for the same window. Each benchmark states one `return_basis` (`total_return_adjusted`, else `raw_price_fallback`) for the whole window and never mixes them; a non-positive Modified-Dietz denominator returns `tier=unavailable` |
 | `GET /api/v1/analytics/performance` | Money-weighted Modified Dietz return vs cashflow-matched SPY/QQQ/policy counterfactuals over the canonical whole-portfolio flow ledger (`performance.modified_dietz` v2); `calculation_status=unavailable` suppresses derived fields unless exact requested opening/ending valuations, approved source evidence for every valued account over `(start, end]`, priceable external flows, and exact same-day or immediately previous U.S.-market closes are all available |
 | `GET /api/v1/analytics/position-performance` | Split-normalized invested-position price/trade return and per-ticker dollar alpha vs cash-flow-matched price-return counterfactuals (`position_alpha.split_normalized_price_trade_modified_dietz` v3); derived fields are null with stable reason codes when share movements or price provenance cannot be reconciled. An option without an eligible close within 14 days on a held day is left out of both legs and listed in `excluded_positions` with its footnote |
 | `GET /api/v1/analytics/risk` | Beta/alpha/R², Sharpe/Sortino, tracking error + max drawdown/recovery together (`risk.beta_drawdown` v2); drawdown fails closed with the performance reason codes when its return index is unavailable |
 | `GET /api/v1/analytics/beta` | The regression half of `risk` alone — for consumers that don't need drawdown |
 | `GET /api/v1/analytics/drawdown` | The loss-shaped half of `risk` alone — max drawdown, underwater curve, recovery, Calmar, and structural availability |
 | `GET /api/v1/analytics/exit-quality` | Sell-side quality: regret vs holding, exit alpha vs SPY (`exit_quality.repricing` v1) |
+| `GET /api/v1/analytics/after-tax` | Realized gain from imported 1099-B lots at flat owner-supplied short-term/long-term rates (`after_tax.realized_1099b` v1); the 1099-B stays authoritative for filing |
+| `GET /api/v1/analytics/attribution` | Brinson-Fachler sector attribution of the equity sleeve vs SPY: allocation, selection, interaction; approximations listed in `attribution.notes` (`attribution.brinson_fachler_sector` v1) |
+| `GET /api/v1/settings/benchmark-policy` | Read-only benchmark policy weights used by the policy counterfactual (`benchmark_policy.weights` v1); replacement stays on operator `PUT /api/policy` |
 
 Wealthplan normally needs exactly one `portfolio-snapshot` read per refresh.
 
@@ -147,6 +151,28 @@ not carry values forward or add balances observed on different dates.
   original snapshot and transaction-walk labels. The cache did not record its
   account universe or providers, so account coverage is null and providers
   are unknown. These values are historical display evidence.
+
+### Benchmark comparison estimate
+
+`GET /api/v1/analytics/benchmark-estimate` answers "how am I doing against
+these benchmarks over these lookbacks, adjusted for when money moved" without
+failing closed. Parameters: repeatable `lookback_days`, repeatable `benchmarks`
+(any symbol stored by the benchmarks job), optional `end_date`, and
+`model_error_per_180_days` (default 0.0163).
+
+The ending boundary is the latest full-book observed value (`whole_account` or a
+`marked_positions` point covering every account with holdings evidence). Each
+opening is the latest retained value at most six days before `end - lookback`;
+when only `legacy_cached_model` exists there, `opening_is_modeled` is true and
+the band widens by `model_error_per_180_days` for each 180 days between the
+opening and the earliest observed full book. Flows come from the canonical
+ledger; a derived `unmatched_share_transfer` whose opposite leg is present in
+another valued account is listed in `matched_internal_share_transfers` and
+excluded. A benchmark without stored closes for every needed date returns
+`available=false`. A window without an opening value returns
+`tier=unavailable`. `tier=canonical_available` means the Canonical portfolio
+return is also available for the same dates; `canonical` carries its status and
+reason codes either way.
 
 ### Choosing a risk resource
 

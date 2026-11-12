@@ -297,6 +297,311 @@
         "title": "AccountsV1Result",
         "type": "object"
       },
+      "AfterTaxResult": {
+        "properties": {
+          "by_term": {
+            "items": {
+              "$ref": "#/components/schemas/TermSummary"
+            },
+            "title": "By Term",
+            "type": "array"
+          },
+          "effective_tax_rate_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Tax Rate Pct"
+          },
+          "lots_count": {
+            "title": "Lots Count",
+            "type": "integer"
+          },
+          "lt_rate": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Lt Rate",
+            "type": "string"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "realized_gain_aftertax": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Realized Gain Aftertax",
+            "type": "string"
+          },
+          "realized_gain_pretax": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Realized Gain Pretax",
+            "type": "string"
+          },
+          "st_rate": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "St Rate",
+            "type": "string"
+          },
+          "tax_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tax Year"
+          },
+          "total_tax": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Tax",
+            "type": "string"
+          },
+          "wash_sale_disallowed": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Wash Sale Disallowed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tax_year",
+          "st_rate",
+          "lt_rate",
+          "realized_gain_pretax",
+          "wash_sale_disallowed",
+          "total_tax",
+          "realized_gain_aftertax",
+          "effective_tax_rate_pct",
+          "by_term",
+          "lots_count",
+          "notes"
+        ],
+        "title": "AfterTaxResult",
+        "type": "object"
+      },
+      "AfterTaxV1Result": {
+        "description": "Realized gain from imported 1099-B lots after flat owner-supplied rates.",
+        "properties": {
+          "after_tax": {
+            "$ref": "#/components/schemas/AfterTaxResult"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          }
+        },
+        "required": [
+          "meta",
+          "after_tax"
+        ],
+        "title": "AfterTaxV1Result",
+        "type": "object"
+      },
+      "AttributionV1Result": {
+        "description": "Brinson-Fachler sector attribution of the equity sleeve vs SPY.",
+        "properties": {
+          "attribution": {
+            "$ref": "#/components/schemas/BrinsonResult"
+          },
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          }
+        },
+        "required": [
+          "meta",
+          "attribution"
+        ],
+        "title": "AttributionV1Result",
+        "type": "object"
+      },
+      "Band": {
+        "properties": {
+          "central": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Central",
+            "type": "string"
+          },
+          "high": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "High",
+            "type": "string"
+          },
+          "low": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Low",
+            "type": "string"
+          }
+        },
+        "required": [
+          "central",
+          "low",
+          "high"
+        ],
+        "title": "Band",
+        "type": "object"
+      },
+      "BenchmarkComparison": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "dollar_gap": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Band"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gap_pp": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Band"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "return_basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "total_return_adjusted",
+                  "raw_price_fallback"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Return Basis"
+          },
+          "return_pct": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Band"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ticker": {
+            "title": "Ticker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "available",
+          "return_pct",
+          "gap_pp",
+          "dollar_gap"
+        ],
+        "title": "BenchmarkComparison",
+        "type": "object"
+      },
+      "BenchmarkEstimateResult": {
+        "properties": {
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "benchmarks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Benchmarks",
+            "type": "array"
+          },
+          "methodology": {
+            "const": "benchmark_comparison.estimate",
+            "default": "benchmark_comparison.estimate",
+            "title": "Methodology",
+            "type": "string"
+          },
+          "methodology_version": {
+            "const": "1",
+            "default": "1",
+            "title": "Methodology Version",
+            "type": "string"
+          },
+          "model_error_per_180_days": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Model Error Per 180 Days",
+            "type": "string"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/LookbackComparison"
+            },
+            "title": "Windows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "as_of",
+          "benchmarks",
+          "model_error_per_180_days",
+          "windows"
+        ],
+        "title": "BenchmarkEstimateResult",
+        "type": "object"
+      },
+      "BenchmarkEstimateV1Result": {
+        "description": "Lookback returns vs requested benchmarks: canonical status plus a banded estimate.",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "result": {
+            "$ref": "#/components/schemas/BenchmarkEstimateResult"
+          }
+        },
+        "required": [
+          "meta",
+          "result"
+        ],
+        "title": "BenchmarkEstimateV1Result",
+        "type": "object"
+      },
+      "BenchmarkPolicyV1Result": {
+        "description": "Read-only benchmark policy used by the policy counterfactual calculation.",
+        "properties": {
+          "meta": {
+            "$ref": "#/components/schemas/V1Meta"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/PolicyOut"
+          }
+        },
+        "required": [
+          "meta",
+          "policy"
+        ],
+        "title": "BenchmarkPolicyV1Result",
+        "type": "object"
+      },
       "BetaResult": {
         "properties": {
           "alpha_annualized_pct": {
@@ -540,6 +845,365 @@
           "beta"
         ],
         "title": "BetaV1Result",
+        "type": "object"
+      },
+      "BoundaryValue": {
+        "properties": {
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "basis": {
+            "enum": [
+              "whole_account",
+              "marked_positions",
+              "legacy_cached_snapshot",
+              "legacy_cached_model"
+            ],
+            "title": "Basis",
+            "type": "string"
+          },
+          "value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of",
+          "basis",
+          "value"
+        ],
+        "title": "BoundaryValue",
+        "type": "object"
+      },
+      "BrinsonResult": {
+        "properties": {
+          "allocation_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allocation Effect Pct"
+          },
+          "benchmark": {
+            "title": "Benchmark",
+            "type": "string"
+          },
+          "benchmark_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Return Pct"
+          },
+          "benchmark_weights_source": {
+            "title": "Benchmark Weights Source",
+            "type": "string"
+          },
+          "calculation_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Calculation Reason Codes",
+            "type": "array"
+          },
+          "calculation_status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Calculation Status",
+            "type": "string"
+          },
+          "classified_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Classified Value",
+            "type": "string"
+          },
+          "classified_weight_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classified Weight Pct"
+          },
+          "end_date": {
+            "format": "date",
+            "title": "End Date",
+            "type": "string"
+          },
+          "excluded_value": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Excluded Value",
+            "type": "string"
+          },
+          "interaction_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Effect Pct"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "portfolio_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Return Pct"
+          },
+          "sectors": {
+            "items": {
+              "$ref": "#/components/schemas/BrinsonSectorRow"
+            },
+            "title": "Sectors",
+            "type": "array"
+          },
+          "selection_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selection Effect Pct"
+          },
+          "spy_actual_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spy Actual Return Pct"
+          },
+          "start_date": {
+            "format": "date",
+            "title": "Start Date",
+            "type": "string"
+          },
+          "total_active_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Active Return Pct"
+          }
+        },
+        "required": [
+          "calculation_status",
+          "calculation_reason_codes",
+          "start_date",
+          "end_date",
+          "benchmark",
+          "benchmark_return_pct",
+          "spy_actual_return_pct",
+          "portfolio_return_pct",
+          "allocation_effect_pct",
+          "selection_effect_pct",
+          "interaction_effect_pct",
+          "total_active_return_pct",
+          "sectors",
+          "classified_value",
+          "excluded_value",
+          "classified_weight_pct",
+          "benchmark_weights_source",
+          "notes"
+        ],
+        "title": "BrinsonResult",
+        "type": "object"
+      },
+      "BrinsonSectorRow": {
+        "properties": {
+          "allocation_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allocation Effect Pct"
+          },
+          "benchmark_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Benchmark Return Pct"
+          },
+          "benchmark_weight_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Benchmark Weight Pct",
+            "type": "string"
+          },
+          "etf": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Etf"
+          },
+          "interaction_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Effect Pct"
+          },
+          "portfolio_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Return Pct"
+          },
+          "portfolio_weight_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Portfolio Weight Pct",
+            "type": "string"
+          },
+          "sector": {
+            "title": "Sector",
+            "type": "string"
+          },
+          "selection_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selection Effect Pct"
+          },
+          "total_effect_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Effect Pct"
+          }
+        },
+        "required": [
+          "sector",
+          "etf",
+          "portfolio_weight_pct",
+          "benchmark_weight_pct",
+          "portfolio_return_pct",
+          "benchmark_return_pct",
+          "allocation_effect_pct",
+          "selection_effect_pct",
+          "interaction_effect_pct",
+          "total_effect_pct"
+        ],
+        "title": "BrinsonSectorRow",
+        "type": "object"
+      },
+      "CanonicalSummary": {
+        "properties": {
+          "calculation_status": {
+            "title": "Calculation Status",
+            "type": "string"
+          },
+          "portfolio_return_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Portfolio Return Pct"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          }
+        },
+        "required": [
+          "calculation_status",
+          "reason_codes",
+          "portfolio_return_pct"
+        ],
+        "title": "CanonicalSummary",
         "type": "object"
       },
       "CashFlowAccountSourceCoverageOut": {
@@ -2080,6 +2744,208 @@
         "title": "HealthV1",
         "type": "object"
       },
+      "LookbackComparison": {
+        "properties": {
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
+          "benchmarks": {
+            "items": {
+              "$ref": "#/components/schemas/BenchmarkComparison"
+            },
+            "title": "Benchmarks",
+            "type": "array"
+          },
+          "canonical": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CanonicalSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "end_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Date"
+          },
+          "ending": {
+            "items": {
+              "$ref": "#/components/schemas/BoundaryValue"
+            },
+            "title": "Ending",
+            "type": "array"
+          },
+          "lookback_days": {
+            "title": "Lookback Days",
+            "type": "integer"
+          },
+          "matched_internal_share_transfers": {
+            "items": {
+              "$ref": "#/components/schemas/MatchedShareTransfer"
+            },
+            "title": "Matched Internal Share Transfers",
+            "type": "array"
+          },
+          "modified_dietz_denominator": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Modified Dietz Denominator"
+          },
+          "net_external_cashflow_in": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net External Cashflow In"
+          },
+          "opening": {
+            "items": {
+              "$ref": "#/components/schemas/BoundaryValue"
+            },
+            "title": "Opening",
+            "type": "array"
+          },
+          "opening_error_fraction": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Opening Error Fraction",
+            "type": "string"
+          },
+          "opening_is_modeled": {
+            "title": "Opening Is Modeled",
+            "type": "boolean"
+          },
+          "portfolio_return_pct": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Band"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Date"
+          },
+          "tier": {
+            "enum": [
+              "canonical_available",
+              "estimate",
+              "unavailable"
+            ],
+            "title": "Tier",
+            "type": "string"
+          },
+          "unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unavailable Reason"
+          },
+          "unresolved_flow_issue_count": {
+            "title": "Unresolved Flow Issue Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lookback_days",
+          "tier",
+          "unavailable_reason",
+          "start_date",
+          "end_date",
+          "opening",
+          "ending",
+          "opening_is_modeled",
+          "opening_error_fraction",
+          "net_external_cashflow_in",
+          "modified_dietz_denominator",
+          "portfolio_return_pct",
+          "benchmarks",
+          "matched_internal_share_transfers",
+          "unresolved_flow_issue_count",
+          "canonical",
+          "assumptions"
+        ],
+        "title": "LookbackComparison",
+        "type": "object"
+      },
+      "MatchedShareTransfer": {
+        "properties": {
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "flow_id": {
+            "title": "Flow Id",
+            "type": "string"
+          },
+          "ticker": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ticker"
+          },
+          "withheld_amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Withheld Amount",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "ticker",
+          "flow_id",
+          "withheld_amount"
+        ],
+        "title": "MatchedShareTransfer",
+        "type": "object"
+      },
       "OptionContract": {
         "additionalProperties": false,
         "properties": {
@@ -2860,6 +3726,167 @@
           "series"
         ],
         "title": "PerformanceV1Result",
+        "type": "object"
+      },
+      "PolicyOut": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "is_balanced": {
+            "title": "Is Balanced",
+            "type": "boolean"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyWriteReceiptOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recomputation": {
+            "$ref": "#/components/schemas/PolicyRecomputationOut"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "total_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total Pct",
+            "type": "string"
+          },
+          "weights": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyWeightOut"
+            },
+            "title": "Weights",
+            "type": "array"
+          }
+        },
+        "required": [
+          "weights",
+          "total_pct",
+          "is_balanced",
+          "revision",
+          "source",
+          "as_of",
+          "recomputation"
+        ],
+        "title": "PolicyOut",
+        "type": "object"
+      },
+      "PolicyRecomputationOut": {
+        "properties": {
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "const": "policy_weights_changed",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "current",
+              "required"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "policy_revision"
+        ],
+        "title": "PolicyRecomputationOut",
+        "type": "object"
+      },
+      "PolicyWeightOut": {
+        "properties": {
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "ticker": {
+            "title": "Ticker",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "weight_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Weight Pct",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "weight_pct",
+          "notes",
+          "updated_at"
+        ],
+        "title": "PolicyWeightOut",
+        "type": "object"
+      },
+      "PolicyWriteReceiptOut": {
+        "properties": {
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "applied",
+              "unchanged"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "receipt_id": {
+            "title": "Receipt Id",
+            "type": "string"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "idempotency_key",
+          "outcome",
+          "recorded_at"
+        ],
+        "title": "PolicyWriteReceiptOut",
         "type": "object"
       },
       "PortfolioSnapshotV1": {
@@ -4447,6 +5474,37 @@
         "title": "SourceCoverageRangeOut",
         "type": "object"
       },
+      "TermSummary": {
+        "properties": {
+          "rate": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Rate",
+            "type": "string"
+          },
+          "tax": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Tax",
+            "type": "string"
+          },
+          "taxable_gain": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Taxable Gain",
+            "type": "string"
+          },
+          "term": {
+            "title": "Term",
+            "type": "string"
+          }
+        },
+        "required": [
+          "term",
+          "taxable_gain",
+          "rate",
+          "tax"
+        ],
+        "title": "TermSummary",
+        "type": "object"
+      },
       "TransactionV1": {
         "properties": {
           "account_id": {
@@ -4997,6 +6055,251 @@
           }
         },
         "summary": "Accounts",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/after-tax": {
+      "get": {
+        "description": "After-tax realized gain from imported 1099-B lots at flat owner-supplied\nshort-term and long-term rates. The 1099-B stays authoritative for filing.",
+        "operationId": "analytics_after_tax_api_v1_analytics_after_tax_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "tax_year",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2100,
+                  "minimum": 1990,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tax Year"
+            }
+          },
+          {
+            "in": "query",
+            "name": "st_rate",
+            "required": false,
+            "schema": {
+              "default": 0.37,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "St Rate",
+              "type": "number"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lt_rate",
+            "required": false,
+            "schema": {
+              "default": 0.2,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Lt Rate",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AfterTaxV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics After Tax",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/attribution": {
+      "get": {
+        "description": "Brinson-Fachler sector attribution vs SPY (allocation, selection,\ninteraction). Approximations are listed in `attribution.notes`. Defaults to a\ntrailing 365-day window.",
+        "operationId": "analytics_attribution_api_v1_analytics_attribution_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "start_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttributionV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Attribution",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/analytics/benchmark-estimate": {
+      "get": {
+        "description": "Lookback returns vs any stored benchmark: the Canonical portfolio return\nstatus plus a separately labeled Benchmark comparison estimate with a band.",
+        "operationId": "analytics_benchmark_estimate_api_v1_analytics_benchmark_estimate_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "end_date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lookback_days",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "integer"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Lookback Days"
+            }
+          },
+          {
+            "in": "query",
+            "name": "benchmarks",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Benchmarks"
+            }
+          },
+          {
+            "in": "query",
+            "name": "model_error_per_180_days",
+            "required": false,
+            "schema": {
+              "default": 0.0163,
+              "maximum": 0.5,
+              "minimum": 0,
+              "title": "Model Error Per 180 Days",
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BenchmarkEstimateV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analytics Benchmark Estimate",
         "tags": [
           "v1"
         ]
@@ -5940,6 +7243,28 @@
           }
         },
         "summary": "Securities V1",
+        "tags": [
+          "v1"
+        ]
+      }
+    },
+    "/api/v1/settings/benchmark-policy": {
+      "get": {
+        "description": "Read-only benchmark policy weights used by the policy counterfactual.\nReplacement stays on the operator route `PUT /api/policy`.",
+        "operationId": "settings_benchmark_policy_api_v1_settings_benchmark_policy_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BenchmarkPolicyV1Result"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Settings Benchmark Policy",
         "tags": [
           "v1"
         ]
