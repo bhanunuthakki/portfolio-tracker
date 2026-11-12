@@ -31,6 +31,7 @@ from portfolio_tracker.models import (
 from portfolio_tracker.schemas import DataQualityFindingOut, DataQualityReportOut
 from portfolio_tracker.services.active_items import active_account_ids
 from portfolio_tracker.services.option_direction import Verdict, examine_option_rows
+from portfolio_tracker.services.owner_rulings import zero_value_ruling_contradictions
 from portfolio_tracker.services.performance import (
     _ABNORMAL_DAILY_RETURN,  # pyright: ignore[reportPrivateUsage]
     _daily_external_cashflows,  # pyright: ignore[reportPrivateUsage]
@@ -55,6 +56,7 @@ OVERLAPPING_BROKER_CONNECTIONS = "overlapping_broker_connections"
 MISSING_POLICY_BENCHMARK = "missing_policy_benchmark"
 OVERRIDE_DISAGREES_WITH_BROKER = "override_disagrees_with_broker"
 OPTION_DIRECTION = "option_direction"
+OWNER_RULING_CONTRADICTED = "owner_ruling_contradicted"
 
 # Tolerance for "broker disagrees with override" comparisons. Brokers
 # round and may differ by rounding noise from the user's stated total —
@@ -96,6 +98,7 @@ def build_report(session: Session, today: date | None = None) -> DataQualityRepo
     findings.extend(_find_missing_policy_benchmarks(session))
     findings.extend(_find_overrides_disagreeing_with_broker(session))
     findings.extend(_find_unconfirmed_option_direction(session))
+    findings.extend(_find_contradicted_owner_rulings(session, today or date.today()))
 
     counts: dict[str, int] = defaultdict(int)
     for f in findings:
@@ -451,21 +454,39 @@ def _find_sparse_forward_snapshots(session: Session) -> list[DataQualityFindingO
     ]
 
 
+def _latest_position_fingerprint(session: Session, account_id: int) -> frozenset[tuple[str, str]]:
+    """Non-zero positions on the account's latest snapshot, as (security, quantity)."""
+    latest = session.scalar(
+        select(func.max(HoldingSnapshot.snapshot_date)).where(
+            HoldingSnapshot.account_id == account_id
+        )
+    )
+    if latest is None:
+        return frozenset()
+    rows = session.execute(
+        select(Security.ticker, Security.security_id, HoldingSnapshot.quantity)
+        .join(Security, Security.security_id == HoldingSnapshot.security_id)
+        .where(HoldingSnapshot.account_id == account_id)
+        .where(HoldingSnapshot.snapshot_date == latest)
+    ).all()
+    return frozenset(
+        ((ticker or f"security:{security_id}").strip().upper(), f"{Decimal(quantity):.6f}")
+        for ticker, security_id, quantity in rows
+        if quantity and not (ticker or "").upper().startswith("CUR:")
+    )
+
+
 def _find_overlapping_broker_connections(
     session: Session,
 ) -> list[DataQualityFindingOut]:
-    """Flag the same brokerage being reachable through two aggregators.
+    """Flag one physical brokerage account reachable through two active items.
 
-    When Robinhood is connected via *both* Plaid and SnapTrade, the same
-    physical accounts get snapshotted twice and the same trades land in
-    `investment_transactions` twice — every aggregation (V, P&L, turnover)
-    silently double-counts. The fix is to mark one of the duplicate items
-    `is_data_active=False`; this finding surfaces the situation so the
-    user knows to do that.
-
-    Heuristic: group by case-insensitive `institution_name`, count items
-    where `is_data_active=True`. >1 active item per institution is the
-    overlap.
+    When the same account is connected through two aggregators, it is
+    snapshotted twice and every aggregation double-counts it. Two active items
+    at the same institution are not evidence of that by themselves: a household
+    can hold distinct accounts at one broker. The finding requires a concrete
+    match between accounts of different items: the same account mask, or the
+    same non-empty set of latest positions and quantities.
     """
     rows = (
         session.execute(select(Item).order_by(Item.institution_name, Item.source)).scalars().all()
@@ -474,35 +495,57 @@ def _find_overlapping_broker_connections(
     by_institution: dict[str, list[Item]] = defaultdict(list)
     for item in rows:
         key = (item.institution_name or "").strip().lower()
-        if not key:
+        if not key or not item.is_data_active:
             continue
         by_institution[key].append(item)
 
     findings: list[DataQualityFindingOut] = []
-    for _key, group in by_institution.items():
-        active = [i for i in group if i.is_data_active]
-        if len(active) <= 1:
+    for group in by_institution.values():
+        if len(group) <= 1:
             continue
-        sources = ", ".join(sorted({i.source for i in active}))
-        names = ", ".join(f"#{i.item_id}({i.source})" for i in active)
+        accounts = (
+            session.execute(
+                select(Account).where(Account.item_id.in_([item.item_id for item in group]))
+            )
+            .scalars()
+            .all()
+        )
+        fingerprints = {
+            account.account_id: _latest_position_fingerprint(session, account.account_id)
+            for account in accounts
+        }
+        matches: list[tuple[Account, Account, str]] = []
+        for index, left in enumerate(accounts):
+            for right in accounts[index + 1 :]:
+                if left.item_id == right.item_id:
+                    continue
+                if left.mask and right.mask and left.mask.strip() == right.mask.strip():
+                    matches.append((left, right, "account_mask"))
+                elif fingerprints[left.account_id] and (
+                    fingerprints[left.account_id] == fingerprints[right.account_id]
+                ):
+                    matches.append((left, right, "identical_positions"))
+        if not matches:
+            continue
+        sources = ", ".join(sorted({item.source for item in group}))
+        pairs = ", ".join(
+            f"#{left.account_id}/#{right.account_id} ({basis})" for left, right, basis in matches
+        )
         findings.append(
             DataQualityFindingOut(
                 category=OVERLAPPING_BROKER_CONNECTIONS,
                 severity=WARNING,
                 title=(
-                    f"{group[0].institution_name}: connected via {sources} "
-                    f"— data is being double-counted"
+                    f"{group[0].institution_name}: the same account is connected via "
+                    f"{sources} — data is being double-counted"
                 ),
                 detail=(
-                    f"{len(active)} active items reference "
-                    f"{group[0].institution_name}: {names}. The same physical "
-                    f"accounts are being snapshotted by both, so holdings, "
-                    f"transactions, V series, and trade-analysis all "
-                    f"double-count this brokerage's activity. Mark one of "
-                    f"the duplicates as data-inactive (PATCH "
-                    f"/api/plaid/items/{{id}}/data-active) to keep the "
-                    f"connection alive while excluding its data from "
-                    f"aggregations."
+                    f"Matching accounts across active items: {pairs}. The same physical "
+                    f"account is snapshotted by both connections, so holdings, "
+                    f"transactions, V series, and trade analysis double-count it. Mark one "
+                    f"of the duplicate items as data-inactive (PATCH "
+                    f"/api/plaid/items/{{id}}/data-active) to keep the connection alive "
+                    f"while excluding its data from aggregations."
                 ),
                 recommended_action=(
                     "Decide which aggregator should be the source of truth "
@@ -512,12 +555,38 @@ def _find_overlapping_broker_connections(
                 ),
                 context={
                     "institution": group[0].institution_name or "",
-                    "active_item_ids": ",".join(str(i.item_id) for i in active),
+                    "active_item_ids": ",".join(str(item.item_id) for item in group),
+                    "matched_account_pairs": pairs,
                     "sources": sources,
                 },
             )
         )
     return findings
+
+
+def _find_contradicted_owner_rulings(session: Session, today: date) -> list[DataQualityFindingOut]:
+    """Report an owner ruling that stored evidence now contradicts."""
+    contradictions = zero_value_ruling_contradictions(session, date.min, today)
+    return [
+        DataQualityFindingOut(
+            category=OWNER_RULING_CONTRADICTED,
+            severity=ERROR,
+            title=f"Account #{account_id}: zero-value ruling contradicted ({reason})",
+            detail=(
+                f"Account #{account_id} is ruled a zero-value flow-through account, but "
+                f"the stored evidence shows {reason.replace('_', ' ')}. Returns for any "
+                f"window with that evidence fail closed until the ruling is reviewed."
+            ),
+            recommended_action=(
+                "Confirm whether the account now holds value, then update or remove "
+                "its entry in services/owner_rulings.py."
+            ),
+            context={"account_id": str(account_id), "reason": reason},
+        )
+        for account_id, reason in sorted(contradictions.items())
+        # An absent account means the ruling has nothing to apply to.
+        if reason != "account_missing"
+    ]
 
 
 def _find_missing_policy_benchmarks(
