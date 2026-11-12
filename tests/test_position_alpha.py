@@ -273,6 +273,57 @@ def test_qty_walk_back_reverses_buy(session):
     assert result == {"AAPL": Decimal(70)}
 
 
+def test_qty_walk_back_skips_broker_transfer_duplicated_by_acats_row(session):
+    account = _active_account(session)
+    vti = Security(plaid_security_id="s-vti", ticker="VTI", type="etf")
+    session.add(vti)
+    session.flush()
+    anchor = date(2025, 1, 10)
+    target = date(2025, 1, 1)
+    session.add(
+        HoldingSnapshot(
+            snapshot_date=anchor,
+            account_id=account.account_id,
+            security_id=vti.security_id,
+            quantity=Decimal(0),
+        )
+    )
+    # Broker row says "outgoing" but carries a positive quantity; the explicit
+    # ACATS out row is the authoritative share movement for the same event.
+    session.add_all(
+        [
+            InvestmentTransaction(
+                plaid_investment_transaction_id="tx-broker-outgoing",
+                account_id=account.account_id,
+                security_id=vti.security_id,
+                date=date(2025, 1, 5),
+                name="Completed outgoing transfer of 372.000000 long shares of VTI",
+                type="transfer",
+                subtype="transfer",
+                quantity=Decimal(372),
+                amount=Decimal(0),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="manual:acats-out-vti",
+                account_id=account.account_id,
+                security_id=vti.security_id,
+                date=date(2025, 1, 5),
+                name="Synthetic ACATS OUT (VTI)",
+                type="cash",
+                subtype="external_asset_transfer_out",
+                quantity=Decimal(-372),
+                amount=Decimal(0),
+                origin="manual",
+            ),
+        ]
+    )
+    session.commit()
+
+    accts = active_account_ids(session)
+    result = _qty_walk_back(session, anchor, target, accts)
+    assert result == {"VTI": Decimal(372)}
+
+
 def test_qty_walk_back_normalizes_pre_split_quantity(session):
     # A 2:1 split sits between a pre-split buy and the anchor snapshot. The
     # snapshot (200) is post-split; the buy was recorded as 100 as-traded

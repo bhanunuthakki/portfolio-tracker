@@ -717,6 +717,29 @@ def test_reverse_quantity_share_moving_cash_subtypes():
     ) == Decimal(-2)
 
 
+def test_reverse_quantity_drip_transfer_uses_described_share_count():
+    # SoFi-via-Plaid DRIP rows carry a placeholder quantity of 1; the
+    # description holds the real fractional share count.
+    drip = _tx(
+        "transfer",
+        quantity=Decimal(1),
+        amount=Decimal("252.62"),
+        name="transfer - Dividend reinvestment purchase of 0.935664 shares of VTI",
+    )
+    assert _reverse_transaction_quantity(drip) == Decimal("-0.935664")
+    tiny = _tx(
+        "transfer",
+        quantity=Decimal(1),
+        amount=Decimal("0.01"),
+        name="transfer - Dividend reinvestment purchase of 0.000056 shares of GOOGL",
+    )
+    assert _reverse_transaction_quantity(tiny) == Decimal("-0.000056")
+    # A plain transfer keeps its signed quantity.
+    assert _reverse_transaction_quantity(
+        _tx("transfer", quantity=Decimal(3), name="transfer - ACATS in")
+    ) == Decimal(-3)
+
+
 def test_reverse_quantity_no_position_effect_returns_none():
     assert _reverse_transaction_quantity(_tx("buy", quantity=Decimal(0))) is None
     assert _reverse_transaction_quantity(_tx("fee", quantity=Decimal(1))) is None
@@ -1973,6 +1996,100 @@ def test_backfill_does_not_reverse_cash_equivalent_quantity_and_cash_twice(sessi
     values = _backfill_values_from_transactions(session, start, date(2026, 1, 2))
 
     assert values[start] == Decimal(1000)
+
+
+def test_backfill_skips_broker_transfer_duplicated_by_acats_pair(session):
+    # The sending broker reports an outgoing transfer as a positive-quantity
+    # `transfer` row. An explicit ACATS out/in pair records the same move, so
+    # the broker row must not move shares a second time.
+    item = Item(source="plaid", plaid_item_id="itm-acats", is_data_active=True)
+    session.add(item)
+    session.flush()
+    sender = Account(
+        item_id=item.item_id, plaid_account_id="a-send", name="Sender", type="investment"
+    )
+    receiver = Account(
+        item_id=item.item_id, plaid_account_id="a-recv", name="Receiver", type="investment"
+    )
+    vti = Security(plaid_security_id="s-vti", ticker="VTI", type="etf", is_cash_equivalent=False)
+    aapl = Security(plaid_security_id="s-aapl", ticker="AAPL", type="cs", is_cash_equivalent=False)
+    session.add_all([sender, receiver, vti, aapl])
+    session.flush()
+    anchor = date(2025, 1, 10)
+    transfer_day = date(2025, 1, 5)
+    session.add_all(
+        [
+            HoldingSnapshot(
+                snapshot_date=anchor,
+                account_id=sender.account_id,
+                security_id=aapl.security_id,
+                quantity=Decimal(1),
+                institution_price=Decimal(100),
+                institution_value=Decimal(100),
+            ),
+            HoldingSnapshot(
+                snapshot_date=anchor,
+                account_id=receiver.account_id,
+                security_id=vti.security_id,
+                quantity=Decimal(372),
+                institution_price=Decimal(100),
+                institution_value=Decimal(37200),
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="broker-outgoing",
+                account_id=sender.account_id,
+                security_id=vti.security_id,
+                date=transfer_day,
+                name="Completed outgoing transfer of 372.000000 long shares of VTI",
+                quantity=Decimal(372),
+                amount=Decimal(0),
+                type="transfer",
+                subtype="transfer",
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="manual:acats-out-vti",
+                account_id=sender.account_id,
+                security_id=vti.security_id,
+                date=transfer_day,
+                name="Synthetic ACATS OUT (VTI)",
+                quantity=Decimal(-372),
+                amount=Decimal(0),
+                type="cash",
+                subtype="external_asset_transfer_out",
+                origin="manual",
+            ),
+            InvestmentTransaction(
+                plaid_investment_transaction_id="manual:acats-in-vti",
+                account_id=receiver.account_id,
+                security_id=vti.security_id,
+                date=transfer_day,
+                name="Synthetic ACATS IN (VTI)",
+                quantity=Decimal(372),
+                amount=Decimal(0),
+                type="cash",
+                subtype="external_asset_transfer_in",
+                origin="manual",
+            ),
+        ]
+    )
+    for day in range(1, 11):
+        for security in (vti, aapl):
+            session.add(
+                Price(
+                    security_id=security.security_id,
+                    date=date(2025, 1, day),
+                    close=Decimal(100),
+                    source=PriceSource.YFINANCE.value,
+                    adjustment_basis=PriceAdjustmentBasis.SPLIT_ADJUSTED.value,
+                )
+            )
+    session.commit()
+
+    result = _backfill_values_from_transactions(session, date(2025, 1, 1), date(2025, 1, 9))
+
+    # The 372 VTI shares stay in the whole portfolio across the internal move.
+    assert result[date(2025, 1, 4)] == Decimal(37300)
+    assert result[date(2025, 1, 9)] == Decimal(37300)
 
 
 def test_transfer_shaped_fee_is_cash_neutral():

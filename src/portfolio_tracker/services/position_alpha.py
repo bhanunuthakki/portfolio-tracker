@@ -49,6 +49,7 @@ from portfolio_tracker.services.option_contracts import option_from_occ
 from portfolio_tracker.services.performance import (
     modified_dietz_denominators_are_positive,
     modified_dietz_series,
+    superseded_share_transfer_ids,
     transaction_quantity_delta,
 )
 from portfolio_tracker.services.policy import load_policy_weights
@@ -850,7 +851,10 @@ def _load_position_event_ledger(
     reasons: set[str] = set()
     transfer_movements: dict[tuple[date, str], list[tuple[int, Decimal]]] = defaultdict(list)
 
+    superseded = superseded_share_transfer_ids(transactions)
     for tx in transactions:
+        if tx.plaid_investment_transaction_id in superseded:
+            continue
         delta = transaction_quantity_delta(tx)
         is_trade = tx.type in {
             InvestmentTransactionType.BUY.value,
@@ -1521,8 +1525,9 @@ def _qty_from_snapshot_forward(
     for sid, q in snap_rows:
         if sid is not None and q is not None:
             qty[sid] += Decimal(q) * factors.factor_after(sid, snap_date)
+    superseded = superseded_share_transfer_ids(forward_tx)
     for tx in forward_tx:
-        if tx.security_id is None:
+        if tx.security_id is None or tx.plaid_investment_transaction_id in superseded:
             continue
         delta = _forward_quantity_delta(tx)
         if delta is not None:
@@ -1572,8 +1577,9 @@ def _qty_walk_back(
     for acct_id, sid, q in anchor_rows:
         if acct_id is not None and sid is not None and q is not None:
             qty_per_acct_sec[(acct_id, sid)] += Decimal(q) * factors.factor_after(sid, anchor_date)
+    superseded = superseded_share_transfer_ids(backward_tx)
     for tx in backward_tx:
-        if tx.security_id is None:
+        if tx.security_id is None or tx.plaid_investment_transaction_id in superseded:
             continue
         delta = _reverse_quantity_delta(tx)
         if delta is not None:
