@@ -37,8 +37,9 @@ underlying dollar series alongside the rebased index if it wants.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -336,6 +337,12 @@ _SHARE_MOVING_CASH_SUBTYPES: frozenset[str] = frozenset(
         "optionexpiration",
         "rei",  # dividend reinvestment — shares acquired, no separate cash leg
     }
+)
+_ACATS_SHARE_SUBTYPES: frozenset[str] = frozenset(
+    {"external_asset_transfer_in", "external_asset_transfer_out"}
+)
+_DRIP_SHARE_COUNT_RE = re.compile(
+    r"dividend reinvestment purchase of\s+(\d+(?:\.\d+)?)\s+share", re.IGNORECASE
 )
 
 # Broad-market US-equity ETFs the user likely treats as "core / index
@@ -1160,6 +1167,7 @@ def _backfill_subset_values(
         .all()
     )
 
+    superseded = superseded_share_transfer_ids(backward_tx)
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     cursor_date = anchor_date - timedelta(days=1)
     daily_quantities[cursor_date] = dict(rolling)
@@ -1167,7 +1175,7 @@ def _backfill_subset_values(
         while cursor_date > tx.date:
             cursor_date -= timedelta(days=1)
             daily_quantities[cursor_date] = dict(rolling)
-        if tx.security_id is None:
+        if tx.security_id is None or tx.plaid_investment_transaction_id in superseded:
             continue
         delta = _reverse_transaction_quantity(tx)
         if delta is not None:
@@ -2552,6 +2560,7 @@ def _backfill_values_from_transactions(
     transactions_by_date: dict[date, list[InvestmentTransaction]] = defaultdict(list)
     for tx in backward_tx:
         transactions_by_date[tx.date].append(tx)
+    superseded_transfers = superseded_share_transfer_ids(backward_tx)
 
     daily_quantities: dict[date, dict[int, Decimal]] = {}
     daily_cash_adj: dict[date, Decimal] = {}
@@ -2568,7 +2577,11 @@ def _backfill_values_from_transactions(
 
     def _reverse_date(activity_date: date) -> None:
         for tx in transactions_by_date.get(activity_date, ()):
-            if tx.security_id is not None and tx.security_id not in cash_equivalent_security_ids:
+            if (
+                tx.security_id is not None
+                and tx.security_id not in cash_equivalent_security_ids
+                and tx.plaid_investment_transaction_id not in superseded_transfers
+            ):
                 delta = _reverse_transaction_quantity(tx)
                 if delta is not None:
                     delta *= split_factors.factor_after(tx.security_id, tx.date)
@@ -2648,12 +2661,53 @@ def transaction_quantity_delta(tx: InvestmentTransaction) -> Decimal | None:
     if tx_type == InvestmentTransactionType.SELL.value:
         return -magnitude
     if tx_type == InvestmentTransactionType.TRANSFER.value:
-        return quantity
+        described = _described_drip_share_count(tx.name)
+        return described if described is not None else quantity
     if tx_type == InvestmentTransactionType.CASH.value:
         subtype = (tx.subtype or "").lower().strip()
         if subtype in _SHARE_MOVING_CASH_SUBTYPES:
             return quantity
     return None
+
+
+def _described_drip_share_count(name: str | None) -> Decimal | None:
+    """Share count stated in a DRIP description, when the provider gives one.
+
+    SoFi-via-Plaid reports dividend reinvestments as ``transfer`` rows whose
+    ``quantity`` is a placeholder 1, while the description carries the real
+    fractional count ("Dividend reinvestment purchase of 0.935664 shares").
+    """
+    match = _DRIP_SHARE_COUNT_RE.search(name or "")
+    return Decimal(match.group(1)) if match else None
+
+
+def superseded_share_transfer_ids(
+    transactions: Sequence[InvestmentTransaction],
+) -> frozenset[str]:
+    """Broker ``transfer`` rows that duplicate an explicit ACATS row.
+
+    A sending broker can report an outgoing share transfer as a bare
+    ``transfer`` row with a positive quantity. When an explicit ACATS
+    (``external_asset_transfer_in/out``) row records the same account,
+    security, date and share count, that ACATS row owns the share movement,
+    and quantity walks must skip the broker row so the move counts once.
+    """
+    acats_keys = {
+        (tx.account_id, tx.security_id, tx.date, abs(Decimal(tx.quantity)))
+        for tx in transactions
+        if tx.type == InvestmentTransactionType.CASH.value
+        and tx.security_id is not None
+        and (tx.subtype or "").lower().strip() in _ACATS_SHARE_SUBTYPES
+    }
+    if not acats_keys:
+        return frozenset()
+    return frozenset(
+        tx.plaid_investment_transaction_id
+        for tx in transactions
+        if tx.type == InvestmentTransactionType.TRANSFER.value
+        and tx.security_id is not None
+        and (tx.account_id, tx.security_id, tx.date, abs(Decimal(tx.quantity))) in acats_keys
+    )
 
 
 def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:
