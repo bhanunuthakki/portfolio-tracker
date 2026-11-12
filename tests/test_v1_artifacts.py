@@ -24,6 +24,7 @@ from portfolio_tracker.api.routes.v1 import DataQualityV1Result
 from portfolio_tracker.services.positions_v1 import PositionsV1Result
 from portfolio_tracker.services.v1_accounts import AccountsV1Result
 from portfolio_tracker.services.v1_analytics import (
+    AfterTaxV1Result,
     BetaV1Result,
     DrawdownV1Result,
     ExitQualityV1Result,
@@ -114,6 +115,11 @@ def test_fixtures_parse_into_response_models():
     ExitQualityV1Result.model_validate(
         json.loads((FIXTURES_DIR / "exit-quality.json").read_text(encoding="utf-8"))
     )
+    after_tax = AfterTaxV1Result.model_validate(
+        json.loads((FIXTURES_DIR / "after-tax.json").read_text(encoding="utf-8"))
+    )
+    assert after_tax.meta.methodology == "after_tax.realized_1099b"
+    assert after_tax.after_tax.lots_count == 2
 
 
 @pytest.mark.parametrize(
