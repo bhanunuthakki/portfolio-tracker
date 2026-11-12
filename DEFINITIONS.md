@@ -104,6 +104,37 @@ exist for a Source event.
 **Not to be confused with.** A Transaction override is a legacy mutable
 classification input; it is not a complete provenance or decision history.
 
+## Provider Classification Rule
+
+**Definition.** A deterministic rule that closes one current, provider-authored
+`unresolved` Reconciliation decision when the stored evidence allows exactly one
+economic reading: a zero-amount, zero-quantity row moves nothing; a transfer
+described exactly as "contribution" with a positive amount is an external
+inflow; an in-kind ACATS leg with an equal opposite leg in another account of
+the same return universe is internal. A rule never overrides an owner or
+statement decision and never invents an amount. The flow ledger fails closed
+(`provenance_rule_resolution_mismatch`) when its treatment of the record
+differs from the rule. A return that relies on a rule carries
+`provider_classification_rule_resolved` in its certification reasons.
+**Lives in.** `services/provider_decision_rules.py`, consumed by the
+external-flow ledger and source-coverage assessment.
+**Not to be confused with.** A Reconciliation decision. The rule is computed at
+read time; the stored provider decision stays `unresolved` and unchanged.
+
+## Zero-Value Flow-Through Account
+
+**Definition.** An owner-ruled account that receives external contributions and
+holds no value at end of day, because the contributions sweep to sibling
+accounts in the same return universe. Its flows stay in the Effective external
+flow set; it is valued at zero instead of blocking every date as an account with
+missing holdings. The ruling verifies itself for each window: a missing account,
+a different institution, a nonzero holding snapshot, or a nonzero account
+valuation contradicts it, and then the ruling does not apply and data quality
+reports `owner_ruling_contradicted`.
+**Lives in.** `services/owner_rulings.py`.
+**Not to be confused with.** An inactive or excluded account. A flow-through
+account stays in the account universe.
+
 ## Effective External Flow
 
 **Definition.** The single deduplicated cash movement into or out of the tracked

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -80,6 +80,7 @@ from portfolio_tracker.services.cashflow_source_coverage import (
     source_coverage_out,
 )
 from portfolio_tracker.services.option_contracts import occ_has_adjusted_root, option_from_occ
+from portfolio_tracker.services.owner_rulings import zero_value_account_ids
 from portfolio_tracker.services.policy import load_policy_weights
 from portfolio_tracker.services.splits import load_split_factors
 
@@ -128,6 +129,9 @@ _POLICY_BENCHMARK_PRICE_UNAVAILABLE = "policy_benchmark_price_unavailable"
 _BENCHMARK_QUERY_LOOKBACK_DAYS = 7
 _EXTERNAL_FLOW_SOURCE_COVERAGE_INCOMPLETE = "external_flow_source_coverage_incomplete"
 _BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE = "broker_archive_coverage_not_complete"
+# A provider-unresolved flow was closed by a deterministic evidence rule, not
+# by an owner or statement decision; the result stays source-provisional.
+_PROVIDER_CLASSIFICATION_RULE_RESOLVED = "provider_classification_rule_resolved"
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,7 @@ class _CashflowAssessment:
     external_flow_ledger_id: str | None = None
     account_ids: tuple[int, ...] = ()
     entries: tuple[external_flow_ledger.ExternalFlowEntry, ...] = ()
+    rule_resolutions: tuple[external_flow_ledger.RuleResolution, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -337,9 +342,6 @@ _SHARE_MOVING_CASH_SUBTYPES: frozenset[str] = frozenset(
         "optionexpiration",
         "rei",  # dividend reinvestment — shares acquired, no separate cash leg
     }
-)
-_ACATS_SHARE_SUBTYPES: frozenset[str] = frozenset(
-    {"external_asset_transfer_in", "external_asset_transfer_out"}
 )
 _DRIP_SHARE_COUNT_RE = re.compile(
     r"dividend reinvestment purchase of\s+(\d+(?:\.\d+)?)\s+share", re.IGNORECASE
@@ -713,6 +715,8 @@ def compute_performance_series(
     certification_reason_codes = set(value_assessment.certification_reason_codes)
     if not source_coverage.broker_archive_is_complete:
         certification_reason_codes.add(_BROKER_ARCHIVE_COVERAGE_NOT_COMPLETE)
+    if cashflow_assessment.rule_resolutions:
+        certification_reason_codes.add(_PROVIDER_CLASSIFICATION_RULE_RESOLVED)
     reconstruction_certification = (
         "modeled_provisional"
         if not opening_is_observed
@@ -1635,6 +1639,7 @@ def _daily_external_cashflow_assessment(
         external_flow_ledger_id=ledger_input_id,
         account_ids=tuple(sorted(ledger.account_ids)),
         entries=ledger.entries,
+        rule_resolutions=ledger.rule_resolutions,
     )
 
 
@@ -2160,13 +2165,17 @@ def _daily_portfolio_value_assessment(
     requires a complete anchor and supports no option history. A partial
     observed boundary is never papered over with a cache row.
     """
-    valuation_accounts = performance_account_ids(session, start_date, end_date)
+    flow_accounts = performance_account_ids(session, start_date, end_date)
+    # An owner-ruled zero-value flow-through account keeps its flows in the
+    # ledger (``valuation_account_ids`` below) but contributes no value of its
+    # own, so it cannot make every date look like missing holdings.
+    value_accounts = flow_accounts - zero_value_account_ids(session, start_date, end_date)
     complete_account_valuations = _complete_account_valuations_by_date(
-        session, start_date, end_date, account_ids=valuation_accounts
+        session, start_date, end_date, account_ids=value_accounts
     )
-    account_ids = tuple(sorted(valuation_accounts))
+    account_ids = tuple(sorted(flow_accounts))
     forward = _forward_values_from_snapshots(
-        session, start_date, end_date, account_ids=valuation_accounts
+        session, start_date, end_date, account_ids=value_accounts
     )
     has_total_start = start_date in complete_account_valuations
     has_total_end = end_date in complete_account_valuations
@@ -2205,14 +2214,12 @@ def _daily_portfolio_value_assessment(
         ):
             certification_reasons.add(_PROVIDER_VALUATION_AS_OF_UNASSERTED)
 
-    snapshot_candidates = _snapshot_dates(
-        session, start_date, end_date, account_ids=valuation_accounts
-    )
+    snapshot_candidates = _snapshot_dates(session, start_date, end_date, account_ids=value_accounts)
     partial: dict[date, frozenset[int]] = partial_snapshot_dates(
-        session, snapshot_candidates, account_ids=valuation_accounts
+        session, snapshot_candidates, account_ids=value_accounts
     )
     unpriceable: set[date] = unpriceable_snapshot_dates(
-        session, snapshot_candidates, account_ids=valuation_accounts
+        session, snapshot_candidates, account_ids=value_accounts
     )
     if use_account_total_basis:
         partial = {}
@@ -2231,7 +2238,7 @@ def _daily_portfolio_value_assessment(
         snapshot_candidates
         and start_date < min(snapshot_candidates)
         and start_date not in complete_account_valuations
-        and _reconstruction_anchor_date(session, account_ids=valuation_accounts) is None
+        and _reconstruction_anchor_date(session, account_ids=value_accounts) is None
     ):
         reasons.add(_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE)
 
@@ -2242,19 +2249,19 @@ def _daily_portfolio_value_assessment(
         backfill_end = (
             earliest_known - timedelta(days=1) if earliest_known is not None else end_date
         )
-        anchor_date = _reconstruction_anchor_date(session, account_ids=valuation_accounts)
+        anchor_date = _reconstruction_anchor_date(session, account_ids=value_accounts)
         if _has_option_reconstruction_evidence(
-            session, start_date, anchor_date or end_date, valuation_accounts
+            session, start_date, anchor_date or end_date, value_accounts
         ):
             reasons.add(_OPTION_HISTORY_RECONSTRUCTION_UNSUPPORTED)
             backfill: dict[date, Decimal] = {}
         else:
             backfill = _backfill_values_from_transactions(
-                session, start_date, backfill_end, account_ids=valuation_accounts
+                session, start_date, backfill_end, account_ids=value_accounts
             )
         if (
             start_date
-            < (_reconstruction_anchor_date(session, account_ids=valuation_accounts) or start_date)
+            < (_reconstruction_anchor_date(session, account_ids=value_accounts) or start_date)
             and start_date not in backfill
         ):
             reasons.add(_MODELED_OPENING_VALUATION_COVERAGE_INCOMPLETE)
@@ -2272,7 +2279,7 @@ def _daily_portfolio_value_assessment(
 
     if (
         provenance.get(start_date) == _MODELED_VALUE
-        and _reconstruction_anchor_date(session, account_ids=valuation_accounts) is None
+        and _reconstruction_anchor_date(session, account_ids=value_accounts) is None
     ):
         reasons.add(_MODELED_OPENING_ACCOUNT_COVERAGE_INCOMPLETE)
         merged.pop(start_date, None)
@@ -2282,35 +2289,33 @@ def _daily_portfolio_value_assessment(
     # complete holdings/reconstruction boundary survived. A rejected optional
     # total must not poison an independently complete matched basis.
     if start_date not in merged and _has_account_valuation_on_date(
-        session, start_date, valuation_accounts
+        session, start_date, value_accounts
     ):
         reasons.add(_PARTIAL_ACCOUNT_VALUATION_START_DATE)
-    if end_date not in merged and _has_account_valuation_on_date(
-        session, end_date, valuation_accounts
-    ):
+    if end_date not in merged and _has_account_valuation_on_date(session, end_date, value_accounts):
         reasons.add(_PARTIAL_ACCOUNT_VALUATION_END_DATE)
     if (
         start_date not in merged
-        and _has_invalid_account_valuation_on_date(session, start_date, valuation_accounts)
+        and _has_invalid_account_valuation_on_date(session, start_date, value_accounts)
     ) or (
         end_date not in merged
         and end_date != start_date
-        and _has_invalid_account_valuation_on_date(session, end_date, valuation_accounts)
+        and _has_invalid_account_valuation_on_date(session, end_date, value_accounts)
     ):
         reasons.add(_ACCOUNT_VALUATION_INTEGRITY_INVALID)
-    if valuation_accounts and (
+    if value_accounts and (
         (
             start_date not in merged
             and (
                 start_date in snapshot_candidates
-                or _has_account_valuation_on_date(session, start_date, valuation_accounts)
+                or _has_account_valuation_on_date(session, start_date, value_accounts)
             )
         )
         or (
             end_date not in merged
             and (
                 end_date in snapshot_candidates
-                or _has_account_valuation_on_date(session, end_date, valuation_accounts)
+                or _has_account_valuation_on_date(session, end_date, value_accounts)
             )
         )
     ):
@@ -2590,6 +2595,10 @@ def _backfill_values_from_transactions(
                     )
             if tx.plaid_investment_transaction_id in canonical_external_transaction_ids:
                 continue
+            if tx.plaid_investment_transaction_id in superseded_transfers:
+                # A duplicate of an ACATS row; a duplicate fee row's amount is
+                # the transferred shares' value, not cash that left the account.
+                continue
             rolling_cash_by_account[tx.account_id] += _reverse_transaction_cash_delta(
                 tx,
                 cash_equivalent_security_ids,
@@ -2681,33 +2690,8 @@ def _described_drip_share_count(name: str | None) -> Decimal | None:
     return Decimal(match.group(1)) if match else None
 
 
-def superseded_share_transfer_ids(
-    transactions: Sequence[InvestmentTransaction],
-) -> frozenset[str]:
-    """Broker ``transfer`` rows that duplicate an explicit ACATS row.
-
-    A sending broker can report an outgoing share transfer as a bare
-    ``transfer`` row with a positive quantity. When an explicit ACATS
-    (``external_asset_transfer_in/out``) row records the same account,
-    security, date and share count, that ACATS row owns the share movement,
-    and quantity walks must skip the broker row so the move counts once.
-    """
-    acats_keys = {
-        (tx.account_id, tx.security_id, tx.date, abs(Decimal(tx.quantity)))
-        for tx in transactions
-        if tx.type == InvestmentTransactionType.CASH.value
-        and tx.security_id is not None
-        and (tx.subtype or "").lower().strip() in _ACATS_SHARE_SUBTYPES
-    }
-    if not acats_keys:
-        return frozenset()
-    return frozenset(
-        tx.plaid_investment_transaction_id
-        for tx in transactions
-        if tx.type == InvestmentTransactionType.TRANSFER.value
-        and tx.security_id is not None
-        and (tx.account_id, tx.security_id, tx.date, abs(Decimal(tx.quantity))) in acats_keys
-    )
+# Shared with the canonical flow ledger so every walk skips the same duplicates.
+superseded_share_transfer_ids = external_flow_ledger.superseded_share_transfer_ids
 
 
 def _reverse_transaction_quantity(tx: InvestmentTransaction) -> Decimal | None:

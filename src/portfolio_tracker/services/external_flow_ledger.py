@@ -12,6 +12,7 @@ valuations, account scope, and window totals cannot drift between them.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -39,6 +40,8 @@ from portfolio_tracker.services.cashflow_source_coverage import (
     canonical_source_event_set_sha256,
     decision_date_basis_matches_source,
 )
+from portfolio_tracker.services.provider_decision_rules import RuleResolution as RuleResolution
+from portfolio_tracker.services.provider_decision_rules import resolve as resolve_by_rule
 from portfolio_tracker.services.splits import load_split_factors
 
 FlowClassification = Literal["external_in", "external_out", "internal"]
@@ -80,6 +83,7 @@ ExternalFlowIssueCode = Literal[
     "provenance_decision_payload_digest_mismatch",
     "provenance_source_event_set_digest_mismatch",
     "provenance_effective_date_basis_mismatch",
+    "provenance_rule_resolution_mismatch",
 ]
 
 _INTERNAL_TRANSFER_SUBTYPES: frozenset[str] = frozenset(
@@ -171,6 +175,10 @@ class ExternalFlowLedger:
     # Valid current provenance classifications, including `excluded` rows that
     # deliberately do not emit a ledger entry.
     provenance_transaction_classifications: tuple[tuple[str, str], ...] = ()
+    # Provider-unresolved decisions closed by a deterministic evidence rule
+    # (`provider_decision_rules`). They are verified against this ledger and
+    # reported so a receipt never presents them as owner-approved.
+    rule_resolutions: tuple[RuleResolution, ...] = ()
 
     def require_complete(self) -> None:
         if self.issues:
@@ -302,6 +310,13 @@ def classify_transaction_cashflow(
             return ClassificationDecision(
                 "internal", Decimal(0), "heuristic", f"subtype.transfer.{subtype}"
             )
+        # A transfer described exactly as "contribution" is an employer or
+        # payroll contribution into the account. SnapTrade signs it positive,
+        # so the Plaid-sign rule below would book it as a withdrawal.
+        if (name or "").strip().lower() == "contribution" and amount != 0:
+            return ClassificationDecision(
+                "external_in", abs(amount), "heuristic", "name.transfer_contribution"
+            )
         return ClassificationDecision(
             "external_in" if -amount > 0 else "external_out",
             -amount,
@@ -420,6 +435,7 @@ def _provenance_state(
     dict[str, tuple[_ManagedDecision, ...]],
     frozenset[str],
     tuple[ExternalFlowIssue, ...],
+    tuple[RuleResolution, ...],
 ]:
     """Resolve append-only source events to exactly one operative decision.
 
@@ -451,7 +467,7 @@ def _provenance_state(
     ).all()
     source_rows = [*direct_source_rows, *linked_source_rows]
     if not source_rows:
-        return {}, frozenset(), ()
+        return {}, frozenset(), (), ()
 
     memberships_by_event: dict[
         str, dict[int, tuple[CashFlowSourceEvent, CashFlowSourceAttestation]]
@@ -486,6 +502,7 @@ def _provenance_state(
 
     managed_groups: dict[str, list[_ManagedDecision]] = defaultdict(list)
     issues: list[ExternalFlowIssue] = []
+    rule_resolutions: list[RuleResolution] = []
     invalid_attestation_ids: set[int] = set()
     for attestation_id, attestation_events in events_by_attestation.items():
         attestation = attestations[attestation_id]
@@ -559,6 +576,13 @@ def _provenance_state(
             code = "provenance_current_decision_unresolved"
         elif decision.confidence == "provisional":
             code = "provenance_current_decision_provisional"
+        if code == "provenance_current_decision_unresolved":
+            resolution = resolve_by_rule(session, event, attestation, decision, accounts)
+            if resolution is not None:
+                # The record stays on the ordinary transaction path; the
+                # ledger verifies below that it is treated as the rule says.
+                rule_resolutions.append(resolution)
+                continue
         if code is not None:
             issues.append(
                 ExternalFlowIssue(
@@ -610,7 +634,59 @@ def _provenance_state(
         },
         all_target_ids,
         tuple(issues),
+        tuple(rule_resolutions),
     )
+
+
+def superseded_share_transfer_ids(
+    transactions: Sequence[InvestmentTransaction],
+) -> frozenset[str]:
+    """Provider rows that duplicate an explicit ACATS row for the same move.
+
+    * A sending broker can report an outgoing share transfer as a bare
+      ``transfer`` row. When an ACATS (``external_asset_transfer_in/out``) row
+      records the same account, security, date and share count, the ACATS row
+      owns the movement.
+    * A receiving broker can report an incoming ACATS a second time as a
+      ``fee`` row that carries the security, the share count and the full
+      market value as its amount. When an ACATS row in the same account records
+      the same security and share count within five days, the fee row is the
+      duplicate. Its amount is not a fee.
+
+    Share walks, cash walks and the flow ledger skip these rows so one move
+    counts once. Stored provider rows are unchanged.
+    """
+    acats_rows = [
+        tx
+        for tx in transactions
+        if tx.type == InvestmentTransactionType.CASH.value
+        and tx.security_id is not None
+        and (tx.subtype or "").lower().strip() in _SHARE_TRANSFER_SUBTYPES
+    ]
+    if not acats_rows:
+        return frozenset()
+    exact_keys = {
+        (tx.account_id, tx.security_id, tx.date, abs(Decimal(tx.quantity or 0)))
+        for tx in acats_rows
+    }
+    by_position: dict[tuple[int, int, Decimal], list[date]] = defaultdict(list)
+    for tx in acats_rows:
+        assert tx.security_id is not None
+        by_position[(tx.account_id, tx.security_id, abs(Decimal(tx.quantity or 0)))].append(tx.date)
+    superseded: set[str] = set()
+    for tx in transactions:
+        if tx.security_id is None or not tx.quantity:
+            continue
+        quantity = abs(Decimal(tx.quantity))
+        if tx.type == InvestmentTransactionType.TRANSFER.value:
+            if (tx.account_id, tx.security_id, tx.date, quantity) in exact_keys:
+                superseded.add(tx.plaid_investment_transaction_id)
+        elif tx.type == InvestmentTransactionType.FEE.value and any(
+            abs((acats_date - tx.date).days) <= 5
+            for acats_date in by_position.get((tx.account_id, tx.security_id, quantity), ())
+        ):
+            superseded.add(tx.plaid_investment_transaction_id)
+    return frozenset(superseded)
 
 
 def _is_share_transfer_candidate(transaction: InvestmentTransaction) -> bool:
@@ -639,8 +715,8 @@ def build_external_flow_ledger(
     if not accounts:
         return ExternalFlowLedger(start_date, end_date, frozenset(), ())
 
-    managed_by_target, provenance_target_ids, provenance_issues = _provenance_state(
-        session, frozenset(accounts), start_date, end_date
+    managed_by_target, provenance_target_ids, provenance_issues, rule_resolutions = (
+        _provenance_state(session, frozenset(accounts), start_date, end_date)
     )
 
     rows = session.execute(
@@ -669,9 +745,13 @@ def build_external_flow_ledger(
     seen_managed_targets: set[str] = set()
     provenance_classifications: dict[str, str] = {}
 
+    superseded = superseded_share_transfer_ids([row[0] for row in rows])
     for transaction, account, item, security in rows:
         transaction_id = transaction.plaid_investment_transaction_id
         managed_group = managed_by_target.get(transaction_id)
+        if managed_group is None and transaction_id in superseded:
+            # A duplicate of an explicit ACATS row; the ACATS row carries the move.
+            continue
         if transaction_id in provenance_target_ids and managed_group is None:
             # Superseded targets and structurally invalid current decisions are
             # never allowed to leak back through legacy heuristic rules.
@@ -905,6 +985,7 @@ def build_external_flow_ledger(
     )
     entries.extend(synthesized)
     issues.extend(synthesized_issues)
+    issues.extend(_rule_resolution_mismatches(rule_resolutions, entries, [row[0] for row in rows]))
     entries.sort(key=lambda entry: (entry.date, entry.flow_id), reverse=True)
     return ExternalFlowLedger(
         start_date,
@@ -914,7 +995,47 @@ def build_external_flow_ledger(
         tuple(issues),
         provenance_target_ids,
         tuple(sorted(provenance_classifications.items())),
+        rule_resolutions,
     )
+
+
+def _rule_resolution_mismatches(
+    resolutions: tuple[RuleResolution, ...],
+    entries: list[ExternalFlowEntry],
+    transactions: Sequence[InvestmentTransaction],
+) -> list[ExternalFlowIssue]:
+    """Fail closed when the ledger does not treat a rule-resolved record as ruled."""
+    dates = {tx.plaid_investment_transaction_id: tx.date for tx in transactions}
+    issues: list[ExternalFlowIssue] = []
+    for resolution in resolutions:
+        record = resolution.record_transaction_id
+        touching = [
+            entry
+            for entry in entries
+            if entry.classification != "internal"
+            and (entry.transaction_id == record or record in entry.component_transaction_ids)
+        ]
+        if resolution.classification == "internal":
+            # A zero-amount entry moves no money, so it agrees with "internal".
+            consistent = record in dates and all(
+                entry.signed_external_amount == 0 for entry in touching
+            )
+        else:
+            consistent = (
+                len(touching) == 1
+                and touching[0].transaction_id == record
+                and touching[0].classification == resolution.classification
+            )
+        if not consistent:
+            issues.append(
+                ExternalFlowIssue(
+                    "provenance_rule_resolution_mismatch",
+                    dates.get(record, resolution.event_date),
+                    resolution.source_event_id,
+                    (record,),
+                )
+            )
+    return issues
 
 
 def effective_transaction_classifications(

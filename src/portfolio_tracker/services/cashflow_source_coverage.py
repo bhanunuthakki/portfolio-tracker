@@ -39,6 +39,7 @@ from portfolio_tracker.schemas import (
     CashFlowSourceGapOut,
     SourceCoverageRangeOut,
 )
+from portfolio_tracker.services.provider_decision_rules import resolve as resolve_by_rule
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CERTIFYING_PARSER_VERSIONS: dict[str, frozenset[str]] = {
@@ -329,6 +330,7 @@ def _validation_reason_codes(
     gaps: tuple[CashFlowSourceGap, ...],
     events: tuple[CashFlowSourceEvent, ...],
     current_decisions: dict[str, tuple[CashFlowReconciliationDecision, ...]],
+    rule_resolved: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     reasons: set[str] = set()
     if not _SHA256_RE.fullmatch(attestation.source_sha256):
@@ -398,6 +400,10 @@ def _validation_reason_codes(
         if not decision_date_basis_matches_source(decision, event):
             reasons.add("source_attestation_event_effective_date_basis_mismatch")
         if decision.resolution_kind == "unresolved":
+            if event.source_event_id in rule_resolved:
+                # Closed by a deterministic evidence rule; the provider
+                # decision stays provisional by design.
+                continue
             event_date = event.activity_date or event.process_date or event.settlement_date
             if event_date is None or not any(
                 gap.reason_code == "unresolved_classification"
@@ -418,6 +424,7 @@ def _unresolved_classification_gap_is_closed(
     gap: CashFlowSourceGap,
     events: tuple[CashFlowSourceEvent, ...],
     current_decisions: dict[str, tuple[CashFlowReconciliationDecision, ...]],
+    rule_resolved: frozenset[str] = frozenset(),
 ) -> bool:
     """Close only a historical classification gap with fully resolved lineage.
 
@@ -443,10 +450,13 @@ def _unresolved_classification_gap_is_closed(
         if len(decisions) != 1:
             return False
         decision = decisions[0]
+        rule_closed = (
+            decision.resolution_kind == "unresolved" and event.source_event_id in rule_resolved
+        )
         if (
             decision.approved_at is None
-            or decision.resolution_kind == "unresolved"
-            or decision.confidence == "provisional"
+            or (decision.resolution_kind == "unresolved" and not rule_closed)
+            or (decision.confidence == "provisional" and not rule_closed)
             or decision.decision_payload_sha256 != canonical_decision_payload_sha256(decision)
             or not decision_date_basis_matches_source(decision, event)
         ):
@@ -595,6 +605,17 @@ def assess_cashflow_source_coverage(
         for replacement_id, replacement_key in replacement_rows:
             replacement_keys[replacement_id] = replacement_key
 
+    # Provider-unresolved decisions closed by the deterministic evidence rules
+    # shared with the canonical flow ledger (`provider_decision_rules`).
+    rule_resolved = frozenset(
+        event_id
+        for row in rows
+        if row.superseded_at is None and row.superseded_by_attestation_id is None
+        for event_id, event in event_map_by_attestation[row.attestation_id].items()
+        if len(current_decisions.get(event_id, ())) == 1
+        and resolve_by_rule(session, event, row, current_decisions[event_id][0], account_ids)
+        is not None
+    )
     evidence: list[SourceAttestationEvidence] = []
     coverable_by_account: dict[int, list[DateRange]] = defaultdict(list)
     archive_coverable_by_account: dict[int, list[DateRange]] = defaultdict(list)
@@ -607,6 +628,7 @@ def assess_cashflow_source_coverage(
             raw_gaps,
             raw_events,
             {key: tuple(value) for key, value in current_decisions.items()},
+            rule_resolved,
         )
         if row.superseded_at is not None or row.superseded_by_attestation_id is not None:
             lifecycle_status = "superseded"
@@ -667,6 +689,7 @@ def assess_cashflow_source_coverage(
                 gap,
                 raw_events,
                 current_decision_view,
+                rule_resolved,
             )
         )
         coverable_by_account[row.account_id].extend(_subtract_ranges(clipped, gap_ranges))
