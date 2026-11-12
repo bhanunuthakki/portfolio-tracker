@@ -50,18 +50,35 @@ from portfolio_tracker.services.account_valuations import (
     stored_account_valuation_observation_payload,
 )
 from portfolio_tracker.services.active_items import active_account_ids
+from portfolio_tracker.services.after_tax import compute_after_tax
+from portfolio_tracker.services.benchmark_estimate import (
+    DEFAULT_BENCHMARKS,
+    DEFAULT_LOOKBACK_DAYS,
+    DEFAULT_MODEL_ERROR_PER_180_DAYS,
+    build_benchmark_estimate,
+)
 from portfolio_tracker.services.beta import compute_beta
+from portfolio_tracker.services.brinson import compute_brinson
 from portfolio_tracker.services.drawdown import compute_drawdown
 from portfolio_tracker.services.exit_quality import compute_exit_quality
+from portfolio_tracker.services.policy_write import read_policy
 from portfolio_tracker.services.position_alpha import compute_position_alpha
 from portfolio_tracker.services.v1_accounts import AccountsV1Result, build_accounts_result
 from portfolio_tracker.services.v1_analytics import (
+    AfterTaxV1Result,
+    AttributionV1Result,
+    BenchmarkEstimateV1Result,
+    BenchmarkPolicyV1Result,
     BetaV1Result,
     DrawdownV1Result,
     ExitQualityV1Result,
     PerformanceV1Result,
     PositionPerformanceV1Result,
     RiskV1Result,
+    after_tax_meta,
+    attribution_meta,
+    benchmark_estimate_meta,
+    benchmark_policy_meta,
     exit_quality_meta,
     performance_meta,
     position_performance_meta,
@@ -361,6 +378,74 @@ def weekly_values(
     if start_date > resolved_end:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "start_date is after end_date")
     return build_weekly_value_history(session, start_date, resolved_end)
+
+
+@router.get("/analytics/benchmark-estimate", response_model=BenchmarkEstimateV1Result)
+def analytics_benchmark_estimate(
+    session: Annotated[Session, Depends(get_session)],
+    end_date: date | None = Query(default=None),
+    lookback_days: Annotated[list[int] | None, Query()] = None,
+    benchmarks: Annotated[list[str] | None, Query()] = None,
+    model_error_per_180_days: float = Query(
+        default=float(DEFAULT_MODEL_ERROR_PER_180_DAYS), ge=0, le=0.5
+    ),
+) -> BenchmarkEstimateV1Result:
+    """Lookback returns vs any stored benchmark: the Canonical portfolio return
+    status plus a separately labeled Benchmark comparison estimate with a band."""
+    days = lookback_days or list(DEFAULT_LOOKBACK_DAYS)
+    if any(day <= 0 or day > 3660 for day in days):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "lookback_days must be 1..3660")
+    result = build_benchmark_estimate(
+        session,
+        end_date=end_date,
+        lookback_days=days,
+        benchmarks=benchmarks or list(DEFAULT_BENCHMARKS),
+        model_error_per_180_days=Decimal(str(model_error_per_180_days)),
+    )
+    return BenchmarkEstimateV1Result(
+        meta=benchmark_estimate_meta(session, as_of=result.as_of), result=result
+    )
+
+
+@router.get("/analytics/after-tax", response_model=AfterTaxV1Result)
+def analytics_after_tax(
+    session: Annotated[Session, Depends(get_session)],
+    tax_year: int | None = Query(default=None, ge=1990, le=2100),
+    st_rate: float = Query(default=0.37, ge=0, le=1),
+    lt_rate: float = Query(default=0.20, ge=0, le=1),
+) -> AfterTaxV1Result:
+    """After-tax realized gain from imported 1099-B lots at flat owner-supplied
+    short-term and long-term rates. The 1099-B stays authoritative for filing."""
+    result = compute_after_tax(session, tax_year, Decimal(str(st_rate)), Decimal(str(lt_rate)))
+    return AfterTaxV1Result(meta=after_tax_meta(session), after_tax=result)
+
+
+@router.get("/analytics/attribution", response_model=AttributionV1Result)
+def analytics_attribution(
+    session: Annotated[Session, Depends(get_session)],
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+) -> AttributionV1Result:
+    """Brinson-Fachler sector attribution vs SPY (allocation, selection,
+    interaction). Approximations are listed in `attribution.notes`. Defaults to a
+    trailing 365-day window."""
+    resolved_end = end_date or date.today()
+    resolved_start = start_date or resolved_end - timedelta(days=365)
+    if resolved_start >= resolved_end:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "start_date must be before end_date"
+        )
+    result = compute_brinson(session, resolved_start, resolved_end)
+    return AttributionV1Result(meta=attribution_meta(session), attribution=result)
+
+
+@router.get("/settings/benchmark-policy", response_model=BenchmarkPolicyV1Result)
+def settings_benchmark_policy(
+    session: Annotated[Session, Depends(get_session)],
+) -> BenchmarkPolicyV1Result:
+    """Read-only benchmark policy weights used by the policy counterfactual.
+    Replacement stays on the operator route `PUT /api/policy`."""
+    return BenchmarkPolicyV1Result(meta=benchmark_policy_meta(session), policy=read_policy(session))
 
 
 @router.get("/analytics/performance", response_model=PerformanceV1Result)

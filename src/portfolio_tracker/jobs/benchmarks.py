@@ -50,7 +50,7 @@ _SECTOR_ETFS: tuple[str, ...] = (
 # so the risk-metrics service can use a time-varying risk-free rate instead of
 # a flat constant. It's never used as a return counterfactual (nothing
 # references the "^IRX" symbol except `beta._window_risk_free`).
-_DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "^IRX", *_SECTOR_ETFS)
+_DEFAULT_BENCHMARKS: tuple[str, ...] = ("SPY", "QQQ", "VOO", "^IRX", *_SECTOR_ETFS)
 
 # Policy status is global rather than window-qualified. A required revision can
 # therefore become ``current`` only after the longest first-class performance

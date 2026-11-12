@@ -38,25 +38,30 @@ class WeeklyValueHistory(BaseModel):
     points: list[WeeklyValuePoint]
 
 
-def build_weekly_value_history(
-    session: Session, start_date: date, end_date: date
-) -> WeeklyValueHistory:
-    """Keep the latest actual point per ISO week and basis, without forward filling."""
-    account_ids = performance_account_ids(session, start_date, end_date)
-    weekly: dict[tuple[date, ValueBasis], WeeklyValuePoint] = {}
+class DailyValuePoint(BaseModel):
+    """One retained value on its actual observation date and basis."""
 
-    def keep(point: WeeklyValuePoint) -> None:
-        key = (point.week_start, point.basis)
-        if key not in weekly or weekly[key].as_of < point.as_of:
-            weekly[key] = point
+    as_of: date
+    basis: ValueBasis
+    value: Decimal
+    covered_account_ids: list[int] | None
+    source_providers: list[str]
+    valuation_observation_keys: list[str] = Field(default_factory=list[str])
+
+
+def build_daily_value_points(
+    session: Session, start_date: date, end_date: date
+) -> tuple[frozenset[int], list[DailyValuePoint]]:
+    """Every retained value point by date and basis, without forward filling."""
+    account_ids = performance_account_ids(session, start_date, end_date)
+    points: list[DailyValuePoint] = []
 
     valuations = _complete_account_valuations_by_date(
         session, start_date, end_date, account_ids=account_ids
     )
     for day, totals in valuations.items():
-        keep(
-            WeeklyValuePoint(
-                week_start=day - timedelta(days=day.weekday()),
+        points.append(
+            DailyValuePoint(
                 as_of=day,
                 basis="whole_account",
                 value=sum((row.total_value for row in totals), Decimal(0)),
@@ -93,9 +98,8 @@ def build_weekly_value_history(
     for day, daily_marks in marks.items():
         covered = sorted(aid for aid in daily_marks if (day, aid) not in unusable)
         if covered:
-            keep(
-                WeeklyValuePoint(
-                    week_start=day - timedelta(days=day.weekday()),
+            points.append(
+                DailyValuePoint(
                     as_of=day,
                     basis="marked_positions",
                     value=sum((daily_marks[aid] for aid in covered), Decimal(0)),
@@ -110,9 +114,8 @@ def build_weekly_value_history(
             PortfolioValueDaily.source.in_(("snapshot", "backfill")),
         )
     ):
-        keep(
-            WeeklyValuePoint(
-                week_start=row.date - timedelta(days=row.date.weekday()),
+        points.append(
+            DailyValuePoint(
                 as_of=row.date,
                 basis="legacy_cached_snapshot"
                 if row.source == "snapshot"
@@ -122,7 +125,20 @@ def build_weekly_value_history(
                 source_providers=[],
             )
         )
+    return account_ids, points
 
+
+def build_weekly_value_history(
+    session: Session, start_date: date, end_date: date
+) -> WeeklyValueHistory:
+    """Keep the latest actual point per ISO week and basis, without forward filling."""
+    account_ids, points = build_daily_value_points(session, start_date, end_date)
+    weekly: dict[tuple[date, ValueBasis], WeeklyValuePoint] = {}
+    for point in points:
+        week_start = point.as_of - timedelta(days=point.as_of.weekday())
+        key = (week_start, point.basis)
+        if key not in weekly or weekly[key].as_of < point.as_of:
+            weekly[key] = WeeklyValuePoint(week_start=week_start, **point.model_dump())
     return WeeklyValueHistory(
         expected_account_ids=sorted(account_ids),
         points=[weekly[key] for key in sorted(weekly)],

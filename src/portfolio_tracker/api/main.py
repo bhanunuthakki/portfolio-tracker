@@ -41,6 +41,9 @@ DEPRECATED_PATHS: dict[str, str] = {
     "/api/portfolio/data-quality": "/api/v1/data-quality",
     "/api/portfolio/cashflow-audit": "/api/v1/cash-flows",
     "/api/plaid/items": "/api/v1/accounts",
+    "/api/portfolio/holdings/by-account": "/api/v1/portfolio/positions",
+    "/api/portfolio/after-tax": "/api/v1/analytics/after-tax",
+    "/api/portfolio/brinson": "/api/v1/analytics/attribution",
 }
 
 
