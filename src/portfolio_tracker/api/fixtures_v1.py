@@ -25,6 +25,7 @@ Scenarios:
   * ``beta.json``                        — the regression half alone
   * ``drawdown.json``                    — the loss-shaped half alone
   * ``exit-quality.json``                — sell-side quality facts
+  * ``after-tax.json``                   — realized 1099-B gains at flat ST/LT rates
 
 Regenerate after changing any v1 model:
 
@@ -56,6 +57,8 @@ from portfolio_tracker.models import (
     PriceAdjustmentBasis,
     PriceSource,
     Security,
+    TaxFormImport,
+    TaxFormRealizedLot,
 )
 from portfolio_tracker.services.cashflow_source_coverage import (
     canonical_source_event_set_sha256,
@@ -311,6 +314,47 @@ def _with_session(fn: Callable[[Session], dict[str, Any]]) -> dict[str, Any]:
         engine.dispose()
 
 
+def _after_tax_result(session: Session, compute: Callable[..., Any]) -> Any:
+    """Seed two synthetic 1099-B lots (one short-term gain, one long-term loss
+    with a disallowed wash sale) last, so no other fixture sees them, and
+    compute the after-tax result at the route's default rates."""
+    tax_year = FIXTURE_TODAY.year - 1
+    form = TaxFormImport(broker="Broker A", tax_year=tax_year, form_types="1099-B")
+    session.add(form)
+    session.flush()
+    session.add_all(
+        [
+            TaxFormRealizedLot(
+                import_id=form.import_id,
+                description="ALPHA CORP",
+                symbol="AAAA",
+                acquired_date=date(tax_year, 2, 3),
+                disposed_date=date(tax_year, 9, 15),
+                quantity=Decimal(10),
+                proceeds=Decimal("1500.00"),
+                cost_basis=Decimal("1000.00"),
+                net_gain_loss=Decimal("500.00"),
+                term="short",
+            ),
+            TaxFormRealizedLot(
+                import_id=form.import_id,
+                description="BETA CORP",
+                symbol="BBBB",
+                acquired_date=date(tax_year - 2, 4, 1),
+                disposed_date=date(tax_year, 11, 20),
+                quantity=Decimal(5),
+                proceeds=Decimal("800.00"),
+                cost_basis=Decimal("1000.00"),
+                wash_sale_loss_disallowed=Decimal("50.00"),
+                net_gain_loss=Decimal("-200.00"),
+                term="long",
+            ),
+        ]
+    )
+    session.flush()
+    return compute(session, tax_year, Decimal("0.37"), Decimal("0.20"))
+
+
 def build_fixture_payloads() -> dict[str, dict[str, Any]]:
     from portfolio_tracker.api.routes.portfolio import (
         _consolidate_holdings,  # pyright: ignore[reportPrivateUsage]
@@ -319,6 +363,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
     )
     from portfolio_tracker.api.routes.v1 import DataQualityV1Result, HealthV1, ProviderHealthV1
     from portfolio_tracker.services import data_quality as data_quality_service
+    from portfolio_tracker.services.after_tax import compute_after_tax
     from portfolio_tracker.services.beta import compute_beta
     from portfolio_tracker.services.drawdown import compute_drawdown
     from portfolio_tracker.services.exit_quality import compute_exit_quality
@@ -327,12 +372,14 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
     from portfolio_tracker.services.positions_v1 import build_positions_result, tax_treatment
     from portfolio_tracker.services.v1_accounts import build_accounts_result
     from portfolio_tracker.services.v1_analytics import (
+        AfterTaxV1Result,
         BetaV1Result,
         DrawdownV1Result,
         ExitQualityV1Result,
         PerformanceV1Result,
         PositionPerformanceV1Result,
         RiskV1Result,
+        after_tax_meta,
         exit_quality_meta,
         performance_meta,
         position_performance_meta,
@@ -479,6 +526,10 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             meta=exit_quality_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
             result=compute_exit_quality(session, window_start, analytics_end),
         )
+        after_tax = AfterTaxV1Result(
+            meta=after_tax_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
+            after_tax=_after_tax_result(session, compute_after_tax),
+        )
 
         return {
             "positions.json": positions.model_dump(mode="json"),
@@ -497,6 +548,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             "beta.json": beta_only.model_dump(mode="json"),
             "drawdown.json": drawdown_only.model_dump(mode="json"),
             "exit-quality.json": exit_quality.model_dump(mode="json"),
+            "after-tax.json": after_tax.model_dump(mode="json"),
         }
 
     def partial(session: Session) -> dict[str, Any]:
