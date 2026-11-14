@@ -26,6 +26,10 @@ Probe `GET /api/v1/health` before decision-grade reads: it reports database
 and migration state, per-provider link health (counts and times only — never
 balances), the latest snapshot date, and staleness.
 
+Agents read the same resources through the read-only MCP server in
+[agent-adapter.md](agent-adapter.md). One-time views built from these responses follow
+[adhoc-views.md](adhoc-views.md) and its trace checker.
+
 ## Resources
 
 | Endpoint | Purpose |

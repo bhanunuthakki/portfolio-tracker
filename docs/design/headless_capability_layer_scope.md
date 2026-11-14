@@ -85,6 +85,9 @@ route (stdio over SSH). It reads the tracker on Windows loopback. No new listene
 
 ### WP3 — Agent adapter (S–M)
 
+Status: read-only tools and resources built — [agent-adapter.md](../api/agent-adapter.md).
+Operations preview tools wait for WP2. The ES adapter waits for WP4.
+
 - A small MCP server (stdio) in PT that maps each v1 GET to a tool, using the OpenAPI
   schemas. Live use: the Mac client starts it on Windows through the SSH terminal route;
   the server calls `127.0.0.1:8000` there. Resources: `v1-overview.md`, `DEFINITIONS.md`, methodology notes.
@@ -103,6 +106,9 @@ route (stdio over SSH). It reads the tracker on Windows loopback. No new listene
 - Parity test per view: HTML from the model equals the current golden output.
 
 ### WP5 — Ad-hoc GUI recipe (S)
+
+Status: built — [adhoc-views.md](../api/adhoc-views.md) and
+`python -m portfolio_tracker.agent.trace_check`.
 
 A short procedure plus one checker, not a framework:
 
