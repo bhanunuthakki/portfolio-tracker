@@ -70,6 +70,10 @@ route (stdio over SSH). It reads the tracker on Windows loopback. No new listene
 
 ### WP2 — Operations contract (M; run log needs a live migration)
 
+Status: built — [operations.md](../api/operations.md). Runs are CLI-only; HTTP serves the
+catalog, previews, and run status. The run log is migration 0033, applied through the
+`schema_migrate` fast path.
+
 - `GET /api/v1/operations` — catalog: name, effect class (`read`, `local_write`,
   `external_call`, `destructive`), required inputs, preview support, backup requirement.
 - `POST /api/v1/operations/{name}/preview` — returns affected accounts, date range, row

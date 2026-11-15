@@ -27,7 +27,7 @@ ARTIFACT_PATH = Path(__file__).resolve().parents[3] / "docs" / "api" / "openapi.
 
 def build_v1_openapi() -> dict[str, Any]:
     """The OpenAPI document for the v1 surface only, deterministically."""
-    from portfolio_tracker.api.routes import positions_v1, v1
+    from portfolio_tracker.api.routes import operations_v1, positions_v1, v1
 
     app = FastAPI(
         title="Portfolio Data Service API",
@@ -39,6 +39,7 @@ def build_v1_openapi() -> dict[str, Any]:
     )
     app.include_router(v1.router)
     app.include_router(positions_v1.router)
+    app.include_router(operations_v1.router)
     return app.openapi()
 
 

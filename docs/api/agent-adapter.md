@@ -6,7 +6,8 @@ tool over stdio. It is the WP3 part of
 
 ## What it does
 
-- **Tools:** one per v1 GET in [`openapi.v1.json`](openapi.v1.json). The name is the path
+- **Tools:** one per v1 GET in [`openapi.v1.json`](openapi.v1.json), plus the read-only
+  operation preview. The name is the path
   after `/api/v1/`, with `/` and `-` changed to `_` (for example
   `analytics_performance`, `portfolio_positions`, `settings_benchmark_policy`). The
   input schema is the operation's query and path parameters. Unknown arguments are
@@ -17,9 +18,11 @@ tool over stdio. It is the WP3 part of
   400 or higher sets `isError`.
 - **Resources:** `v1-overview.md`, `positions-v1.md`, `DEFINITIONS.md`, the performance
   methodology note, and [`adhoc-views.md`](adhoc-views.md).
-- **No write tools.** Corrections, syncs, backfills, and policy changes stay human
-  actions in the console or CLI. The operations contract (WP2) will add preview-only
-  tools after its run-log migration is approved.
+- **Operation previews:** `operations_preview` (with `name` and optional `inputs`)
+  returns a read-only plan and digest; `operations` lists the catalog and
+  `operations_runs` reads a run's status. See [operations.md](operations.md).
+- **No write tools.** Runs, corrections, syncs, and policy changes stay human actions
+  in the CLI or console.
 
 ## Boundaries
 

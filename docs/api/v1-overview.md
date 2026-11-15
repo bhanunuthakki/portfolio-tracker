@@ -29,6 +29,8 @@ balances), the latest snapshot date, and staleness.
 Agents read the same resources through the read-only MCP server in
 [agent-adapter.md](agent-adapter.md). One-time views built from these responses follow
 [adhoc-views.md](adhoc-views.md) and its trace checker.
+State-changing work goes through the governed operations in
+[operations.md](operations.md).
 
 ## Resources
 

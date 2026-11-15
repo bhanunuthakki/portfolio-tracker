@@ -14,7 +14,11 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().resolved_database_url)
+# A caller may pass an open connection (the schema_migrate rehearsal and apply
+# paths do); only fall back to settings when it does not.
+_given_connection = config.attributes.get("connection")
+if _given_connection is None:
+    config.set_main_option("sqlalchemy.url", get_settings().resolved_database_url)
 
 target_metadata = Base.metadata
 
@@ -33,6 +37,15 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    if _given_connection is not None:
+        context.configure(
+            connection=_given_connection,
+            target_metadata=target_metadata,
+            render_as_batch=True,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
     section = config.get_section(config.config_ini_section, {})
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:

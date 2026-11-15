@@ -2946,6 +2946,238 @@
         "title": "MatchedShareTransfer",
         "type": "object"
       },
+      "OperationPreviewRequestV1": {
+        "properties": {
+          "inputs": {
+            "additionalProperties": true,
+            "title": "Inputs",
+            "type": "object"
+          }
+        },
+        "title": "OperationPreviewRequestV1",
+        "type": "object"
+      },
+      "OperationPreviewV1": {
+        "properties": {
+          "backup_required": {
+            "title": "Backup Required",
+            "type": "boolean"
+          },
+          "effect_class": {
+            "enum": [
+              "read",
+              "local_write",
+              "external_call",
+              "destructive"
+            ],
+            "title": "Effect Class",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "run_command": {
+            "title": "Run Command",
+            "type": "string"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "title": "Summary",
+            "type": "object"
+          }
+        },
+        "required": [
+          "operation",
+          "effect_class",
+          "backup_required",
+          "plan_digest",
+          "summary",
+          "run_command"
+        ],
+        "title": "OperationPreviewV1",
+        "type": "object"
+      },
+      "OperationRunV1": {
+        "properties": {
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "idempotency_key": {
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_digest": {
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "requested_at": {
+            "format": "date-time",
+            "title": "Requested At",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "refused"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "operation",
+          "idempotency_key",
+          "plan_digest",
+          "status",
+          "requested_at",
+          "finished_at",
+          "receipt",
+          "error_code"
+        ],
+        "title": "OperationRunV1",
+        "type": "object"
+      },
+      "OperationV1": {
+        "properties": {
+          "backup_required": {
+            "title": "Backup Required",
+            "type": "boolean"
+          },
+          "cli": {
+            "title": "Cli",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "effect_class": {
+            "enum": [
+              "read",
+              "local_write",
+              "external_call",
+              "destructive"
+            ],
+            "title": "Effect Class",
+            "type": "string"
+          },
+          "inputs": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Inputs",
+            "type": "object"
+          },
+          "interface": {
+            "enum": [
+              "service",
+              "cli"
+            ],
+            "title": "Interface",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "preview_supported": {
+            "title": "Preview Supported",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "effect_class",
+          "description",
+          "interface",
+          "preview_supported",
+          "backup_required",
+          "inputs",
+          "cli"
+        ],
+        "title": "OperationV1",
+        "type": "object"
+      },
+      "OperationsCatalogV1": {
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/OperationV1"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "generated_at",
+          "operations"
+        ],
+        "title": "OperationsCatalogV1",
+        "type": "object"
+      },
       "OptionContract": {
         "additionalProperties": false,
         "properties": {
@@ -7083,6 +7315,131 @@
         "summary": "Health",
         "tags": [
           "v1"
+        ]
+      }
+    },
+    "/api/v1/operations": {
+      "get": {
+        "description": "Every governed operation: effect class, inputs, preview support, backup need.",
+        "operationId": "operations_catalog_api_v1_operations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationsCatalogV1"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Operations Catalog",
+        "tags": [
+          "operations-v1"
+        ]
+      }
+    },
+    "/api/v1/operations/runs/{run_id}": {
+      "get": {
+        "description": "Status and value-free receipt of one run.",
+        "operationId": "operation_run_api_v1_operations_runs__run_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationRunV1"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operation Run",
+        "tags": [
+          "operations-v1"
+        ]
+      }
+    },
+    "/api/v1/operations/{name}/preview": {
+      "post": {
+        "description": "Read-only plan and digest for one operation. Writes nothing.",
+        "operationId": "operation_preview_api_v1_operations__name__preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/OperationPreviewRequestV1"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationPreviewV1"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Operation Preview",
+        "tags": [
+          "operations-v1"
         ]
       }
     },
