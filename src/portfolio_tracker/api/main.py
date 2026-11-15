@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from portfolio_tracker.api.routes import (
+    operations_v1,
     overrides,
     plaid,
     policy,
@@ -61,6 +62,7 @@ def create_app() -> FastAPI:
     app.include_router(snaptrade.router)
     app.include_router(portfolio.router)
     app.include_router(positions_v1.router)
+    app.include_router(operations_v1.router)
     app.include_router(v1.router)
     app.include_router(overrides.router)
     app.include_router(policy.router)

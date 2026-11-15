@@ -40,10 +40,15 @@ def _offline_server() -> TrackerMcpServer:
 def test_every_v1_get_is_a_read_only_tool() -> None:
     server = _offline_server()
     tools = _rpc(server, "tools/list")["result"]["tools"]
-    v1_gets = [p for p, ops in SPEC["paths"].items() if p.startswith("/api/v1/") and "get" in ops]
+    v1_paths = SPEC["paths"].items()
+    reads = {p for p, ops in v1_paths if p.startswith("/api/v1/") and "get" in ops}
+    previews = {p for p, ops in v1_paths if p.endswith("/preview") and "post" in ops}
 
-    assert len(tools) == len(v1_gets)
-    assert {t["description"].split(" ")[1].rstrip(".") for t in tools} == set(v1_gets)
+    assert len(tools) == len(reads) + len(previews)
+    assert {t["description"].split(" ")[1].rstrip(".") for t in tools} == reads | previews
+    assert all(
+        t["description"].startswith("GET ") or t["name"] == "operations_preview" for t in tools
+    )
     for tool in tools:
         assert tool["annotations"]["readOnlyHint"] is True
         assert tool["annotations"]["destructiveHint"] is False

@@ -24,9 +24,9 @@ dashboard requires a product-authority decision.
 - Backend dev: `uvicorn portfolio_tracker.api.main:app --reload --port 8000` (ASGI app = `portfolio_tracker.api.main:app`).
 - Frontend dev: `cd frontend && npm run dev` → http://localhost:5173.
 - Daily ingest CLIs: `python -m portfolio_tracker.jobs.<name>` (`daily_refresh`, `snapshot`, `backfill`, `prices`, `benchmarks`, `backup`, …).
-- DB init / migrate: `alembic upgrade head`. This mutates the configured database: use explicit
-  disposable state for tests. Live migration/backfill/relink/correction follows the backup, target
-  preview and owner-authorization boundary below; a request to edit code does not authorize a run.
+- DB init: `alembic upgrade head` on explicit disposable state. Live schema changes use
+  `python -m portfolio_tracker.jobs.operations preview|run schema_migrate --database-path <db>`
+  (see `docs/api/operations.md`). A request to edit code does not authorize a live run.
 
 ## Mac/Windows listener ownership
 
@@ -59,9 +59,15 @@ Repository validation before a push or release:
 - Reconcile aggregator identifiers and transactions before computing returns;
   never silently substitute the last good balance for a failed refresh.
 - Comparative returns use the same explicit as-of date, account and position universe, period boundaries, and matched cash flows. Report a difference between return rates in percentage points, not as an ambiguous percent change; percentage-point alpha and dollar alpha must reconcile under the same denominator before presentation.
-- Any schema migration, backfill, account relink, or destructive correction
-  requires a verified backup and an explicit preview of affected accounts,
-  date range, and row counts. Ask before operating on the user's live database.
+- Schema additions: `schema_migrate` preview rehearses every pending revision on an
+  in-memory copy. When it classifies the plan `additive` (only new tables, nullable or
+  defaulted columns, and indexes; existing rows unchanged; integrity checks pass) and the
+  owner asked for the work that needs it, report the preview and run it with its digest.
+  The run writes and verifies its own backup. Keep `tests/test_schema_drift.py` passing;
+  add a focused migration test only when a revision moves data.
+- A `requires_approval` schema plan, backfill, account relink, or destructive correction
+  requires a verified backup and an explicit preview of affected accounts, date range,
+  and row counts. Ask before operating on the user's live database.
 - Restore is part of backup verification: prove a backup opens and passes basic
   integrity checks without exposing holdings in logs.
 - Keep deterministic portfolio math separate from LLM coaching. The panel may

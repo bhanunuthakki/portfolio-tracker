@@ -1,6 +1,7 @@
 """Read-only MCP server over the tracker's `/api/v1` GET resources (stdio transport).
 
-Each v1 GET in the checked-in OpenAPI document becomes one tool. A tool call sends
+Each v1 GET in the checked-in OpenAPI document becomes one tool, and so does each
+read-only `POST .../preview` (operation previews write nothing). A tool call sends
 the same GET to the tracker API on loopback and returns the response body unchanged,
 so the `meta` envelope (as-of, coverage, stale/partial flags, warnings, methodology)
 always reaches the agent. There are no write tools: commits stay human actions.
@@ -56,6 +57,11 @@ RESOURCES: tuple[tuple[str, str, str], ...] = (
         "How canonical performance is certified and why it fails closed.",
     ),
     (
+        "tracker://docs/operations",
+        "docs/api/operations.md",
+        "Operations catalog, preview and run contract, and the schema change fast path.",
+    ),
+    (
         "tracker://docs/adhoc-views",
         "docs/api/adhoc-views.md",
         "Rules and trace checker for rendering an ad-hoc view from v1 responses.",
@@ -98,13 +104,18 @@ def tool_name_for(path: str) -> str:
 
 
 def load_tools(spec: _JSON) -> dict[str, _JSON]:
-    """Build one tool definition per v1 GET operation, keyed by tool name."""
+    """One tool per v1 GET, plus each read-only `POST .../preview`, keyed by tool name."""
     tools: dict[str, _JSON] = {}
     paths = cast(dict[str, dict[str, _JSON]], spec["paths"])
     for path, operations in sorted(paths.items()):
-        operation = operations.get("get")
-        if not path.startswith("/api/v1/") or operation is None:
+        if not path.startswith("/api/v1/"):
             continue
+        method = "get" if "get" in operations else None
+        if method is None and path.endswith("/preview") and "post" in operations:
+            method = "post"
+        if method is None:
+            continue
+        operation = operations[method]
         properties: _JSON = {}
         required: list[str] = []
         path_params: list[str] = []
@@ -120,6 +131,11 @@ def load_tools(spec: _JSON) -> dict[str, _JSON]:
                 required.append(name)
             if param.get("in") == "path":
                 path_params.append(name)
+        if method == "post":
+            properties["inputs"] = {
+                "type": "object",
+                "description": "Operation inputs (see the operations catalog).",
+            }
         name = tool_name_for(path)
         if name in tools:
             raise ConfigurationError(f"duplicate tool name {name}")
@@ -128,7 +144,7 @@ def load_tools(spec: _JSON) -> dict[str, _JSON]:
             "definition": {
                 "name": name,
                 "title": cast(str, operation.get("summary") or name),
-                "description": f"GET {path}. {description}".strip(),
+                "description": f"{method.upper()} {path}. {description}".strip(),
                 "inputSchema": {
                     "type": "object",
                     "properties": properties,
@@ -143,6 +159,7 @@ def load_tools(spec: _JSON) -> dict[str, _JSON]:
                 },
             },
             "path": path,
+            "method": method,
             "path_params": path_params,
             "params": set(properties),
         }
@@ -257,7 +274,10 @@ class TrackerMcpServer:
         if "{" in path:
             return _text_result("missing required path argument", is_error=True)
         try:
-            response = self._http.get(path, params=query)
+            if tool["method"] == "post":
+                response = self._http.post(path, json={"inputs": query.get("inputs") or {}})
+            else:
+                response = self._http.get(path, params=query)
         except httpx.HTTPError as exc:
             return _text_result(
                 f"tracker API unreachable: {type(exc).__name__}",

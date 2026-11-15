@@ -26,6 +26,7 @@ Scenarios:
   * ``drawdown.json``                    — the loss-shaped half alone
   * ``exit-quality.json``                — sell-side quality facts
   * ``after-tax.json``                   — realized 1099-B gains at flat ST/LT rates
+  * ``benchmark-policy.json``            — read-only benchmark policy weights
 
 Regenerate after changing any v1 model:
 
@@ -53,6 +54,8 @@ from portfolio_tracker.models import (
     HoldingSnapshot,
     InvestmentTransaction,
     Item,
+    PolicyState,
+    PolicyWeight,
     Price,
     PriceAdjustmentBasis,
     PriceSource,
@@ -368,11 +371,13 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
     from portfolio_tracker.services.drawdown import compute_drawdown
     from portfolio_tracker.services.exit_quality import compute_exit_quality
     from portfolio_tracker.services.performance import compute_performance_series
+    from portfolio_tracker.services.policy_write import read_policy
     from portfolio_tracker.services.position_alpha import compute_position_alpha
     from portfolio_tracker.services.positions_v1 import build_positions_result, tax_treatment
     from portfolio_tracker.services.v1_accounts import build_accounts_result
     from portfolio_tracker.services.v1_analytics import (
         AfterTaxV1Result,
+        BenchmarkPolicyV1Result,
         BetaV1Result,
         DrawdownV1Result,
         ExitQualityV1Result,
@@ -380,6 +385,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
         PositionPerformanceV1Result,
         RiskV1Result,
         after_tax_meta,
+        benchmark_policy_meta,
         exit_quality_meta,
         performance_meta,
         position_performance_meta,
@@ -530,6 +536,28 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             meta=after_tax_meta(session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT),
             after_tax=_after_tax_result(session, compute_after_tax),
         )
+        session.add_all(
+            [
+                PolicyWeight(ticker="VOO", weight_bps=6000, notes=None, updated_at=_SYNC_AT),
+                PolicyWeight(ticker="QQQ", weight_bps=4000, notes="growth", updated_at=_SYNC_AT),
+                PolicyState(
+                    singleton_id=1,
+                    revision=3,
+                    source="operator",
+                    as_of=_SYNC_AT,
+                    benchmark_status="current",
+                    benchmark_invalidated_at=None,
+                    updated_at=_SYNC_AT,
+                ),
+            ]
+        )
+        session.flush()
+        benchmark_policy = BenchmarkPolicyV1Result(
+            meta=benchmark_policy_meta(
+                session, today=FIXTURE_TODAY, generated_at=FIXTURE_GENERATED_AT
+            ),
+            policy=read_policy(session),
+        )
 
         return {
             "positions.json": positions.model_dump(mode="json"),
@@ -549,6 +577,7 @@ def build_fixture_payloads() -> dict[str, dict[str, Any]]:
             "drawdown.json": drawdown_only.model_dump(mode="json"),
             "exit-quality.json": exit_quality.model_dump(mode="json"),
             "after-tax.json": after_tax.model_dump(mode="json"),
+            "benchmark-policy.json": benchmark_policy.model_dump(mode="json"),
         }
 
     def partial(session: Session) -> dict[str, Any]:

@@ -1578,3 +1578,27 @@ class TaxFormRetirementDistribution(Base):
     distribution_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
     payer: Mapped[str | None] = mapped_column(String(128), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class OperationRun(Base):
+    """One governed operation run: preview digest, idempotency key, and receipt.
+
+    Receipts hold counts, revisions, and file names only, never balances or
+    holdings. See `services/operations.py`.
+    """
+
+    __tablename__ = "operation_runs"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_operation_runs_idempotency_key"),
+        Index("ix_operation_runs_operation_requested_at", "operation", "requested_at"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    receipt_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
