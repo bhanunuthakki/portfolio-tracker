@@ -51,17 +51,123 @@ def _fetch_info(ticker: str) -> Mapping[str, object]:
     return cast("dict[str, object]", info) if isinstance(info, dict) else {}
 
 
+def _classify_fund(info: Mapping[str, object]) -> tuple[str, str | None]:
+    """Classify an ETF or mutual fund from Morningstar/yfinance ``category``.
+
+    Uses fund category evidence rather than ``info["country"]`` (which reflects
+    fund domicile, so a US-domiciled VXUS reports ``United States``). Returns
+    ``("ETF/Fund", None)`` when category evidence is missing or unrecognized.
+    """
+    raw_cat = info.get("category")
+    if not isinstance(raw_cat, str) or not raw_cat.strip():
+        return ("ETF/Fund", None)
+    cat = raw_cat.strip().lower()
+
+    if "money market" in cat:
+        return ("Cash/MMF", "US")
+    if "commodit" in cat or "precious metals" in cat:
+        return ("Commodities", "Global")
+
+    is_global = "world" in cat or "global" in cat
+    is_intl = any(
+        tok in cat
+        for tok in (
+            "foreign",
+            "international",
+            "intl",
+            "emerging",
+            "europe",
+            "pacific",
+            "japan",
+            "china",
+            "latin america",
+            "india",
+            "asia",
+            "eafe",
+            "non-u.s.",
+            "non-us",
+            "miscellaneous region",
+        )
+    )
+    is_us = any(
+        tok in cat
+        for tok in (
+            "domestic",
+            "u.s.",
+            "us ",
+            "s&p 500",
+            "large blend",
+            "large growth",
+            "large value",
+            "mid-cap",
+            "small blend",
+            "small growth",
+            "small value",
+            "us equity",
+        )
+    )
+    region = "Global" if is_global else "International" if is_intl else "US" if is_us else None
+
+    if any(
+        tok in cat
+        for tok in ("allocation", "target-date", "target date", "balanced", "multi-asset")
+    ):
+        return ("Multi-Asset", region or "Global")
+
+    if any(
+        tok in cat
+        for tok in (
+            "bond",
+            "fixed income",
+            "treasury",
+            "government",
+            "municipal",
+            "muni ",
+            "inflation-protected",
+            "tips",
+            "high yield",
+            "bank loan",
+            "ultrashort",
+        )
+    ):
+        return ("Fixed Income", region or "US")
+
+    if region is not None:
+        return ("ETF/Fund", region)
+
+    if any(
+        tok in cat
+        for tok in (
+            "technology",
+            "health",
+            "financial",
+            "communications",
+            "consumer cyclical",
+            "consumer defensive",
+            "industrials",
+            "utilities",
+            "energy",
+            "real estate",
+            "natural resources",
+            "equity",
+        )
+    ):
+        return ("ETF/Fund", "US")
+
+    return ("ETF/Fund", None)
+
+
 def _classification_for(
     asset_type: AssetType, info: Mapping[str, object]
 ) -> tuple[str | None, str | None]:
     """Map (asset type, yfinance info) to a (sector, region) pair.
 
-    Funds and crypto are bucketed without trusting yfinance (a US-domiciled
-    international fund reports country 'United States'). Stocks take their
-    yfinance sector + country-derived region. Everything else gets nothing.
+    Funds derive exposure from Morningstar/yfinance ``category`` (never
+    domicile ``country``). Stocks take their yfinance sector + country-derived
+    region. Crypto stays ``("Crypto", None)``; cash and derivatives get nothing.
     """
     if asset_type in (AssetType.ETF, AssetType.MUTUAL_FUND):
-        return ("ETF/Fund", None)
+        return _classify_fund(info)
     if asset_type is AssetType.CRYPTO:
         return ("Crypto", None)
     if asset_type is AssetType.STOCK:
@@ -73,14 +179,19 @@ def _classification_for(
     return (None, None)
 
 
+def _needs_repair(row: SecurityClassification) -> bool:
+    """Whether an auto row still has unresolved region metadata."""
+    return row.region is None or row.region == "Unknown"
+
+
 def classify_securities(
     session: Session, fetch_info: FetchInfo = _fetch_info, only_missing: bool = False
 ) -> dict[str, int]:
     """Classify every security in the DB. Mutates the session; caller commits.
 
-    `only_missing=True` skips securities that already have any row (the daily
-    path); the default re-fetches `auto` rows so a manual run picks up sector
-    reclassifications. Returns per-outcome counts.
+    `only_missing=True` skips complete rows (the daily path) while repairing
+    auto rows whose `region` is still missing/Unknown. Manual rows are never
+    overwritten. Returns per-outcome counts.
     """
     counts = {"classified": 0, "skipped_manual": 0, "no_data": 0}
     existing = {
@@ -95,7 +206,7 @@ def classify_securities(
             if row.source == "manual":
                 counts["skipped_manual"] += 1
                 continue
-            if only_missing:
+            if only_missing and not _needs_repair(row):
                 continue
 
         asset_type = classify_asset_type(security.type, security.is_cash_equivalent)
@@ -103,12 +214,14 @@ def classify_securities(
             continue
 
         info: Mapping[str, object] = {}
-        if asset_type is AssetType.STOCK:
+        if asset_type in (AssetType.STOCK, AssetType.ETF, AssetType.MUTUAL_FUND):
             ticker = ticker_overrides.get(security.security_id) or security.ticker
             if ticker is None:
-                counts["no_data"] += 1
-                continue
-            info = fetch_info(ticker)
+                if asset_type is AssetType.STOCK:
+                    counts["no_data"] += 1
+                    continue
+            else:
+                info = fetch_info(ticker)
 
         sector, region = _classification_for(asset_type, info)
         if sector is None and region in (None, "Unknown"):
@@ -126,6 +239,8 @@ def classify_securities(
                 )
             )
         else:
+            if only_missing and (row.sector, row.region) == (sector, region):
+                continue
             row.sector = sector
             row.region = region
             row.source = "auto"
