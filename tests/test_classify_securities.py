@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from portfolio_tracker.jobs._helpers import _is_cash_equivalent
 from portfolio_tracker.jobs.classify_securities import (
     _classification_for,
     classify_securities,
 )
 from portfolio_tracker.models import Security, SecurityClassification
+from portfolio_tracker.plaid_client import PlaidSecurity
 from portfolio_tracker.services.positioning import AssetType
 
 
@@ -33,6 +35,80 @@ class TestClassificationMapping:
     def test_fund_is_bucketed_without_fetch(self):
         assert _classification_for(AssetType.ETF, {}) == ("ETF/Fund", None)
         assert _classification_for(AssetType.MUTUAL_FUND, {}) == ("ETF/Fund", None)
+
+    def test_fund_categories_use_exposure_not_domicile_country(self):
+        assert _classification_for(
+            AssetType.ETF, {"category": "Large Blend", "country": "United States"}
+        ) == ("ETF/Fund", "US")
+        # US-domiciled international fund must ignore domicile country="United States".
+        assert _classification_for(
+            AssetType.ETF, {"category": "Foreign Large Blend", "country": "United States"}
+        ) == ("ETF/Fund", "International")
+        assert _classification_for(
+            AssetType.MUTUAL_FUND, {"category": "Global Large-Stock Growth"}
+        ) == ("ETF/Fund", "Global")
+        assert _classification_for(
+            AssetType.ETF, {"category": "Short Government", "country": "United States"}
+        ) == ("Fixed Income", "US")
+        assert _classification_for(
+            AssetType.MUTUAL_FUND, {"category": "Emerging Markets Bond"}
+        ) == ("Fixed Income", "International")
+        assert _classification_for(AssetType.MUTUAL_FUND, {"category": "Target-Date 2050"}) == (
+            "Multi-Asset",
+            "Global",
+        )
+        assert _classification_for(AssetType.ETF, {"category": "Commodities Focused"}) == (
+            "Commodities",
+            "Global",
+        )
+        assert _classification_for(
+            AssetType.MUTUAL_FUND, {"category": "Money Market - Taxable"}
+        ) == ("Cash/MMF", "US")
+        assert _classification_for(
+            AssetType.ETF, {"category": "Unrecognized Exotic Category", "country": "United States"}
+        ) == ("ETF/Fund", None)
+
+
+class TestCashEquivalentRules:
+    def test_mmf_tickers_types_and_sweeps_vs_treasury_etfs(self):
+        assert _is_cash_equivalent(
+            PlaidSecurity(
+                plaid_security_id="1", ticker="VUSXX", type="oef", name="Vanguard Treasury"
+            )
+        )
+        assert _is_cash_equivalent(
+            PlaidSecurity(plaid_security_id="2", ticker="SWGXX", type="oef", name="Schwab Govt")
+        )
+        assert _is_cash_equivalent(
+            PlaidSecurity(
+                plaid_security_id="3", ticker="XMMXX", type="oef", name="Fidelity Money Market"
+            )
+        )
+        assert _is_cash_equivalent(
+            PlaidSecurity(plaid_security_id="4", ticker="", type="oef", name="Brokerage Cash Sweep")
+        )
+        assert _is_cash_equivalent(
+            PlaidSecurity(plaid_security_id="5", ticker="SWEEP", type="money market", name="Cash")
+        )
+        # Fluctuating-NAV Treasury ETF must NOT be marked cash unless flag is explicitly set.
+        assert not _is_cash_equivalent(
+            PlaidSecurity(
+                plaid_security_id="6",
+                ticker="SGOV",
+                type="et",
+                name="iShares 0-3 Month Treasury Bond Money Market Benchmark ETF",
+                is_cash_equivalent=False,
+            )
+        )
+        assert _is_cash_equivalent(
+            PlaidSecurity(
+                plaid_security_id="7",
+                ticker="SGOV",
+                type="et",
+                name="iShares 0-3 Month Treasury Bond ETF",
+                is_cash_equivalent=True,
+            )
+        )
 
     def test_crypto(self):
         assert _classification_for(AssetType.CRYPTO, {}) == ("Crypto", None)
@@ -143,3 +219,50 @@ class TestClassifySecuritiesRun:
         session.commit()
         row = session.get(SecurityClassification, ids["NVDA"])
         assert row.sector == "Stale"  # not re-fetched when only_missing=True
+
+    def test_only_missing_repairs_incomplete_auto_fund_row_but_keeps_manual(self, session):
+        ids = self._seed(session)
+        vxus = Security(
+            plaid_security_id="s-vxus", ticker="VXUS", type="et", is_cash_equivalent=False
+        )
+        session.add(vxus)
+        session.flush()
+        # Incomplete auto row (region=None) for VOO -> gets repaired even under only_missing=True.
+        session.add(
+            SecurityClassification(
+                security_id=ids["VOO"], sector="ETF/Fund", region=None, source="auto"
+            )
+        )
+        # Manual incomplete row must NEVER be touched.
+        session.add(
+            SecurityClassification(
+                security_id=vxus.security_id,
+                sector="Custom",
+                region=None,
+                source="manual",
+                notes="owner pinning",
+            )
+        )
+        session.commit()
+
+        fetch = _fake_fetch(
+            {
+                "VOO": {"category": "Large Blend", "country": "United States"},
+                "NVDA": {"sector": "Technology", "country": "United States"},
+                "NVO": {"sector": "Healthcare", "country": "Denmark"},
+                "VXUS": {"category": "Foreign Large Blend", "country": "United States"},
+            }
+        )
+        counts = classify_securities(session, fetch_info=fetch, only_missing=True)
+        session.commit()
+
+        voo_row = session.get(SecurityClassification, ids["VOO"])
+        assert (voo_row.sector, voo_row.region, voo_row.source) == ("ETF/Fund", "US", "auto")
+        vxus_row = session.get(SecurityClassification, vxus.security_id)
+        assert (vxus_row.sector, vxus_row.region, vxus_row.source, vxus_row.notes) == (
+            "Custom",
+            None,
+            "manual",
+            "owner pinning",
+        )
+        assert counts["skipped_manual"] == 2  # MELI + VXUS

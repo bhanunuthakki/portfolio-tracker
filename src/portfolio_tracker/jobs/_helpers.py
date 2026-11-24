@@ -17,18 +17,53 @@ _KNOWN_MONEY_MARKET_TICKERS: frozenset[str] = frozenset(
         "FDRXX",  # Fidelity Government Cash Reserves
         "SPAXX",  # Fidelity Government Money Market
         "FZFXX",  # Fidelity Treasury Money Market
+        "SPRXX",  # Fidelity Money Market
+        "FCASH",  # Fidelity Brokerage Cash Sweep
+        "FDLXX",  # Fidelity Treasury Only Money Market
+        "FZDXX",  # Fidelity Money Market Premium
+        "FTEXX",  # Fidelity Tax-Exempt Money Market
+        "FMOXX",  # Fidelity Municipal Money Market
         "VMFXX",  # Vanguard Federal Money Market
+        "VUSXX",  # Vanguard Treasury Money Market
+        "VMRXX",  # Vanguard Cash Reserves Federal Money Market
+        "VCTXX",  # Vanguard Municipal Cash Management
         "SWVXX",  # Schwab Value Advantage Money
+        "SNSXX",  # Schwab U.S. Treasury Money
+        "SNVXX",  # Schwab Government Money
+        "SWGXX",  # Schwab Government Money Market
+        "SNOXX",  # Schwab Treasury Obligations Money
+        "TTTXX",  # BlackRock Treasury Trust
+        "FMPXX",  # BlackRock TempCash / Liquidity Money Market
         "CASH",
     }
+)
+
+_CASH_EQUIVALENT_SECURITY_TYPES: frozenset[str] = frozenset(
+    {"cash", "money market", "money_market", "mmf"}
+)
+_MMF_NAME_MARKERS: tuple[str, ...] = (
+    "money market",
+    "cash sweep",
+    "cash reserves",
+    "liquid reserves",
 )
 
 
 def _is_cash_equivalent(plaid_security: PlaidSecurity) -> bool:
     if plaid_security.is_cash_equivalent:
         return True
-    ticker = (plaid_security.ticker or "").upper()
-    return ticker in _KNOWN_MONEY_MARKET_TICKERS
+    ticker = (plaid_security.ticker or "").strip().upper()
+    if ticker in _KNOWN_MONEY_MARKET_TICKERS:
+        return True
+    sec_type = (plaid_security.type or "").strip().lower()
+    if sec_type in _CASH_EQUIVALENT_SECURITY_TYPES:
+        return True
+    # Only treat name-based sweep/money-market phrases as fixed-$1 cash equivalents
+    # when the instrument is untickered sweep cash or a 5-letter `*XX` MMF symbol,
+    # never for fluctuating-NAV ETFs such as SGOV/SHV/BIL.
+    name = (plaid_security.name or "").strip().lower()
+    is_mmf_symbol = len(ticker) == 5 and ticker.endswith("XX")
+    return (ticker == "" or is_mmf_symbol) and any(marker in name for marker in _MMF_NAME_MARKERS)
 
 
 def is_investment_account(plaid_account: PlaidAccount) -> bool:
